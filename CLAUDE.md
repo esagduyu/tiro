@@ -6,7 +6,9 @@ Tiro is a local-first, open-source, model-agnostic reading OS for the AI age. It
 
 Named after Cicero's freedman who preserved and organized his master's works for posterity. *"...without you the oracle was dumb." — Cicero to Tiro, 53 BC*
 
-**Context:** Built solo for the "Built with Opus 4.6: Claude Code Hackathon" (Feb 10–16, 2026). Must be fully open source, built from scratch. See PROJECT_TIRO_SPEC.md for the full build plan.
+**Context:** Built solo for the "Built with Opus 4.6: Claude Code Hackathon" (Feb 10–16, 2026). Must be fully open source, built from scratch. See PROJECT_TIRO_SPEC.md for the full build plan and PRODUCT_ROADMAP.md for the post-hackathon roadmap.
+
+**License:** AGPL-3.0-or-later (relicensed from MIT on 2026-05-28). See "License & dependency policy" in Decisions & Notes for implications.
 
 ## Architecture
 
@@ -165,6 +167,7 @@ Playwright MCP is configured at user scope. Use it to visually verify UI changes
 
 ## Decisions & Notes
 
+- **License & dependency policy**: Project is **AGPL-3.0-or-later** (relicensed from MIT on 2026-05-28 — see commit `0bd140c`). LICENSE file holds the canonical AGPL text; `pyproject.toml` SPDX is `AGPL-3.0-or-later`; PyPI classifier is `License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)`. README has a grandfather clause noting pre-2026-05-28 contributions remain under their original MIT terms. **Implications for adding code**: (1) new dependencies must be AGPL-compatible — permissive licenses (MIT, BSD, Apache-2.0, ISC) and AGPL/GPL/LGPL are fine; SSPL, BUSL, and "non-commercial" licenses are not. Check before adding. (2) Source files do not currently carry per-file copyright headers; if you start adding them, use the standard AGPL header recommended at the bottom of the LICENSE file. (3) Phase 7b (Tiro Cloud server code) inherits the same AGPL license — keep the licensing story uniform across Local/BYO-sync/Cloud. See PRODUCT_ROADMAP.md "Decisions Made" section for full rationale and the dep-compatibility audit action item.
 - **Subagents must clean up**: if a subagent starts uvicorn for testing, it must kill it before finishing
 - **direnv**: user uses direnv for `ANTHROPIC_API_KEY`. Previously Claude Code subprocesses didn't inherit direnv env vars, but this has been fixed — API calls (Haiku extraction, Opus analysis/digest) now work from subagent-started servers.
 - **readability-lxml strips images**: Sites using `<figure>/<picture>` wrappers (Substack, Medium, WordPress) lose all images through readability. Fixed by collecting `<figure>` images with text anchors from the original HTML, then re-injecting them at correct positions in readability's output.
