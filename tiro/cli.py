@@ -362,6 +362,32 @@ def cmd_import_emails(args):
     print(f"\nDone! {processed} imported, {skipped} skipped, {failed} failed")
 
 
+def cmd_set_password(args):
+    """Set or reset the Tiro password."""
+    import getpass
+
+    from tiro import auth
+    from tiro.config import load_config
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"No config file found at {config_path}. Run 'tiro init' first.")
+        sys.exit(1)
+
+    password = getpass.getpass("New password (min 8 chars): ")
+    if len(password) < 8:
+        print("Password must be at least 8 characters.")
+        sys.exit(1)
+    confirm = getpass.getpass("Confirm password: ")
+    if password != confirm:
+        print("Passwords do not match.")
+        sys.exit(1)
+
+    config = load_config(config_path)
+    auth.save_password_hash(config, auth.hash_password(password))
+    print(f"Password saved to {config_path}. Existing sessions stay valid until they expire.")
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -390,6 +416,7 @@ def main():
 
     subparsers.add_parser("setup-email", help="Configure Gmail email integration")
     subparsers.add_parser("check-email", help="Check IMAP inbox for new newsletters")
+    subparsers.add_parser("set-password", help="Set or reset the Tiro password")
 
     args = parser.parse_args()
 
@@ -405,6 +432,8 @@ def main():
         cmd_setup_email(args)
     elif args.command == "check-email":
         cmd_check_email(args)
+    elif args.command == "set-password":
+        cmd_set_password(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -262,3 +262,36 @@ def test_session_survives_app_restart(configured_library):
         c2.cookies.set("tiro_session", token)
         r = c2.get("/api/articles")
         assert r.status_code == 200
+
+
+def test_set_password_cli(tmp_path, monkeypatch):
+    import argparse
+
+    from tiro.cli import cmd_set_password
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("library_path: ./lib\n")
+
+    prompts = iter(["new-password-123", "new-password-123"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(prompts))
+    cmd_set_password(argparse.Namespace(config=str(cfg_file)))
+
+    cfg = load_config(cfg_file)
+    assert cfg.auth_password_hash
+    assert auth.verify_password("new-password-123", cfg.auth_password_hash)
+
+
+def test_set_password_cli_mismatch_aborts(tmp_path, monkeypatch):
+    import argparse
+
+    import pytest as _pytest
+
+    from tiro.cli import cmd_set_password
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("library_path: ./lib\n")
+    prompts = iter(["password-one-123", "password-two-456"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(prompts))
+    with _pytest.raises(SystemExit):
+        cmd_set_password(argparse.Namespace(config=str(cfg_file)))
+    assert load_config(cfg_file).auth_password_hash is None
