@@ -6,12 +6,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from tiro import auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import init_db, migrate_db
 from tiro.decay import recalculate_decay
@@ -178,10 +179,13 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     app.state.config = config
 
-    # CORS — allow local development
+    # CORS — restrict to the app's own origin (credentials require an exact match)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            f"http://localhost:{config.port}",
+            f"http://127.0.0.1:{config.port}",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -205,20 +209,14 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_filters import router as filters_router
 
     app.include_router(auth_router)
-    app.include_router(ingest_router)
-    app.include_router(articles_router)
-    app.include_router(sources_router)
-    app.include_router(digest_router)
-    app.include_router(digest_email_router)
-    app.include_router(search_router)
-    app.include_router(classify_router)
-    app.include_router(decay_router)
-    app.include_router(stats_router)
-    app.include_router(export_router)
-    app.include_router(settings_router)
-    app.include_router(audio_router)
-    app.include_router(graph_router)
-    app.include_router(filters_router)
+    protected = [
+        ingest_router, articles_router, sources_router, digest_router,
+        digest_email_router, search_router, classify_router, decay_router,
+        stats_router, export_router, settings_router, audio_router,
+        graph_router, filters_router,
+    ]
+    for r in protected:
+        app.include_router(r, dependencies=[Depends(auth.require_auth)])
 
     # Static files and templates
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
@@ -236,33 +234,38 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     async def login_page(request: Request):
         return templates.TemplateResponse(request, "login.html")
 
+    @app.exception_handler(auth.NotAuthenticated)
+    async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login", status_code=302)
+
     @app.get("/", response_class=HTMLResponse)
     async def index_redirect():
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/inbox")
 
-    @app.get("/inbox", response_class=HTMLResponse)
+    @app.get("/inbox", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def inbox_page(request: Request):
-        return templates.TemplateResponse("inbox.html", {"request": request})
+        return templates.TemplateResponse(request, "inbox.html")
 
-    @app.get("/digest", response_class=HTMLResponse)
+    @app.get("/digest", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def digest_page(request: Request):
-        return templates.TemplateResponse("digest.html", {"request": request})
+        return templates.TemplateResponse(request, "digest.html")
 
-    @app.get("/articles/{article_id}", response_class=HTMLResponse)
+    @app.get("/articles/{article_id}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def reader(request: Request, article_id: int):
-        return templates.TemplateResponse("reader.html", {"request": request, "article_id": article_id})
+        return templates.TemplateResponse(request, "reader.html", {"article_id": article_id})
 
-    @app.get("/stats", response_class=HTMLResponse)
+    @app.get("/stats", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def stats_page(request: Request):
-        return templates.TemplateResponse("stats.html", {"request": request})
+        return templates.TemplateResponse(request, "stats.html")
 
-    @app.get("/settings", response_class=HTMLResponse)
+    @app.get("/settings", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def settings_page(request: Request):
-        return templates.TemplateResponse("settings.html", {"request": request})
+        return templates.TemplateResponse(request, "settings.html")
 
-    @app.get("/graph", response_class=HTMLResponse)
+    @app.get("/graph", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def graph_page(request: Request):
-        return templates.TemplateResponse("graph.html", {"request": request})
+        return templates.TemplateResponse(request, "graph.html")
 
     return app

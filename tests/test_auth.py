@@ -141,39 +141,7 @@ def test_save_password_hash_failure_leaves_config_intact(tmp_path, monkeypatch):
 from tiro.app import create_app
 from fastapi.testclient import TestClient
 
-TEST_PASSWORD = "test-password-123"
-
-
-@pytest.fixture
-def configured_library(tmp_path, _shared_embeddings):
-    """Library with a password configured (hash precomputed for speed).
-
-    Deliberately does NOT depend on the `initialized_library` fixture: pytest
-    caches fixtures by name per test invocation, so any test requesting both
-    this fixture (indirectly, via auth_client) and the plain `client` fixture
-    would have them collapse onto the same TiroConfig instance — mutating
-    auth_password_hash here would leak into `client` too. Building an
-    independent library in its own tmp_path subdir keeps the two isolated.
-    """
-    from tiro.config import TiroConfig
-    from tiro.database import init_db, migrate_db
-    from tiro.vectorstore import init_vectorstore
-
-    config = TiroConfig(library_path=str(tmp_path / "auth-library"))
-    config.articles_dir.mkdir(parents=True, exist_ok=True)
-    (config.library / "audio").mkdir(parents=True, exist_ok=True)
-    init_db(config.db_path)
-    migrate_db(config.db_path)
-    init_vectorstore(config.chroma_dir, config.default_embedding_model)
-    config.auth_password_hash = auth.hash_password(TEST_PASSWORD)
-    return config
-
-
-@pytest.fixture
-def auth_client(configured_library):
-    app = create_app(configured_library)
-    with TestClient(app) as c:
-        yield c
+from tests.conftest import TEST_PASSWORD
 
 
 def test_healthz_open(auth_client):
@@ -233,3 +201,64 @@ def test_login_page_renders(auth_client):
     r = auth_client.get("/login")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
+
+
+def test_api_requires_auth_when_configured(auth_client):
+    r = auth_client.get("/api/articles")
+    assert r.status_code == 401
+
+
+def test_api_requires_auth_even_when_unconfigured(client):
+    # Fail closed: no password yet -> only setup/status/healthz respond
+    r = client.get("/api/articles")
+    assert r.status_code == 401
+
+
+def test_pages_redirect_to_login(auth_client):
+    r = auth_client.get("/inbox", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
+
+
+def test_authenticated_client_can_use_api(authenticated_client):
+    r = authenticated_client.get("/api/articles")
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+
+
+def test_bearer_token_grants_api_access(configured_library):
+    raw = auth.create_api_token(configured_library.db_path, "test-client")
+    app = create_app(configured_library)
+    with TestClient(app) as c:
+        r = c.get("/api/articles", headers={"Authorization": f"Bearer {raw}"})
+        assert r.status_code == 200
+        r = c.get("/api/articles", headers={"Authorization": "Bearer forged"})
+        assert r.status_code == 401
+
+
+def test_csrf_rejects_cross_origin_cookie_mutation(authenticated_client):
+    r = authenticated_client.post(
+        "/api/decay/recalculate",
+        headers={"Origin": "https://evil.example"},
+    )
+    assert r.status_code == 403
+
+
+def test_csrf_allows_same_origin_mutation(authenticated_client):
+    r = authenticated_client.post(
+        "/api/decay/recalculate",
+        headers={"Origin": "http://testserver"},
+    )
+    assert r.status_code == 200
+
+
+def test_session_survives_app_restart(configured_library):
+    app1 = create_app(configured_library)
+    with TestClient(app1) as c1:
+        c1.post("/api/auth/login", json={"password": TEST_PASSWORD})
+        token = c1.cookies.get("tiro_session")
+    app2 = create_app(configured_library)
+    with TestClient(app2) as c2:
+        c2.cookies.set("tiro_session", token)
+        r = c2.get("/api/articles")
+        assert r.status_code == 200

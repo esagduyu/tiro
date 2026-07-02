@@ -80,3 +80,50 @@ def _isolate_cwd(tmp_path, monkeypatch):
     # real ./config.yaml. Templates/static resolve via package __file__ paths,
     # so chdir is safe. Proper fix (config path on app.state) lands in M5.
     monkeypatch.chdir(tmp_path)
+
+
+TEST_PASSWORD = "test-password-123"
+
+
+@pytest.fixture
+def configured_library(tmp_path, _shared_embeddings):
+    """Library with a password configured (hash precomputed for speed).
+
+    Deliberately does NOT depend on the `initialized_library` fixture: pytest
+    caches fixtures by name per test invocation, so any test requesting both
+    this fixture (indirectly, via auth_client) and the plain `client` fixture
+    would have them collapse onto the same TiroConfig instance — mutating
+    auth_password_hash here would leak into `client` too. Building an
+    independent library in its own tmp_path subdir keeps the two isolated.
+    """
+    from tiro import auth as tiro_auth
+    from tiro.config import TiroConfig
+    from tiro.database import init_db, migrate_db
+    from tiro.vectorstore import init_vectorstore
+
+    config = TiroConfig(library_path=str(tmp_path / "auth-library"))
+    config.articles_dir.mkdir(parents=True, exist_ok=True)
+    (config.library / "audio").mkdir(parents=True, exist_ok=True)
+    init_db(config.db_path)
+    migrate_db(config.db_path)
+    init_vectorstore(config.chroma_dir, config.default_embedding_model)
+    config.auth_password_hash = tiro_auth.hash_password(TEST_PASSWORD)
+    return config
+
+
+@pytest.fixture
+def auth_client(configured_library):
+    """Client against a password-configured app; NOT logged in."""
+    from tiro.app import create_app
+
+    app = create_app(configured_library)
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def authenticated_client(auth_client):
+    """Client with a live session cookie (logged in)."""
+    r = auth_client.post("/api/auth/login", json={"password": TEST_PASSWORD})
+    assert r.status_code == 200
+    return auth_client

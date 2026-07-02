@@ -14,30 +14,35 @@ def test_root_redirects_to_inbox(client):
     assert r.headers["location"] == "/inbox"
 
 
-def test_html_pages_render(client):
+def test_html_pages_redirect_unauthenticated(client):
     for path in ["/inbox", "/digest", "/stats", "/settings", "/graph"]:
-        r = client.get(path)
-        assert r.status_code == 200, f"{path} -> {r.status_code}"
-        assert "text/html" in r.headers["content-type"]
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 302, f"{path} -> {r.status_code}"
+        assert r.headers["location"] == "/login"
 
 
-def test_articles_list_empty_library(client):
-    r = client.get("/api/articles")
+def test_articles_list_empty_library(authenticated_client):
+    r = authenticated_client.get("/api/articles")
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True
     assert body["data"] == []
 
 
-def test_article_detail_404_for_missing(client):
-    r = client.get("/api/articles/999")
+def test_article_detail_404_for_missing(authenticated_client):
+    r = authenticated_client.get("/api/articles/999")
     assert r.status_code == 404
 
 
-def test_filters_endpoint_responds(client):
-    r = client.get("/api/filters")
+def test_filters_endpoint_responds(authenticated_client):
+    r = authenticated_client.get("/api/filters")
     assert r.status_code == 200
     assert r.json()["success"] is True
+
+
+def test_api_401_without_auth(client):
+    for path in ["/api/articles", "/api/filters", "/api/stats?period=week"]:
+        assert client.get(path).status_code == 401, path
 
 
 def test_cwd_is_isolated(tmp_path):

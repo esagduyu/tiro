@@ -12,9 +12,9 @@ from pathlib import Path
 FIXTURE = Path(__file__).parent / "fixtures" / "newsletter.eml"
 
 
-def test_email_ingestion_writes_all_three_stores(client, test_config):
+def test_email_ingestion_writes_all_three_stores(authenticated_client, configured_library):
     raw = FIXTURE.read_bytes()
-    r = client.post(
+    r = authenticated_client.post(
         "/api/ingest/email",
         files={"file": ("newsletter.eml", raw, "message/rfc822")},
     )
@@ -25,7 +25,7 @@ def test_email_ingestion_writes_all_three_stores(client, test_config):
     # SQLite row exists, marked as email ingestion
     from tiro.database import get_connection
 
-    conn = get_connection(test_config.db_path)
+    conn = get_connection(configured_library.db_path)
     try:
         row = conn.execute(
             "SELECT title, ingestion_method, markdown_path FROM articles WHERE id = ?",
@@ -38,7 +38,7 @@ def test_email_ingestion_writes_all_three_stores(client, test_config):
     assert row["ingestion_method"] == "email"
 
     # Markdown file exists under the ISOLATED library
-    md_file = test_config.articles_dir / row["markdown_path"]
+    md_file = configured_library.articles_dir / row["markdown_path"]
     assert md_file.exists()
     assert "local-first" in md_file.read_text().lower()
 
@@ -52,14 +52,14 @@ def test_email_ingestion_writes_all_three_stores(client, test_config):
     assert data["tags"] == []
 
 
-def test_duplicate_email_rejected_with_409(client):
+def test_duplicate_email_rejected_with_409(authenticated_client):
     raw = FIXTURE.read_bytes()
-    first = client.post(
+    first = authenticated_client.post(
         "/api/ingest/email",
         files={"file": ("newsletter.eml", raw, "message/rfc822")},
     )
     assert first.status_code == 200
-    second = client.post(
+    second = authenticated_client.post(
         "/api/ingest/email",
         files={"file": ("newsletter.eml", raw, "message/rfc822")},
     )

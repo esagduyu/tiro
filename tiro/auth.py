@@ -12,6 +12,7 @@ import secrets
 from pathlib import Path
 
 import bcrypt
+from fastapi import HTTPException, Request
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -135,3 +136,49 @@ def save_password_hash(config: TiroConfig, password_hash: str) -> None:
     finally:
         tmp_path.unlink(missing_ok=True)
     config.auth_password_hash = password_hash
+
+
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class NotAuthenticated(Exception):
+    """Raised by page routes; app handler redirects to /login."""
+
+
+def _check_csrf(request: Request) -> None:
+    if request.method not in MUTATING_METHODS:
+        return
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        return  # non-browser client (curl, tests) — cookie theft via browser sends Origin
+    from urllib.parse import urlparse
+
+    origin_host = urlparse(origin).netloc
+    if origin_host != request.headers.get("host", ""):
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
+
+
+def _cookie_authenticated(request: Request) -> bool:
+    config = request.app.state.config
+    token = request.cookies.get(SESSION_COOKIE)
+    return bool(token and validate_session(config.db_path, token))
+
+
+async def require_auth(request: Request) -> None:
+    """Dependency for API routers: bearer token or session cookie."""
+    config = request.app.state.config
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        if validate_api_token(config.db_path, auth_header[7:]):
+            return
+        raise HTTPException(status_code=401, detail="Invalid API token")
+    if _cookie_authenticated(request):
+        _check_csrf(request)
+        return
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+async def require_page_auth(request: Request) -> None:
+    """Dependency for HTML pages: redirect to /login when not signed in."""
+    if not _cookie_authenticated(request):
+        raise NotAuthenticated()
