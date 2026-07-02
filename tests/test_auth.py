@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from tiro.config import TiroConfig, load_config
 
 
@@ -116,3 +118,21 @@ def test_save_password_hash_preserves_comments(tmp_path):
     assert "# where articles live" in text
     assert "auth_password_hash: bcrypt-hash-here" in text
     assert cfg.auth_password_hash == "bcrypt-hash-here"  # in-memory updated
+
+
+def test_save_password_hash_failure_leaves_config_intact(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.yaml"
+    original = "# precious comments\nlibrary_path: \"./tiro-library\"\n"
+    cfg_file.write_text(original)
+    cfg = load_config(cfg_file)
+
+    from ruamel.yaml import YAML
+
+    def boom(self, data, stream):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(YAML, "dump", boom)
+    with pytest.raises(OSError):
+        auth.save_password_hash(cfg, "hash")
+    assert cfg_file.read_text() == original  # untouched
+    assert not cfg_file.with_suffix(".yaml.tmp").exists()  # no litter

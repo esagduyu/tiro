@@ -7,6 +7,7 @@ TTL once more than a day of it has been consumed.
 
 import hashlib
 import logging
+import os
 import secrets
 from pathlib import Path
 
@@ -126,6 +127,11 @@ def save_password_hash(config: TiroConfig, password_hash: str) -> None:
     if data is None:
         data = {}
     data["auth_password_hash"] = password_hash
-    with path.open("w") as f:
-        yaml.dump(data, f)
+    tmp_path = path.with_suffix(".yaml.tmp")
+    try:
+        with tmp_path.open("w") as f:
+            yaml.dump(data, f)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
     config.auth_password_hash = password_hash
