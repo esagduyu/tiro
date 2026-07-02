@@ -43,6 +43,8 @@ Tiro is positioned as a personal reading OS with four deploy modes:
 
 The product promise: original source files remain clean and portable; user-created memory (highlights, notes, ratings, digests, AI outputs) lives in adjacent local files and transparent databases; anything paid makes the system easier to run across devices, not worse to own locally. **A user who never pays Tiro a cent should be able to use every feature.**
 
+**North-star metric: daily-use adoption.** Every phase and feature is justified against one question: does this get more people using Tiro daily? Measured via opt-in telemetry (see Telemetry & Observability cross-cutting track — always opt-in, never default-on) plus public proxies (downloads, GitHub stars, community activity).
+
 ## Product Principles
 
 - **Local-first, cloud-optional** — local use must remain first-class and never feel like a trial.
@@ -553,6 +555,13 @@ This is a Medium-complexity phase, not Large: most of it is a setup wizard plus 
 - Reader: tap-target sizing, swipe-back gesture, thumb-friendly audio controls, persistent mini-player on scroll.
 - Inbox: pull-to-refresh, infinite scroll already exists.
 - Offline article queue: if a save fails (no network), queue locally and retry when online.
+
+**Swipe-triage inbox** (the inbox-zero loop from the product vision):
+- Slack-catch-up-style triage on mobile: swipe right on an inbox card to archive (mark read), swipe left to snooze (read later), with a long-swipe or action sheet exposing rate (dislike/like/love) and VIP.
+- Undo toast after every gesture (5-second window) — triage must feel fast and safe.
+- Triage progress indicator ("14 to zero") with a satisfying inbox-zero end state.
+- Desktop analog already exists (j/k + 1/2/3 keyboard flow); this phase makes the two flows share the same underlying mark-read/snooze semantics. Snooze is new: `articles.snoozed_until` timestamp, snoozed articles hidden from inbox until then.
+- Touch implementation: pointer-events-based swipe with CSS transform feedback, no external gesture library.
 
 **HTTPS guidance**:
 - Tailscale Serve provides HTTPS automatically. Document this as the recommended path.
@@ -1076,6 +1085,7 @@ These run alongside the phased work; each is small enough to absorb into the rel
 - **Opt-in crash reporting** (Sentry or self-hosted equivalent). Off by default; turning it on is a Settings toggle with a clear privacy explanation. **Never** ship telemetry on by default.
 - **Health endpoint** `/healthz` returning version, uptime, store sizes, background task status.
 - **`tiro status`** CLI summarizing the same.
+- **Opt-in feature-usage telemetry** (the adoption instrument): anonymous, feature-level counters only — e.g. `highlights_created`, `digests_generated`, `swipe_triage_used` — never content, URLs, titles, or identifiers. Off by default; asked exactly once during Phase 5 onboarding with a plain-language explanation and a visible payload preview. Locally inspectable (`tiro telemetry show`) before anything is sent. This is how "daily-use adoption" (Product Strategy north-star) gets measured for users who consent; downloads/stars remain the proxy for everyone else.
 
 **External API audit log** (the privacy-transparency feature):
 - Every call to a non-local service logged to `<library>/audit/{date}.jsonl`: timestamp, service (`anthropic`, `openai`, `imap.gmail.com`, `smtp.gmail.com`, `s3.amazonaws.com`, etc.), endpoint, byte counts in/out, token counts where applicable, dollar estimate, request_id, success/failure.
