@@ -175,6 +175,9 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         description="A local-first reading OS for the AI age",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
     app.state.config = config

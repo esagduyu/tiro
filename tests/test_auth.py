@@ -295,3 +295,11 @@ def test_set_password_cli_mismatch_aborts(tmp_path, monkeypatch):
     with _pytest.raises(SystemExit):
         cmd_set_password(argparse.Namespace(config=str(cfg_file)))
     assert load_config(cfg_file).auth_password_hash is None
+
+
+def test_save_password_hash_sets_restrictive_permissions(tmp_path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("library_path: ./lib\n")
+    cfg = load_config(cfg_file)
+    auth.save_password_hash(cfg, "some-hash")
+    assert (cfg_file.stat().st_mode & 0o777) == 0o600

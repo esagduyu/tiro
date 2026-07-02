@@ -45,6 +45,11 @@ def test_api_401_without_auth(client):
         assert client.get(path).status_code == 401, path
 
 
+def test_docs_surface_closed(client):
+    for path in ["/openapi.json", "/docs", "/redoc"]:
+        assert client.get(path).status_code == 404, path
+
+
 def test_cwd_is_isolated(tmp_path):
     from pathlib import Path
 

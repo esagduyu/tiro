@@ -132,6 +132,7 @@ def save_password_hash(config: TiroConfig, password_hash: str) -> None:
     try:
         with tmp_path.open("w") as f:
             yaml.dump(data, f)
+        os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
     finally:
         tmp_path.unlink(missing_ok=True)

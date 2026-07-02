@@ -156,7 +156,7 @@ def cmd_run(args):
             for _ in range(60):
                 time.sleep(0.5)
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:{config.port}/api/filters", timeout=1)
+                    urllib.request.urlopen(f"http://127.0.0.1:{config.port}/healthz", timeout=1)
                     break
                 except Exception:
                     continue
