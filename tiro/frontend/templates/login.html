@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tiro ⁊ Sign in</title>
+  <link rel="stylesheet" href="/static/themes/papyrus.css">
+  <style>
+    body {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0;
+      background: var(--tiro-bg, #FAF6F0);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--tiro-text, #2b2620);
+    }
+    .login-card {
+      width: min(90vw, 360px); padding: 2rem;
+      background: var(--tiro-surface, #fff);
+      border: 1px solid var(--tiro-border, #e5dcc9); border-radius: 12px;
+    }
+    .login-card h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+    .login-card p.sub { margin: 0 0 1.25rem; opacity: 0.7; font-size: 0.9rem; }
+    .login-card input {
+      width: 100%; box-sizing: border-box; padding: 0.6rem 0.75rem;
+      margin-bottom: 0.75rem; border: 1px solid var(--tiro-border, #e5dcc9);
+      border-radius: 8px; font-size: 1rem;
+    }
+    .login-card button {
+      width: 100%; padding: 0.6rem; border: none; border-radius: 8px;
+      background: var(--tiro-accent, #C45B3E); color: #fff;
+      font-size: 1rem; cursor: pointer;
+    }
+    .error { color: #B5334D; font-size: 0.85rem; min-height: 1.2em; margin: 0 0 0.5rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <h1>Tiro ⁊</h1>
+    <p class="sub" id="subtitle">Sign in to your library</p>
+    <p class="error" id="error"></p>
+    <form id="auth-form">
+      <input type="password" id="password" placeholder="Password" autofocus autocomplete="current-password">
+      <input type="password" id="confirm" class="hidden" placeholder="Confirm password" autocomplete="new-password">
+      <button type="submit" id="submit">Sign in</button>
+    </form>
+  </div>
+  <script>
+    let mode = "login";
+    const $ = (id) => document.getElementById(id);
+
+    fetch("/api/auth/status").then(r => r.json()).then(({ data }) => {
+      if (!data.configured) {
+        mode = "setup";
+        $("subtitle").textContent = "Welcome — create a password to protect your library";
+        $("confirm").classList.remove("hidden");
+        $("submit").textContent = "Create password";
+      } else if (data.authenticated) {
+        window.location.href = "/inbox";
+      }
+    });
+
+    $("auth-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("error").textContent = "";
+      const password = $("password").value;
+      if (mode === "setup" && password !== $("confirm").value) {
+        $("error").textContent = "Passwords do not match";
+        return;
+      }
+      const r = await fetch(`/api/auth/${mode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (r.ok) {
+        window.location.href = "/inbox";
+      } else {
+        const body = await r.json().catch(() => ({}));
+        $("error").textContent = body.detail || "Something went wrong";
+      }
+    });
+  </script>
+</body>
+</html>

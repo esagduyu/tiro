@@ -136,3 +136,100 @@ def test_save_password_hash_failure_leaves_config_intact(tmp_path, monkeypatch):
         auth.save_password_hash(cfg, "hash")
     assert cfg_file.read_text() == original  # untouched
     assert not cfg_file.with_suffix(".yaml.tmp").exists()  # no litter
+
+
+from tiro.app import create_app
+from fastapi.testclient import TestClient
+
+TEST_PASSWORD = "test-password-123"
+
+
+@pytest.fixture
+def configured_library(tmp_path, _shared_embeddings):
+    """Library with a password configured (hash precomputed for speed).
+
+    Deliberately does NOT depend on the `initialized_library` fixture: pytest
+    caches fixtures by name per test invocation, so any test requesting both
+    this fixture (indirectly, via auth_client) and the plain `client` fixture
+    would have them collapse onto the same TiroConfig instance — mutating
+    auth_password_hash here would leak into `client` too. Building an
+    independent library in its own tmp_path subdir keeps the two isolated.
+    """
+    from tiro.config import TiroConfig
+    from tiro.database import init_db, migrate_db
+    from tiro.vectorstore import init_vectorstore
+
+    config = TiroConfig(library_path=str(tmp_path / "auth-library"))
+    config.articles_dir.mkdir(parents=True, exist_ok=True)
+    (config.library / "audio").mkdir(parents=True, exist_ok=True)
+    init_db(config.db_path)
+    migrate_db(config.db_path)
+    init_vectorstore(config.chroma_dir, config.default_embedding_model)
+    config.auth_password_hash = auth.hash_password(TEST_PASSWORD)
+    return config
+
+
+@pytest.fixture
+def auth_client(configured_library):
+    app = create_app(configured_library)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_healthz_open(auth_client):
+    r = auth_client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_login_wrong_password_401(auth_client):
+    r = auth_client.post("/api/auth/login", json={"password": "nope"})
+    assert r.status_code == 401
+    assert "tiro_session" not in auth_client.cookies
+
+
+def test_login_sets_session_cookie(auth_client):
+    r = auth_client.post("/api/auth/login", json={"password": TEST_PASSWORD})
+    assert r.status_code == 200
+    assert auth_client.cookies.get("tiro_session")
+
+
+def test_logout_destroys_session(auth_client, configured_library):
+    auth_client.post("/api/auth/login", json={"password": TEST_PASSWORD})
+    token = auth_client.cookies.get("tiro_session")
+    assert auth.validate_session(configured_library.db_path, token)
+    r = auth_client.post("/api/auth/logout")
+    assert r.status_code == 200
+    assert not auth.validate_session(configured_library.db_path, token)
+
+
+def test_status_reports_configured_and_authenticated(auth_client, client):
+    r = auth_client.get("/api/auth/status")
+    assert r.json()["data"] == {"configured": True, "authenticated": False}
+    auth_client.post("/api/auth/login", json={"password": TEST_PASSWORD})
+    r = auth_client.get("/api/auth/status")
+    assert r.json()["data"] == {"configured": True, "authenticated": True}
+    # `client` fixture has NO password configured
+    r = client.get("/api/auth/status")
+    assert r.json()["data"]["configured"] is False
+
+
+def test_setup_only_works_once(client, auth_client):
+    # Unconfigured app: setup allowed, logs you in
+    r = client.post("/api/auth/setup", json={"password": "first-password-8ch"})
+    assert r.status_code == 200
+    assert client.cookies.get("tiro_session")
+    # Configured app: setup refused
+    r = auth_client.post("/api/auth/setup", json={"password": "attacker-password"})
+    assert r.status_code == 403
+
+
+def test_setup_rejects_short_password(client):
+    r = client.post("/api/auth/setup", json={"password": "short"})
+    assert r.status_code == 422
+
+
+def test_login_page_renders(auth_client):
+    r = auth_client.get("/login")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]

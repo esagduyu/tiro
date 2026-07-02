@@ -188,6 +188,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     )
 
     # API routers
+    from tiro.api.routes_auth import router as auth_router
     from tiro.api.routes_articles import router as articles_router
     from tiro.api.routes_digest import router as digest_router
     from tiro.api.routes_ingest import router as ingest_router
@@ -203,6 +204,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_filters import router as filters_router
 
+    app.include_router(auth_router)
     app.include_router(ingest_router)
     app.include_router(articles_router)
     app.include_router(sources_router)
@@ -225,6 +227,14 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     library_themes.mkdir(parents=True, exist_ok=True)
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok", "version": app.version}
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(request: Request):
+        return templates.TemplateResponse(request, "login.html")
 
     @app.get("/", response_class=HTMLResponse)
     async def index_redirect():
