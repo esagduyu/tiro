@@ -107,6 +107,23 @@ CREATE TABLE IF NOT EXISTS audio (
     file_size_bytes INTEGER,
     generated_at TEXT NOT NULL
 );
+
+-- Browser sessions (opaque tokens, stored hashed)
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- API tokens for non-browser clients (extension, MCP, scripts)
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP
+);
 """
 
 

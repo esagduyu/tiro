@@ -1,0 +1,131 @@
+"""Single-user authentication: password hashing, sessions, API tokens.
+
+Sessions and API tokens are opaque random values; only SHA-256 hashes are
+stored. Session cookies slide: validation extends expiry back to the full
+TTL once more than a day of it has been consumed.
+"""
+
+import hashlib
+import logging
+import secrets
+from pathlib import Path
+
+import bcrypt
+
+from tiro.config import TiroConfig
+from tiro.database import get_connection
+
+logger = logging.getLogger(__name__)
+
+SESSION_COOKIE = "tiro_session"
+SESSION_TTL_DAYS = 30
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode(), password_hash.encode())
+    except ValueError:
+        logger.warning("Malformed password hash in config")
+        return False
+
+
+def create_session(db_path: Path) -> str:
+    token = secrets.token_urlsafe(32)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO sessions (token_hash, expires_at) "
+            "VALUES (?, datetime('now', ?))",
+            (_sha256(token), f"+{SESSION_TTL_DAYS} days"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def validate_session(db_path: Path, token: str) -> bool:
+    token_hash = _sha256(token)
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT expires_at > datetime('now') AS valid, "
+            f"       expires_at < datetime('now', '+{SESSION_TTL_DAYS - 1} days') AS stale "
+            "FROM sessions WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if row is None or not row["valid"]:
+            return False
+        # Sliding renewal: only rewrite when >1 day of TTL has been consumed
+        if row["stale"]:
+            conn.execute(
+                "UPDATE sessions SET expires_at = datetime('now', ?), "
+                "last_seen_at = datetime('now') WHERE token_hash = ?",
+                (f"+{SESSION_TTL_DAYS} days", token_hash),
+            )
+            conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def destroy_session(db_path: Path, token: str) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_sha256(token),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_api_token(db_path: Path, name: str) -> str:
+    token = secrets.token_urlsafe(32)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO api_tokens (name, token_hash) VALUES (?, ?)",
+            (name, _sha256(token)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def validate_api_token(db_path: Path, token: str) -> bool:
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?",
+            (_sha256(token),),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def save_password_hash(config: TiroConfig, password_hash: str) -> None:
+    """Persist the hash to config.yaml, preserving comments and key order."""
+    from ruamel.yaml import YAML
+
+    if not config.config_path:
+        raise ValueError("config has no config_path; cannot persist password")
+    path = Path(config.config_path)
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(path.read_text()) if path.exists() else None
+    if data is None:
+        data = {}
+    data["auth_password_hash"] = password_hash
+    with path.open("w") as f:
+        yaml.dump(data, f)
+    config.auth_password_hash = password_hash
