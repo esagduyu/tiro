@@ -38,3 +38,11 @@ def test_filters_endpoint_responds(client):
     r = client.get("/api/filters")
     assert r.status_code == 200
     assert r.json()["success"] is True
+
+
+def test_cwd_is_isolated(tmp_path):
+    from pathlib import Path
+
+    assert Path.cwd() == tmp_path
+    Path("config.yaml").write_text("library_path: ./scratch\n")  # must land in tmp
+    assert (tmp_path / "config.yaml").exists()

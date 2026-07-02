@@ -71,3 +71,12 @@ def client(initialized_library):
     # Context manager runs the lifespan (store init, background tasks, shutdown).
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    # Several routes write CWD-relative Path("config.yaml") (routes_settings.py).
+    # Chdir into the per-test tmp dir so no test can ever touch the developer's
+    # real ./config.yaml. Templates/static resolve via package __file__ paths,
+    # so chdir is safe. Proper fix (config path on app.state) lands in M5.
+    monkeypatch.chdir(tmp_path)
