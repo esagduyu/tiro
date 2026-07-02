@@ -35,6 +35,9 @@ dependencies = [
     "jinja2>=3.1.5",
     "python-multipart>=0.0.20",
     "mcp>=1.25",
+    "bcrypt>=5.0.0",
+    "nh3>=0.3.6",
+    "ruamel-yaml>=0.19.1",
 ]
 
 [project.urls]
@@ -51,3 +54,13 @@ packages = ["tiro"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
