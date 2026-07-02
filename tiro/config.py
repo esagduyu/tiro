@@ -59,6 +59,8 @@ class TiroConfig:
     inbox_page_size: int = 50
     theme_light: str = "papyrus"
     theme_dark: str = "roman-night"
+    auth_password_hash: str | None = None
+    config_path: str | None = None  # set by load_config; never persisted to YAML
 
     @property
     def library(self) -> Path:
@@ -94,6 +96,7 @@ def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
     filtered = {k: v for k, v in data.items() if k in known_fields}
 
     config = TiroConfig(**filtered)
+    config.config_path = str(path)
 
     # Set ANTHROPIC_API_KEY env var from config if not already set
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
