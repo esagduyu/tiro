@@ -56,3 +56,20 @@ def test_cwd_is_isolated(tmp_path):
     assert Path.cwd() == tmp_path
     Path("config.yaml").write_text("library_path: ./scratch\n")  # must land in tmp
     assert (tmp_path / "config.yaml").exists()
+
+
+def test_no_cdn_references_in_templates():
+    from pathlib import Path
+
+    templates = Path("tiro/frontend/templates")
+    # Templates live in the package, not CWD — resolve from the tiro package
+    import tiro
+
+    templates = Path(tiro.__file__).parent / "frontend" / "templates"
+    offenders = []
+    for tpl in templates.glob("*.html"):
+        text = tpl.read_text()
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if ("<script" in line or "<link" in line) and "http" in line and "://" in line:
+                offenders.append(f"{tpl.name}:{line_no}")
+    assert not offenders, f"CDN references remain: {offenders}"
