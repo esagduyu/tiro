@@ -170,12 +170,12 @@ class NotAuthenticated(Exception):
 
 def _check_csrf(request: Request) -> None:
     # Cross-site navigations/fetches must never reach the API with ambient
-    # cookie auth — even GETs (digest ?refresh=true, analysis, export are
-    # side-effectful/expensive).
+    # cookie auth. Digest/analysis generation moved to POST in M4b (GETs are
+    # pure cache reads now), so mutating methods carry the Origin check below;
+    # remaining GET exposure is expensive-but-pure reads (export, search).
     # Modern browsers (Chrome 76+, Firefox 90+, Safari 16.4+) send
-    # Sec-Fetch-Site; older browsers fail open here — residual risk is
-    # cross-site GET cost-burning only (accepted; real fix is GET->POST
-    # conversion of side-effectful routes, planned for M4).
+    # Sec-Fetch-Site; older browsers fail open on the GET path only — residual
+    # risk is cross-site read-cost burning (accepted, single-user local app).
     if request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(status_code=403, detail="Cross-site request rejected")
     if request.method not in MUTATING_METHODS:

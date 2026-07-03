@@ -2,8 +2,6 @@
 
 from datetime import date
 
-import pytest
-
 
 def _seed_digests(config, date_str):
     from tiro.database import get_connection
