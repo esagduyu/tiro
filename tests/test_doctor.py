@@ -276,6 +276,75 @@ def test_fix_refuses_mass_delete_when_articles_dir_missing(initialized_library):
     assert n == 2, "rows must survive a missing articles dir"
 
 
+def test_fix_keeps_vector_drift_visible_during_mass_delete_refusal(initialized_library):
+    """Important review finding: a refused row is not in deleted_ids, so the
+    (d)-class loop used to flip its drifted 'indexed' status to 'pending'
+    even though its markdown is unreachable (that's why the refusal fired).
+    retry_pending_vectors then marked it 'failed', and 'failed' + no vector +
+    present file matches no scan() detection class — the drift became
+    permanently invisible. fix() must leave refused rows' vector_status
+    untouched so the drift stays visible as vector_missing, and the user's
+    mandated re-run (after restoring the dir) heals it."""
+    import shutil
+
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    aid, _ = _make_article(config, "Survivor A")
+    bid, _ = _make_article(config, "Drifted Victim")
+    # Vector drift on bid: status still 'indexed' but the vector is gone.
+    get_collection().delete(ids=[f"article_{bid}"])
+
+    moved = config.library / "articles-moved"
+    shutil.move(str(config.articles_dir), str(moved))
+
+    result = fix(config)
+    assert any("REFUSED" in act for act in result["actions"])
+
+    conn = get_connection(config.db_path)
+    try:
+        status = conn.execute(
+            "SELECT vector_status FROM articles WHERE id = ?", (bid,)
+        ).fetchone()["vector_status"]
+    finally:
+        conn.close()
+    assert status == "indexed", (
+        "refused row's drifted status must stay 'indexed' so the drift "
+        "remains visible to scan() as vector_missing"
+    )
+
+    # Heal: restore the articles dir and re-run. Everything converges clean.
+    shutil.move(str(moved), str(config.articles_dir))
+    fix(config)
+    report = scan(config)
+    assert report["clean"] is True, report
+    assert get_collection().get(ids=[f"article_{bid}"])["ids"] == [f"article_{bid}"]
+
+
+def test_fix_repairs_single_missing_markdown_when_dir_present(initialized_library):
+    """Minor: the total_articles > 1 guard boundary. A single article with a
+    missing markdown file (articles dir itself still present) is ordinary
+    interrupted-delete residue, not mass-delete residue — fix() must repair
+    it normally rather than refuse."""
+    from tiro.doctor import fix
+
+    config = initialized_library
+    aid, md_path = _make_article(config, "Lone Victim")
+    (config.articles_dir / md_path).unlink()
+
+    result = fix(config)
+    assert not any("REFUSED" in act for act in result["actions"]), result["actions"]
+
+    conn = get_connection(config.db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM articles WHERE id = ?", (aid,)
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 0, "the single missing-markdown row must be deleted, not refused"
+
+
 def test_scan_normalizes_absolute_markdown_paths(initialized_library):
     from tiro.doctor import scan
 

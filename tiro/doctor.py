@@ -133,8 +133,10 @@ def fix(config: TiroConfig) -> dict:
         not config.articles_dir.exists()
         or (len(report["missing_markdown"]) == total_articles and total_articles > 1)
     )
-    deleted_ids: set = set()
+    deleted_ids: set[int] = set()
+    refused_ids: set[int] = set()
     if mass_delete and report["missing_markdown"]:
+        refused_ids = {item["id"] for item in report["missing_markdown"]}
         actions.append(
             f"REFUSED: {len(report['missing_markdown'])}/{total_articles} articles have no "
             "markdown file — articles directory missing or moved? Fix library_path "
@@ -155,12 +157,19 @@ def fix(config: TiroConfig) -> dict:
 
     # (d) status drift -> correct the status, then re-embed pending rows.
     #     Rows actually deleted by (b) are excluded (their ids are gone from
-    #     articles); a REFUSED mass-delete leaves deleted_ids empty, so
-    #     surviving rows still get their vector-status drift corrected below.
+    #     articles). Rows REFUSED by the mass-delete guard are also excluded
+    #     from the indexed->pending flip only: their markdown is unreachable
+    #     (that's why the refusal fired), so retry_pending_vectors would
+    #     immediately mark them 'failed', making the drift invisible to a
+    #     future scan() (failed + no vector + present file matches no
+    #     detection class). Leaving them 'indexed' keeps the drift visible as
+    #     vector_missing so the user's mandated re-run (after fixing
+    #     library_path) heals it. The indexed<-unmarked flip stays
+    #     unconditional — it never touches missing-markdown rows.
     conn = get_connection(config.db_path)
     try:
         for aid in report["vector_missing"]:
-            if aid in deleted_ids:
+            if aid in deleted_ids or aid in refused_ids:
                 continue
             conn.execute(
                 "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (aid,)
