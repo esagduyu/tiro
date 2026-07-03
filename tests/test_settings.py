@@ -97,6 +97,17 @@ def test_appearance_settings_accepts_builtin_theme_name(authenticated_client, co
     assert configured_library.theme_dark == "roman-night"
 
 
+def test_appearance_settings_accepts_custom_theme_name(authenticated_client, configured_library):
+    (configured_library.library / "themes").mkdir(parents=True, exist_ok=True)
+    (configured_library.library / "themes" / "custom-x.css").write_text(":root{}")
+
+    r = authenticated_client.post("/api/settings/appearance", json={
+        "theme_light": "custom-x",
+    })
+    assert r.status_code == 200, r.text
+    assert configured_library.theme_light == "custom-x"
+
+
 def test_digest_schedule_persists_to_config_path(authenticated_client, configured_library):
     r = authenticated_client.post("/api/settings/digest-schedule", json={
         "enabled": False, "time": "08:30", "unread_only": True, "timezone_offset": -60,

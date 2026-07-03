@@ -48,7 +48,7 @@ let currentUrl = '';
 let lastNonTokenState = 'ready';
 
 function showState(name) {
-  if (name !== 'token') {
+  if (name !== 'token' && name !== 'saving') {
     lastNonTokenState = name;
   }
   ['stateReady', 'stateSaving', 'stateSuccess', 'stateError', 'stateAlready', 'stateToken'].forEach(function (key) {
