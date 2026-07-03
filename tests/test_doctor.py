@@ -173,6 +173,39 @@ def test_cli_doctor_json(initialized_library, capsys, monkeypatch):
     assert report["clean"] is True
 
 
+def test_cli_doctor_text_shows_vector_failed(initialized_library, capsys, monkeypatch):
+    """Review finding: cmd_doctor's plain-text output iterates a hardcoded
+    key tuple that omitted 'vector_failed'. `tiro doctor` (no --json) on a
+    library with failed-no-vector residue must still surface which/how many
+    articles are in that class, not just exit 1 silently on this class."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    aid, _ = _make_article(initialized_library, "Failed Residue CLI")
+    get_collection().delete(ids=[f"article_{aid}"])
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute("UPDATE articles SET vector_status = 'failed' WHERE id = ?", (aid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["tiro", "--config", str(initialized_library.config_path or "unused"),
+         "doctor"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=initialized_library))
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "vector_failed" in out
+    assert str(aid) in out
+
+
 def test_cli_doctor_fix_json_reflects_post_fix_state(initialized_library, capsys):
     """Review finding 1: `tiro doctor --fix --json` must print the POST-fix
     state (clean, empty issue lists), not the pre-fix scan re-labeled with

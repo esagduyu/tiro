@@ -431,7 +431,7 @@ def cmd_doctor(args):
             for action in report.get("actions", []):
                 print(f"  fixed: {action}")
         for key in ("orphaned_markdown", "missing_markdown", "orphaned_vectors",
-                    "vector_missing", "vector_unmarked",
+                    "vector_missing", "vector_unmarked", "vector_failed",
                     "audio_rows_missing_file", "audio_files_without_row"):
             items = report[key]
             if items:
