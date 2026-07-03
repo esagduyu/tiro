@@ -171,3 +171,55 @@ def test_cli_doctor_json(initialized_library, capsys, monkeypatch):
     out = capsys.readouterr().out
     report = json.loads(out)
     assert report["clean"] is True
+
+
+def test_cli_doctor_fix_json_reflects_post_fix_state(initialized_library, capsys):
+    """Review finding 1: `tiro doctor --fix --json` must print the POST-fix
+    state (clean, empty issue lists), not the pre-fix scan re-labeled with
+    'actions' tacked on. The exit code and the printed JSON must agree."""
+    import json
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    config = initialized_library
+    aid, md_path = _make_article(config, "Fixable Victim")
+    # Plant a single discrepancy: a stray markdown file with no DB row.
+    (config.articles_dir / "stray-orphan.md").write_text("---\ntitle: x\n---\nbody")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=True, json=True,
+                                       _config_override=config))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["clean"] is True, parsed
+    assert parsed["actions"], "actions must still be reported"
+    assert parsed["orphaned_markdown"] == []
+
+
+def test_fix_does_not_clobber_existing_orphaned_file(initialized_library):
+    """Review finding 2: if `.orphaned/<name>` already exists (e.g. from a
+    prior repair run), fix() must not overwrite it via rename() — both the
+    previously preserved file and the newly discovered stray must survive,
+    under distinct names."""
+    from tiro.doctor import fix
+
+    config = initialized_library
+    orphan_dir = config.library / ".orphaned"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = "SENTINEL: previously preserved orphan, must not be destroyed"
+    (orphan_dir / "stray-orphan.md").write_text(sentinel)
+
+    new_content = "---\ntitle: new stray\n---\nbody"
+    (config.articles_dir / "stray-orphan.md").write_text(new_content)
+
+    result = fix(config)
+    assert result["actions"]
+
+    # Original preserved orphan untouched.
+    assert (orphan_dir / "stray-orphan.md").read_text() == sentinel
+    # New stray preserved under a disambiguated name.
+    disambiguated = orphan_dir / "stray-orphan.1.md"
+    assert disambiguated.exists()
+    assert disambiguated.read_text() == new_content

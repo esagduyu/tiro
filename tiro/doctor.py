@@ -106,8 +106,15 @@ def fix(config: TiroConfig) -> dict:
         orphan_dir = config.library / ".orphaned"
         orphan_dir.mkdir(parents=True, exist_ok=True)
         for name in report["orphaned_markdown"]:
-            (config.articles_dir / name).rename(orphan_dir / name)
-            actions.append(f"moved orphaned markdown {name} -> .orphaned/")
+            dest = orphan_dir / name
+            if dest.exists():
+                stem, suffix = dest.stem, dest.suffix
+                n = 1
+                while (orphan_dir / f"{stem}.{n}{suffix}").exists():
+                    n += 1
+                dest = orphan_dir / f"{stem}.{n}{suffix}"
+            (config.articles_dir / name).rename(dest)
+            actions.append(f"moved orphaned markdown {name} -> .orphaned/{dest.name}")
 
     # (b) DB rows whose markdown file is gone -> complete the interrupted delete
     for item in report["missing_markdown"]:
@@ -151,8 +158,9 @@ def fix(config: TiroConfig) -> dict:
     conn = get_connection(config.db_path)
     try:
         for aid in report["audio_rows_missing_file"]:
-            conn.execute("DELETE FROM audio WHERE article_id = ?", (aid,))
-            actions.append(f"deleted audio row for article {aid} (file missing)")
+            cur = conn.execute("DELETE FROM audio WHERE article_id = ?", (aid,))
+            if cur.rowcount:
+                actions.append(f"deleted audio row for article {aid} (file missing)")
         # vacuum + session purge
         cur = conn.execute(
             "DELETE FROM tags WHERE id NOT IN "

@@ -413,7 +413,7 @@ def cmd_doctor(args):
     import json as _json
 
     from tiro.config import load_config
-    from tiro.database import init_db, migrate_db
+    from tiro.database import migrate_db
     from tiro.doctor import fix, scan
     from tiro.vectorstore import get_collection, init_vectorstore
 
@@ -427,7 +427,12 @@ def cmd_doctor(args):
     except RuntimeError:
         init_vectorstore(config.chroma_dir, config.default_embedding_model)
 
-    report = fix(config) if args.fix else scan(config)
+    if args.fix:
+        fix_report = fix(config)
+        post = scan(config)
+        report = {**post, "actions": fix_report["actions"]}
+    else:
+        report = scan(config)
 
     if args.json:
         print(_json.dumps(report, indent=2))
@@ -453,9 +458,6 @@ def cmd_doctor(args):
         else:
             print("Issues found. Run `tiro doctor --fix` (stop the server first).")
 
-    if args.fix:
-        post = scan(config)
-        sys.exit(0 if post["clean"] else 1)
     sys.exit(0 if report["clean"] else 1)
 
 
