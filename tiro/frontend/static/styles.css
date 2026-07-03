@@ -158,6 +158,29 @@ body {
     color: var(--tiro-fg-secondary);
 }
 
+.sidebar-logout-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.5rem;
+    color: var(--tiro-muted);
+    text-decoration: none;
+    border-radius: 6px;
+    transition: background 0.15s, color 0.15s;
+    text-align: left;
+    width: 100%;
+}
+
+.sidebar-logout-btn:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-accent);
+}
+
 /* --- Save button (sidebar) --- */
 
 .sidebar-save-btn {

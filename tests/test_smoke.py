@@ -101,6 +101,12 @@ def test_page_renders_configured_custom_theme(authenticated_client, configured_l
     assert 'data-dark-href="/static/themes/roman-night.css' in r.text
 
 
+def test_inbox_has_logout_affordance(authenticated_client):
+    r = authenticated_client.get("/inbox")
+    assert r.status_code == 200
+    assert 'id="logout-btn"' in r.text
+
+
 def test_mcp_config_env_override(monkeypatch, tmp_path):
     cfg = tmp_path / "elsewhere.yaml"
     cfg.write_text(f'library_path: "{tmp_path / "lib"}"\n')

@@ -262,6 +262,13 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById('mobile-menu-btn')?.addEventListener('click', openSidebar);
     document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
 
+    // Logout
+    document.getElementById('logout-btn')?.addEventListener('click', () => {
+        fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
+            window.location.href = '/login';
+        });
+    });
+
     // Apply stored theme (reinforces the inline script in base.html)
     const mode = localStorage.getItem('tiro-mode') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     applyTheme(mode);
