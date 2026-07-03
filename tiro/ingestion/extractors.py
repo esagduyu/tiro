@@ -6,6 +6,7 @@ import os
 
 import anthropic
 
+from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,9 @@ def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
 
     try:
         client = anthropic.Anthropic()
-        response = client.messages.create(
+        response = audited_anthropic_call(
+            config, client,
+            endpoint="extract_metadata",
             model=config.haiku_model,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],

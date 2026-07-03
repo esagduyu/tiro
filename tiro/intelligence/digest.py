@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 
 import anthropic
 
+from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import daily_digest_prompt
@@ -250,7 +251,9 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
 
     # Call Opus 4.6
     client = anthropic.Anthropic()
-    response = client.messages.create(
+    response = audited_anthropic_call(
+        config, client,
+        endpoint="digest",
         model=config.opus_model,
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],

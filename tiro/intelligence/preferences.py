@@ -6,6 +6,7 @@ import os
 
 import anthropic
 
+from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import learned_preferences_prompt
@@ -169,7 +170,9 @@ def classify_articles(config: TiroConfig) -> list[dict]:
 
     # Call Opus 4.6
     client = anthropic.Anthropic()
-    response = client.messages.create(
+    response = audited_anthropic_call(
+        config, client,
+        endpoint="classify",
         model=config.opus_model,
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],

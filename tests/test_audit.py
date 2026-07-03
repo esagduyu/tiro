@@ -149,3 +149,23 @@ def test_read_audit_entries_skips_corrupt_lines(initialized_library, caplog):
     assert len(entries) == 2
     assert {e["endpoint"] for e in entries} == {"digest", "second"}
     assert any("corrupt audit line" in record.message for record in caplog.records)
+
+
+def test_extract_metadata_is_audited(initialized_library, monkeypatch):
+    """The real call site routes through the wrapper (proven by a fake client)."""
+    import tiro.ingestion.extractors as ex
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class FakeAnthropicModule:
+        @staticmethod
+        def Anthropic():
+            return _FakeClient()
+
+    monkeypatch.setattr(ex, "anthropic", FakeAnthropicModule)
+    # _FakeClient returns _FakeResponse which lacks .content — extract_metadata's
+    # broad except catches the AttributeError and returns defaults; the audit
+    # entry must still exist because the API call itself succeeded.
+    ex.extract_metadata("T", "body", initialized_library)
+    entries = read_audit_entries(initialized_library, service="anthropic")
+    assert entries and entries[-1]["endpoint"] == "extract_metadata"

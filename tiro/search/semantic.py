@@ -212,6 +212,8 @@ def generate_connection_notes(
 
     import anthropic
 
+    from tiro.audit import audited_anthropic_call
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return related_articles
 
@@ -252,7 +254,9 @@ def generate_connection_notes(
 
     try:
         client = anthropic.Anthropic()
-        response = client.messages.create(
+        response = audited_anthropic_call(
+            config, client,
+            endpoint="connection_notes",
             model=config.haiku_model,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],

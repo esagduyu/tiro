@@ -9,6 +9,7 @@ from pathlib import Path
 import anthropic
 import frontmatter
 
+from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import ingenuity_analysis_prompt
@@ -123,7 +124,9 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
     logger.info("Running ingenuity analysis for article %d (%s)", article_id, source_name)
 
     client = anthropic.Anthropic()
-    response = client.messages.create(
+    response = audited_anthropic_call(
+        config, client,
+        endpoint="analysis",
         model=config.opus_model,
         max_tokens=2048,
         messages=[{"role": "user", "content": prompt}],
