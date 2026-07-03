@@ -1,6 +1,5 @@
 """M5: comment-preserving atomic config persistence + settings routes."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -49,3 +48,58 @@ def test_persist_config_creates_missing_file(tmp_path):
     persist_config(cfg, {"theme_light": "papyrus"})
     reloaded = load_config(tmp_path / "new-config.yaml")
     assert reloaded.theme_light == "papyrus"
+
+
+def _cfg_text(configured_library):
+    return Path(configured_library.config_path).read_text()
+
+
+def test_email_settings_persist_to_config_path(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": True, "enable_receive": False,
+        "gmail_address": "u@gmail.com", "app_password": "xxxx yyyy zzzz aaaa",
+    })
+    assert r.status_code == 200, r.text
+    text = _cfg_text(configured_library)
+    assert "u@gmail.com" in text
+    assert configured_library.smtp_user == "u@gmail.com"
+
+
+def test_tts_settings_persist_to_config_path(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/tts", json={
+        "openai_api_key": "sk-test", "tts_voice": "fable", "tts_model": "tts-1",
+    })
+    assert r.status_code == 200, r.text
+    assert "fable" in _cfg_text(configured_library)
+    assert configured_library.tts_voice == "fable"
+
+
+def test_appearance_settings_persist_to_config_path(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/appearance", json={
+        "theme_light": "papyrus", "theme_dark": "roman-night", "inbox_page_size": 25,
+    })
+    assert r.status_code == 200, r.text
+    assert "inbox_page_size: 25" in _cfg_text(configured_library)
+
+
+def test_digest_schedule_persists_to_config_path(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/digest-schedule", json={
+        "enabled": False, "time": "08:30", "unread_only": True, "timezone_offset": -60,
+    })
+    assert r.status_code == 200, r.text
+    assert "08:30" in _cfg_text(configured_library)
+
+
+def test_no_cwd_relative_config_writes_left():
+    import subprocess
+
+    # Anchor to the repo root explicitly: the autouse _isolate_cwd fixture
+    # chdirs the process into a per-test tmp dir, so a bare relative "tiro/"
+    # here would silently resolve to a nonexistent directory and grep would
+    # report no hits regardless of the real source tree.
+    repo_root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["grep", "-rn", 'Path("config.yaml")', "tiro/"],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    assert out.stdout == "", f"CWD-relative config writes remain:\n{out.stdout}"

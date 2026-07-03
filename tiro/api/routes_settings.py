@@ -6,9 +6,10 @@ import os
 import re
 from pathlib import Path
 
-import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from tiro.config import persist_config
 
 logger = logging.getLogger(__name__)
 
@@ -89,30 +90,29 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         raise HTTPException(status_code=400, detail="Select at least one feature (send or receive)")
 
     # Update config.yaml
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        raise HTTPException(status_code=500, detail="config.yaml not found")
-
-    config_data = yaml.safe_load(config_path.read_text()) or {}
+    updates: dict = {}
 
     if body.enable_send:
-        config_data["smtp_host"] = "smtp.gmail.com"
-        config_data["smtp_port"] = 587
-        config_data["smtp_user"] = body.gmail_address
-        config_data["smtp_password"] = body.app_password
-        config_data["smtp_use_tls"] = True
-        config_data["digest_email"] = body.gmail_address
+        updates["smtp_host"] = "smtp.gmail.com"
+        updates["smtp_port"] = 587
+        updates["smtp_user"] = body.gmail_address
+        updates["smtp_password"] = body.app_password
+        updates["smtp_use_tls"] = True
+        updates["digest_email"] = body.gmail_address
 
     if body.enable_receive:
-        config_data["imap_host"] = "imap.gmail.com"
-        config_data["imap_port"] = 993
-        config_data["imap_user"] = body.gmail_address
-        config_data["imap_password"] = body.app_password
-        config_data["imap_label"] = body.imap_label
-        config_data["imap_enabled"] = True
-        config_data["imap_sync_interval"] = body.imap_sync_interval
+        updates["imap_host"] = "imap.gmail.com"
+        updates["imap_port"] = 993
+        updates["imap_user"] = body.gmail_address
+        updates["imap_password"] = body.app_password
+        updates["imap_label"] = body.imap_label
+        updates["imap_enabled"] = True
+        updates["imap_sync_interval"] = body.imap_sync_interval
 
-    config_path.write_text(yaml.dump(config_data, default_flow_style=False))
+    try:
+        persist_config(config, updates)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Update live config
     if body.enable_send:
@@ -174,15 +174,15 @@ async def update_tts_settings(body: TTSSettingsUpdate, request: Request):
     if not body.openai_api_key:
         raise HTTPException(status_code=400, detail="OpenAI API key is required")
 
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        raise HTTPException(status_code=500, detail="config.yaml not found")
-
-    config_data = yaml.safe_load(config_path.read_text()) or {}
-    config_data["openai_api_key"] = body.openai_api_key
-    config_data["tts_voice"] = body.tts_voice
-    config_data["tts_model"] = body.tts_model
-    config_path.write_text(yaml.dump(config_data, default_flow_style=False))
+    updates = {
+        "openai_api_key": body.openai_api_key,
+        "tts_voice": body.tts_voice,
+        "tts_model": body.tts_model,
+    }
+    try:
+        persist_config(config, updates)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Update live config
     config.openai_api_key = body.openai_api_key
@@ -238,16 +238,16 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
 
     config = request.app.state.config
 
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        raise HTTPException(status_code=500, detail="config.yaml not found")
-
-    config_data = yaml.safe_load(config_path.read_text()) or {}
-    config_data["digest_schedule_enabled"] = body.enabled
-    config_data["digest_schedule_time"] = body.time
-    config_data["digest_unread_only"] = body.unread_only
-    config_data["digest_timezone_offset"] = body.timezone_offset
-    config_path.write_text(yaml.dump(config_data, default_flow_style=False))
+    updates = {
+        "digest_schedule_enabled": body.enabled,
+        "digest_schedule_time": body.time,
+        "digest_unread_only": body.unread_only,
+        "digest_timezone_offset": body.timezone_offset,
+    }
+    try:
+        persist_config(config, updates)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Update live config
     config.digest_schedule_enabled = body.enabled
@@ -360,25 +360,24 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
     """Update appearance settings (theme selections, page size)."""
     config = request.app.state.config
 
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        raise HTTPException(status_code=500, detail="config.yaml not found")
-
-    config_data = yaml.safe_load(config_path.read_text()) or {}
+    updates: dict = {}
 
     if body.theme_light is not None:
-        config_data["theme_light"] = body.theme_light
+        updates["theme_light"] = body.theme_light
         config.theme_light = body.theme_light
     if body.theme_dark is not None:
-        config_data["theme_dark"] = body.theme_dark
+        updates["theme_dark"] = body.theme_dark
         config.theme_dark = body.theme_dark
     if body.inbox_page_size is not None:
         if body.inbox_page_size not in (25, 50, 100, 0):
             raise HTTPException(status_code=400, detail="Page size must be 25, 50, or 100 (0 for all)")
-        config_data["inbox_page_size"] = body.inbox_page_size
+        updates["inbox_page_size"] = body.inbox_page_size
         config.inbox_page_size = body.inbox_page_size
 
-    config_path.write_text(yaml.dump(config_data, default_flow_style=False))
+    try:
+        persist_config(config, updates)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     logger.info(
         "Appearance updated: light=%s, dark=%s, page_size=%s",
