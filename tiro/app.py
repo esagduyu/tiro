@@ -182,6 +182,18 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     app.state.config = config
 
+    # CORS — restrict to the app's own origin (credentials require an exact match)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            f"http://localhost:{config.port}",
+            f"http://127.0.0.1:{config.port}",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Host-header validation: DNS rebinding sends a victim's browser to
     # 127.0.0.1 with Host: evil.example, bypassing CORS/CSRF origin checks
     # (which compare against the attacker-controlled Host). Reject unknown
@@ -195,6 +207,10 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         allowed_hosts.add(config.host)
         allowed_hosts.add(f"{config.host}:{config.port}")
 
+    # Registered AFTER CORSMiddleware so it wraps it (Starlette: last-added
+    # middleware is outermost). Host validation must run before CORS —
+    # CORSMiddleware short-circuits OPTIONS preflights without calling the
+    # inner app, which would otherwise bypass this check.
     @app.middleware("http")
     async def _validate_host(request: Request, call_next):
         host = request.headers.get("host", "")
@@ -208,18 +224,6 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
                 content={"success": False, "error": f"Unrecognized Host header: {host!r}"},
             )
         return await call_next(request)
-
-    # CORS — restrict to the app's own origin (credentials require an exact match)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            f"http://localhost:{config.port}",
-            f"http://127.0.0.1:{config.port}",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     # API routers
     from tiro.api.routes_auth import router as auth_router

@@ -353,3 +353,15 @@ def test_route_walk_everything_gated(auth_client, configured_library):
             if r.status_code not in (401, 302, 404):
                 failures.append(f"{method} {probe} -> {r.status_code}")
     assert not failures, f"Unprotected routes: {failures}"
+
+
+def test_preflight_with_bad_host_rejected(auth_client):
+    r = auth_client.options(
+        "/api/articles",
+        headers={
+            "Host": "evil.example:8000",
+            "Origin": "http://evil.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert r.status_code == 400
