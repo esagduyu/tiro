@@ -7,6 +7,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from tiro import __version__
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 
@@ -47,7 +48,7 @@ def export_library(
     # Build the metadata payload
     metadata = {
         "exported_at": datetime.now().isoformat(),
-        "tiro_version": "0.1.0",
+        "tiro_version": __version__,
         "filters": {
             "tag": tag,
             "source_id": source_id,
@@ -272,7 +273,7 @@ reading_time: 10 min
 ```json
 {{
   "exported_at": "ISO 8601 timestamp",
-  "tiro_version": "0.1.0",
+  "tiro_version": "0.2.0",  // illustrative; actual value reflects the exporting Tiro version
   "filters": {{ "tag": null, "source_id": null, "rating_min": null, "date_from": null }},
   "articles": [ {{ "id": 1, "title": "...", "rating": 1, "ai_tier": "must-read", ... }} ],
   "sources": [ {{ "id": 1, "name": "...", "domain": "...", "is_vip": true, ... }} ],

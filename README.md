@@ -46,6 +46,8 @@ uv run tiro init              # creates config, library, prompts for API key
 uv run tiro run               # starts server at localhost:8000, opens browser
 ```
 
+On first launch, Tiro opens `/login` and asks you to set a password (with a confirm field) to protect your library — everything else in the app requires it. Sign in once and you're in.
+
 That's it. Save your first article by pasting a URL into the inbox.
 
 **Seed with demo content:** To quickly populate the library with ~22 articles for a full demo experience:
@@ -69,6 +71,17 @@ Then open `http://<your-ip>:8000` on your phone. The mobile UI has a responsive 
 > **Note:** All `tiro` commands should be run with `uv run tiro` so they execute inside the project's virtual environment.
 
 ---
+
+## Security & your data
+
+Tiro is local-first, but "local" doesn't mean "unprotected" — especially once you turn on `--lan` to read from your phone. Here's what's in place:
+
+- **Password auth.** The first time you run Tiro, `/login` asks you to set a password. It's hashed with bcrypt and stored in `config.yaml`; sessions are cookie-based and slide forward 30 days on each use. Forgot it, or want to rotate it? `uv run tiro set-password` resets it from the command line (existing sessions stay valid until they expire).
+- **API tokens for non-browser clients.** The Chrome extension, the MCP server, and any scripts you write don't use your password — they use a token. Create one with `uv run tiro token create <name>` (e.g. `chrome-extension`, `mcp`); the raw token is printed once, so copy it immediately. Paste it into the extension via its popup gear icon. `uv run tiro token list` / `uv run tiro token revoke <id>` manage existing tokens.
+- **Content sanitization.** HTML from saved pages and emails is sanitized server-side with [nh3](https://github.com/messense/nh3) before it's ever converted to markdown, and everything rendered client-side goes through [DOMPurify](https://github.com/cure53/DOMPurify) on top of marked.js. The entire frontend — markdown renderer, sanitizer, charts, graph — is vendored under `tiro/frontend/static/vendor/`; nothing loads from a CDN, so Tiro works (and stays auditable) fully offline.
+- **`tiro doctor`** reconciles the four stores that make up your library — SQLite, ChromaDB, markdown files, and cached audio — after crashes, manual file edits, or interrupted ingests. Run it with the server stopped: `uv run tiro doctor` reports what's inconsistent, `uv run tiro doctor --fix` repairs it (orphaned markdown is quarantined to `{library}/.orphaned/`, never deleted outright). It deliberately refuses to mass-delete article rows if your `articles/` directory looks like it's been moved or is missing, so a misconfigured path can't be mistaken for "everything was deleted."
+- **External-API audit log.** Every call out to Anthropic (Haiku/Opus), OpenAI TTS, IMAP, or SMTP is recorded as one JSONL line in `{library}/audit/YYYY-MM-DD.jsonl` — endpoint, tokens/characters, duration, success, and a best-effort cost estimate. `uv run tiro audit` shows today's calls; `uv run tiro audit --month 2026-07` rolls a month up into per-service totals and estimated spend.
+- **LAN mode requires a password.** `uv run tiro run --lan` (or `host: 0.0.0.0` in `config.yaml`) refuses to start without a password configured, since it exposes Tiro to your local network. (An explicit `--insecure-no-auth` escape hatch exists for trusted networks only — not recommended.)
 
 ## Features
 
@@ -153,6 +166,14 @@ Storage Layer (all local)
 | `uv run tiro setup-email` | Configure Gmail SMTP + IMAP integration |
 | `uv run tiro check-email` | Check IMAP inbox for new newsletters |
 | `uv run tiro-mcp` | Start the MCP server (for Claude Desktop/Code integration) |
+| `uv run tiro set-password` | Set or reset the Tiro password |
+| `uv run tiro token create <name>` | Create an API token for a non-browser client (shown once) |
+| `uv run tiro token list` | List existing API tokens |
+| `uv run tiro token revoke <id>` | Revoke an API token |
+| `uv run tiro doctor [--fix] [--json]` | Check (and optionally repair) consistency across SQLite, ChromaDB, markdown, and audio |
+| `uv run tiro audit [--date\|--month] [--service] [--json]` | Show the external-API audit log and cost estimates |
+| `uv run tiro status` | Library status and store sizes — works without a running server |
+| `uv run tiro delete <id>` | Delete an article by id from all stores |
 
 ---
 
@@ -184,6 +205,8 @@ A minimal "Save to Tiro" Chrome extension lives in the `extension/` directory.
 
 Tiro includes an MCP (Model Context Protocol) server that exposes your reading library to Claude Desktop and Claude Code.
 
+Once you've set a password (see [Security & your data](#security--your-data)), the MCP server needs two extra env vars: `TIRO_API_TOKEN` — create one with `uv run tiro token create mcp` and paste the raw value in, since the server authenticates like any other non-browser client. `TIRO_CONFIG` — an absolute path to your `config.yaml`, because Claude Desktop and Claude Code spawn the MCP server with an arbitrary working directory, so a relative `./config.yaml` usually resolves to the wrong place.
+
 ### Available Tools
 
 | Tool | Description |
@@ -208,7 +231,9 @@ Add to your project's `.mcp.json` (or `~/.claude/settings.json` under `mcpServer
       "command": "uv",
       "args": ["run", "--directory", "/path/to/project-tiro", "tiro-mcp"],
       "env": {
-        "ANTHROPIC_API_KEY": "sk-..."
+        "ANTHROPIC_API_KEY": "sk-...",
+        "TIRO_API_TOKEN": "<from tiro token create mcp>",
+        "TIRO_CONFIG": "/absolute/path/to/config.yaml"
       }
     }
   }
@@ -228,14 +253,16 @@ Add to your Claude Desktop config file:
       "command": "uv",
       "args": ["run", "--directory", "/path/to/project-tiro", "tiro-mcp"],
       "env": {
-        "ANTHROPIC_API_KEY": "sk-..."
+        "ANTHROPIC_API_KEY": "sk-...",
+        "TIRO_API_TOKEN": "<from tiro token create mcp>",
+        "TIRO_CONFIG": "/absolute/path/to/config.yaml"
       }
     }
   }
 }
 ```
 
-Replace `/path/to/project-tiro` with the actual path to your clone, and add your Anthropic API key.
+Replace `/path/to/project-tiro` with the actual path to your clone, add your Anthropic API key, and fill in `TIRO_API_TOKEN`/`TIRO_CONFIG` as described above.
 
 ---
 
@@ -268,6 +295,7 @@ Also available via the API (`GET /api/export`) and the Export button on the Stat
 | `Enter` | Open selected article |
 | `s` | Toggle VIP on selected article's source |
 | `1` / `2` / `3` | Rate: dislike / like / love |
+| `x` | Delete selected article (with confirmation) |
 | `/` | Focus search bar |
 | `f` | Toggle filter panel |
 | `d` | Go to digest |
@@ -284,6 +312,7 @@ Also available via the API (`GET /api/export`) and the Export button on the Stat
 | `b` / `Esc` | Back to inbox |
 | `s` | Toggle VIP |
 | `1` / `2` / `3` | Rate: dislike / like / love |
+| `x` | Delete current article (with confirmation) |
 | `p` | Play / pause audio |
 | `i` | Toggle analysis panel |
 | `r` | Run / re-run analysis (when panel open) |
@@ -328,6 +357,11 @@ project-tiro/
 │   ├── config.py               # Config loading (dataclass + YAML)
 │   ├── database.py             # SQLite schema and helpers
 │   ├── vectorstore.py          # ChromaDB initialization
+│   ├── auth.py                 # Password auth, sessions, API tokens
+│   ├── sanitize.py             # Server-side HTML sanitization (nh3)
+│   ├── lifecycle.py            # Article delete + ingestion rollback (all four stores)
+│   ├── doctor.py               # Cross-store consistency check + repair
+│   ├── audit.py                # External-API audit log (JSONL) + cost estimates
 │   ├── decay.py                # Content decay system
 │   ├── stats.py                # Reading stats tracking
 │   ├── export.py               # Library export (zip generation)
@@ -343,6 +377,12 @@ project-tiro/
 ├── pyproject.toml              # Package config
 └── tiro-library/               # Default data directory (gitignored)
 ```
+
+---
+
+## Testing
+
+`uv run pytest` runs the Python test suite (`tests/`). A small end-to-end browser spec also lives at `playwright-tests/phase0.spec.js` (Playwright), covering the first-run setup flow, login, saving an article, and deleting it — see `playwright-tests/README.md` for how to run it.
 
 ---
 
