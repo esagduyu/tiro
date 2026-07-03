@@ -59,3 +59,84 @@ def test_migrate_adds_vector_status_to_old_db(tmp_path):
     assert "vector_status" in cols
     assert "ingestion_method" in cols
     assert row["ingestion_method"] == "manual"
+
+
+FIXTURE_EML = None  # set in test below
+
+
+def _ingest_one(client):
+    from pathlib import Path
+
+    eml = (Path(__file__).parent / "fixtures" / "newsletter.eml").read_bytes()
+    r = client.post("/api/ingest/email",
+                    files={"file": ("newsletter.eml", eml, "message/rfc822")})
+    assert r.status_code == 200, r.text
+    return r.json()["data"]["id"]
+
+
+def test_delete_removes_all_stores(authenticated_client, configured_library):
+    from tiro.lifecycle import delete_article
+    from tiro.vectorstore import get_collection
+
+    article_id = _ingest_one(authenticated_client)
+    conn = get_connection(configured_library.db_path)
+    try:
+        md = conn.execute("SELECT markdown_path FROM articles WHERE id = ?",
+                          (article_id,)).fetchone()["markdown_path"]
+    finally:
+        conn.close()
+    md_file = configured_library.articles_dir / md
+    assert md_file.exists()
+    assert get_collection().get(ids=[f"article_{article_id}"])["ids"]
+
+    assert delete_article(configured_library, article_id) is True
+
+    # SQLite: article + junctions gone
+    conn = get_connection(configured_library.db_path)
+    try:
+        assert conn.execute("SELECT 1 FROM articles WHERE id = ?", (article_id,)).fetchone() is None
+        assert conn.execute("SELECT 1 FROM article_tags WHERE article_id = ?", (article_id,)).fetchone() is None
+        assert conn.execute("SELECT 1 FROM article_entities WHERE article_id = ?", (article_id,)).fetchone() is None
+    finally:
+        conn.close()
+    # File gone, vector gone
+    assert not md_file.exists()
+    assert not get_collection().get(ids=[f"article_{article_id}"])["ids"]
+
+
+def test_delete_returns_false_for_missing(configured_library):
+    from tiro.lifecycle import delete_article
+
+    assert delete_article(configured_library, 99999) is False
+
+
+def test_delete_clears_inbound_relations(authenticated_client, configured_library):
+    """Deleting an article removes rows where it is the related_article_id too."""
+    from tiro.lifecycle import delete_article
+
+    a = _ingest_one(authenticated_client)
+    conn = get_connection(configured_library.db_path)
+    try:
+        # Simulate another article relating TO `a`. article_relations.article_id
+        # has a FOREIGN KEY REFERENCES articles(id) and get_connection() runs
+        # with PRAGMA foreign_keys=ON, so the "other" article must be a real
+        # row (a fabricated id like a+1000 raises IntegrityError).
+        other = conn.execute(
+            "INSERT INTO articles (title, slug, markdown_path) VALUES (?, ?, ?)",
+            ("Other Article", f"other-article-{a}", f"other-{a}.md"),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO article_relations (article_id, related_article_id, similarity_score) VALUES (?, ?, ?)",
+            (other, a, 0.9),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    delete_article(configured_library, a)
+    conn = get_connection(configured_library.db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM article_relations WHERE related_article_id = ?", (a,)
+        ).fetchone() is None
+    finally:
+        conn.close()
