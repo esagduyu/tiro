@@ -182,6 +182,33 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     app.state.config = config
 
+    # Host-header validation: DNS rebinding sends a victim's browser to
+    # 127.0.0.1 with Host: evil.example, bypassing CORS/CSRF origin checks
+    # (which compare against the attacker-controlled Host). Reject unknown
+    # hosts outright. "testserver" is Starlette's TestClient default and is
+    # not publicly resolvable.
+    allowed_hosts = {
+        f"localhost:{config.port}", f"127.0.0.1:{config.port}",
+        "localhost", "127.0.0.1", "testserver",
+    }
+    if config.host not in ("127.0.0.1", "0.0.0.0", "localhost"):
+        allowed_hosts.add(config.host)
+        allowed_hosts.add(f"{config.host}:{config.port}")
+
+    @app.middleware("http")
+    async def _validate_host(request: Request, call_next):
+        host = request.headers.get("host", "")
+        lan_ip = getattr(app.state, "lan_ip", None)
+        if host not in allowed_hosts and not (
+            lan_ip and host == f"{lan_ip}:{config.port}"
+        ):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"Unrecognized Host header: {host!r}"},
+            )
+        return await call_next(request)
+
     # CORS — restrict to the app's own origin (credentials require an exact match)
     app.add_middleware(
         CORSMiddleware,
@@ -227,6 +254,8 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     # Serve custom themes from library/themes/ if directory exists
     library_themes = config.library / "themes"
     library_themes.mkdir(parents=True, exist_ok=True)
+    # Open by design: serves user-authored theme CSS only (no user data).
+    # Listed in the Phase 0 allowlist; route-walk test enforces the rest.
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
 

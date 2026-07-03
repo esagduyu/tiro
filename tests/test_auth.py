@@ -303,3 +303,53 @@ def test_save_password_hash_sets_restrictive_permissions(tmp_path):
     cfg = load_config(cfg_file)
     auth.save_password_hash(cfg, "some-hash")
     assert (cfg_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_host_header_validation(auth_client):
+    r = auth_client.get("/healthz", headers={"Host": "evil.example:8000"})
+    assert r.status_code == 400
+    r = auth_client.get("/healthz", headers={"Host": "localhost:8000"})
+    assert r.status_code == 200
+
+
+def test_cross_site_get_rejected_for_cookie_auth(authenticated_client):
+    # Sec-Fetch-Site: cross-site = hostile page navigating/fetching our API
+    r = authenticated_client.get(
+        "/api/digest/today", headers={"Sec-Fetch-Site": "cross-site"}
+    )
+    assert r.status_code == 403
+    # same-origin (the SPA) is untouched
+    r = authenticated_client.get(
+        "/api/articles", headers={"Sec-Fetch-Site": "same-origin"}
+    )
+    assert r.status_code == 200
+
+
+def test_route_walk_everything_gated(auth_client, configured_library):
+    """The allowlist as an executable invariant: every registered route outside
+    it must refuse an unauthenticated request. Protects future routers too."""
+    from tiro.app import create_app
+
+    app = create_app(configured_library)
+    ALLOWED_PATHS = {
+        "/api/auth/login", "/api/auth/setup", "/api/auth/status",
+        "/api/auth/logout",  # idempotent logout, open by design
+        "/healthz", "/login", "/",
+    }
+    ALLOWED_PREFIXES = ("/static", "/library/themes")
+    failures = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        methods = getattr(route, "methods", None) or set()
+        if not path or not methods or path in ALLOWED_PATHS:
+            continue
+        if path.startswith(ALLOWED_PREFIXES):
+            continue
+        probe = path.replace("{article_id}", "1").replace("{token_id}", "1")
+        probe = probe.replace("{digest_type}", "ranked").replace("{target_date}", "2026-01-01")
+        probe = probe.replace("{source_id}", "1").replace("{node_type}", "tag").replace("{node_id}", "1")
+        for method in methods - {"HEAD", "OPTIONS"}:
+            r = auth_client.request(method, probe)
+            if r.status_code not in (401, 302, 404):
+                failures.append(f"{method} {probe} -> {r.status_code}")
+    assert not failures, f"Unprotected routes: {failures}"

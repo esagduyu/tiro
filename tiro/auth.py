@@ -169,11 +169,16 @@ class NotAuthenticated(Exception):
 
 
 def _check_csrf(request: Request) -> None:
+    # Cross-site navigations/fetches must never reach the API with ambient
+    # cookie auth — even GETs (digest ?refresh=true, analysis, export are
+    # side-effectful/expensive). Browsers set Sec-Fetch-Site; curl/tests don't.
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-site request rejected")
     if request.method not in MUTATING_METHODS:
         return
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
-        return  # non-browser client (curl, tests) — cookie theft via browser sends Origin
+        return  # non-browser client (curl, tests) — browsers always send Origin on cross-origin POSTs
     from urllib.parse import urlparse
 
     origin_host = urlparse(origin).netloc

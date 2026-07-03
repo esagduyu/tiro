@@ -113,11 +113,17 @@ def configured_library(tmp_path, _shared_embeddings):
 
 @pytest.fixture
 def auth_client(configured_library):
-    """Client against a password-configured app; NOT logged in."""
+    """Client against a password-configured app; NOT logged in.
+
+    follow_redirects=False: page routes gate via a 302-to-/login redirect
+    (not a 401), so probing with redirects followed would land on the
+    (intentionally open) login page and mask an unprotected route as a
+    false 200. Tests that want the followed response opt in explicitly.
+    """
     from tiro.app import create_app
 
     app = create_app(configured_library)
-    with TestClient(app) as c:
+    with TestClient(app, follow_redirects=False) as c:
         yield c
 
 

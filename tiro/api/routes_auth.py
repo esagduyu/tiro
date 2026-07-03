@@ -68,6 +68,9 @@ async def setup(body: PasswordBody, request: Request):
 
 @router.post("/logout")
 async def logout(request: Request):
+    """Log out. Open by design (no auth dependency): logging out with an
+    expired/absent session is a harmless no-op, and gating it would strand
+    clients holding a dead cookie."""
     config = request.app.state.config
     token = request.cookies.get(auth.SESSION_COOKIE)
     if token:
