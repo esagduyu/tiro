@@ -179,6 +179,15 @@ def _cookie_authenticated(request: Request) -> bool:
     return bool(token and validate_session(config.db_path, token))
 
 
+def is_authenticated(request: Request) -> bool:
+    """Read-only auth check for optional detail (no CSRF, never raises)."""
+    config = request.app.state.config
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return validate_api_token(config.db_path, auth_header[7:])
+    return _cookie_authenticated(request)
+
+
 async def require_auth(request: Request) -> None:
     """Dependency for API routers: bearer token or session cookie."""
     config = request.app.state.config

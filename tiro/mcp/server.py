@@ -527,6 +527,16 @@ def save_email(file_path: str) -> str:
 
 def main():
     """Entry point for the MCP server."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="tiro-mcp",
+        description="Tiro MCP server (stdio transport). Exposes the reading "
+        "library to Claude Desktop/Code. Requires TIRO_API_TOKEN when the "
+        "Tiro instance has a password. Config: ./config.yaml.",
+    )
+    parser.parse_args()  # handles --help/-h and exits before any heavy init
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

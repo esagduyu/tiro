@@ -222,3 +222,19 @@ def test_cli_audit_json(initialized_library, capsys):
                                   _config_override=initialized_library))
     out = json.loads(capsys.readouterr().out)
     assert out["anthropic"]["calls"] == 1
+
+
+def test_audit_date_month_mutually_exclusive(monkeypatch):
+    """--date and --month together should be a clean argparse error, not a
+    silently-ANDed misleading/empty report."""
+    import sys
+
+    from tiro import cli
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["tiro", "audit", "--date", "2026-01-01", "--month", "2026-01"],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 2

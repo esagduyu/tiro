@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from tiro import auth
+from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import init_db, migrate_db
 from tiro.decay import recalculate_decay
@@ -140,6 +141,7 @@ async def _digest_schedule_loop(config: TiroConfig):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database and vectorstore on startup."""
+    app.state.started_at = time.monotonic()
     config: TiroConfig = app.state.config
 
     # Ensure library directories exist
@@ -170,9 +172,9 @@ async def lifespan(app: FastAPI):
     app.state.digest_task = digest_task
 
     # Start vector retry background task if configured
-    vector_retry_task = None
+    app.state.vector_retry_task = None
     if config.vector_retry_interval > 0:
-        vector_retry_task = asyncio.create_task(_vector_retry_loop(config))
+        app.state.vector_retry_task = asyncio.create_task(_vector_retry_loop(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
     logger.info("Tiro is ready — library at %s", config.library)
@@ -186,7 +188,7 @@ async def lifespan(app: FastAPI):
     for task in [
         getattr(app.state, "imap_task", None),
         getattr(app.state, "digest_task", None),
-        vector_retry_task,
+        getattr(app.state, "vector_retry_task", None),
     ]:
         if task and not task.done():
             task.cancel()
@@ -204,7 +206,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="Tiro",
         description="A local-first reading OS for the AI age",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -298,8 +300,44 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
 
     @app.get("/healthz")
-    async def healthz():
-        return {"status": "ok", "version": app.version}
+    async def healthz(request: Request):
+        body = {"status": "ok", "version": app.version}
+        config = app.state.config
+        if config.auth_password_hash and not auth.is_authenticated(request):
+            return body  # open readiness probe: no detail leak
+
+        import time as _time
+
+        from tiro.database import get_connection
+
+        def _dir_bytes(p):
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+
+        conn = get_connection(config.db_path)
+        try:
+            articles = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+        finally:
+            conn.close()
+        audio_dir = config.library / "audio"
+        body["uptime_seconds"] = int(_time.monotonic() - app.state.started_at)
+        body["stores"] = {
+            "articles": articles,
+            "db_bytes": config.db_path.stat().st_size if config.db_path.exists() else 0,
+            "chroma_bytes": _dir_bytes(config.chroma_dir),
+            "audio_files": len(list(audio_dir.glob("*.mp3"))) if audio_dir.exists() else 0,
+            "audio_bytes": _dir_bytes(audio_dir),
+        }
+
+        def _running(name):
+            task = getattr(app.state, name, None)
+            return bool(task and not task.done())
+
+        body["tasks"] = {
+            "imap": _running("imap_task"),
+            "digest": _running("digest_task"),
+            "vector_retry": _running("vector_retry_task"),
+        }
+        return body
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):

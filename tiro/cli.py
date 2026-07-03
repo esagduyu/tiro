@@ -501,6 +501,42 @@ def cmd_audit(args):
         print(f"No audit entries for {day or args.month}.")
 
 
+def cmd_status(args):
+    """Library status without needing a running server."""
+    from tiro import __version__
+    from tiro.config import load_config
+    from tiro.database import get_connection
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    print(f"Tiro {__version__} — library: {config.library}")
+    if not config.db_path.exists():
+        print("No library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+
+    conn = get_connection(config.db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+        by_status = conn.execute(
+            "SELECT vector_status, COUNT(*) AS n FROM articles GROUP BY vector_status"
+        ).fetchall()
+        sessions = conn.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE expires_at > datetime('now')"
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+
+    def _dir_bytes(p):
+        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+
+    print(f"Articles: {n} ({', '.join(f'{r['vector_status']}: {r['n']}' for r in by_status) or 'none'})")
+    print(f"SQLite: {config.db_path.stat().st_size:,} bytes | ChromaDB: {_dir_bytes(config.chroma_dir):,} bytes | "
+          f"Audio: {_dir_bytes(config.library / 'audio'):,} bytes")
+    print(f"Active sessions: {sessions}")
+    print(f"Password: {'set' if config.auth_password_hash else 'NOT SET'} | "
+          f"IMAP sync: {'on' if config.imap_enabled else 'off'} | "
+          f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
+
+
 def cmd_set_password(args):
     """Set or reset the Tiro password."""
     import getpass
@@ -600,9 +636,12 @@ def main():
     doctor_parser.add_argument("--json", action="store_true",
                                help="Machine-readable report")
 
+    subparsers.add_parser("status", help="Show library status and store sizes")
+
     audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
-    audit_parser.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
-    audit_parser.add_argument("--month", help="Month summary (YYYY-MM)")
+    audit_group = audit_parser.add_mutually_exclusive_group()
+    audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
+    audit_group.add_argument("--month", help="Month summary (YYYY-MM)")
     audit_parser.add_argument("--service", help="Filter by service (anthropic/openai_tts/imap/smtp)")
     audit_parser.add_argument("--json", action="store_true")
 
@@ -638,6 +677,8 @@ def main():
         cmd_token(args)
     elif args.command == "audit":
         cmd_audit(args)
+    elif args.command == "status":
+        cmd_status(args)
     else:
         parser.print_help()
         sys.exit(1)
