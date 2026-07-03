@@ -210,13 +210,14 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_audio import router as audio_router
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_filters import router as filters_router
+    from tiro.api.routes_tokens import router as tokens_router
 
     app.include_router(auth_router)
     protected = [
         ingest_router, articles_router, sources_router, digest_router,
         digest_email_router, search_router, classify_router, decay_router,
         stats_router, export_router, settings_router, audio_router,
-        graph_router, filters_router,
+        graph_router, filters_router, tokens_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])

@@ -115,6 +115,28 @@ def validate_api_token(db_path: Path, token: str) -> bool:
         conn.close()
 
 
+def list_api_tokens(db_path: Path) -> list[dict]:
+    """List API tokens (metadata only — hashes never leave this module)."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, created_at, last_used_at FROM api_tokens ORDER BY created_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def revoke_api_token(db_path: Path, token_id: int) -> bool:
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
 def save_password_hash(config: TiroConfig, password_hash: str) -> None:
     """Persist the hash to config.yaml, preserving comments and key order."""
     from ruamel.yaml import YAML
