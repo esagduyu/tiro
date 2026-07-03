@@ -21,10 +21,30 @@ mcp = FastMCP("Tiro Reading Library")
 _config: TiroConfig | None = None
 
 
+def _require_token_gate(config: TiroConfig) -> None:
+    """Single-user gating for the MCP server. When the Tiro instance has a
+    password configured, the MCP process must present a valid API token via
+    the TIRO_API_TOKEN env var (set it in the MCP client's "env" block)."""
+    import os
+
+    if not config.auth_password_hash:
+        return
+    from tiro import auth
+
+    token = os.environ.get("TIRO_API_TOKEN", "")
+    if not token or not auth.validate_api_token(config.db_path, token):
+        raise RuntimeError(
+            "Tiro has a password configured. Set TIRO_API_TOKEN to a valid "
+            "API token (create one with: tiro token create mcp) in your MCP "
+            "client config's env block."
+        )
+
+
 def _get_config() -> TiroConfig:
     global _config
     if _config is None:
         _config = load_config()
+        _require_token_gate(_config)
         # Initialize ChromaDB so get_collection() works
         init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     return _config
@@ -491,6 +511,7 @@ def main():
 
     global _config
     _config = load_config()
+    _require_token_gate(_config)
     init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     logger.info("Tiro MCP server starting (library: %s)", _config.library)
 

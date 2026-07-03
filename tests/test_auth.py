@@ -365,3 +365,44 @@ def test_preflight_with_bad_host_rejected(auth_client):
         },
     )
     assert r.status_code == 400
+
+
+def test_lan_mode_refuses_without_auth(tmp_path, monkeypatch):
+    import argparse
+
+    from tiro.cli import cmd_run
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(f"library_path: {tmp_path / 'lib'}\n")  # no password
+    args = argparse.Namespace(
+        config=str(cfg_file), lan=True, no_browser=True, insecure_no_auth=False
+    )
+    with pytest.raises(SystemExit) as exc:
+        cmd_run(args)
+    assert exc.value.code == 1
+
+
+def test_mcp_gate_requires_valid_token(configured_library, monkeypatch):
+    from tiro.mcp.server import _require_token_gate
+
+    # No env token -> refused
+    monkeypatch.delenv("TIRO_API_TOKEN", raising=False)
+    with pytest.raises(RuntimeError):
+        _require_token_gate(configured_library)
+
+    # Invalid token -> refused
+    monkeypatch.setenv("TIRO_API_TOKEN", "forged")
+    with pytest.raises(RuntimeError):
+        _require_token_gate(configured_library)
+
+    # Valid token -> passes
+    raw = auth.create_api_token(configured_library.db_path, "mcp")
+    monkeypatch.setenv("TIRO_API_TOKEN", raw)
+    _require_token_gate(configured_library)  # no raise
+
+
+def test_mcp_gate_open_when_unconfigured(initialized_library, monkeypatch):
+    from tiro.mcp.server import _require_token_gate
+
+    monkeypatch.delenv("TIRO_API_TOKEN", raising=False)
+    _require_token_gate(initialized_library)  # no password set -> no gate

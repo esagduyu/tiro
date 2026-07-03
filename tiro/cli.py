@@ -121,6 +121,18 @@ def cmd_run(args):
 
     config = load_config(args.config)
 
+    if args.lan and not config.auth_password_hash:
+        if getattr(args, "insecure_no_auth", False):
+            print("=" * 60)
+            print("WARNING: --lan with NO AUTHENTICATION (--insecure-no-auth).")
+            print("Anyone on your network can read and modify your library.")
+            print("=" * 60)
+        else:
+            print("LAN mode requires a password so other devices can't read your library.")
+            print("Set one with:  uv run tiro set-password")
+            print("Or (NOT recommended):  tiro run --lan --insecure-no-auth")
+            sys.exit(1)
+
     # Import app AFTER config is loaded — load_config sets env vars
     # (ANTHROPIC_API_KEY, etc.) that router imports may depend on
     from tiro.app import create_app
@@ -432,6 +444,8 @@ def main():
     run_parser = subparsers.add_parser("run", help="Start the Tiro server")
     run_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     run_parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access (e.g. read on your phone)")
+    run_parser.add_argument("--insecure-no-auth", action="store_true",
+                            help="Allow --lan without a password (dangerous)")
 
     export_parser = subparsers.add_parser("export", help="Export library as a zip bundle")
     export_parser.add_argument("--output", "-o", default="tiro-export.zip", help="Output zip file path")
