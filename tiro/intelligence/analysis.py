@@ -16,6 +16,23 @@ from tiro.intelligence.prompts import ingenuity_analysis_prompt
 logger = logging.getLogger(__name__)
 
 
+def _coerce_score(value, fallback: float = 5.0) -> float:
+    """Coerce an Opus-provided score to a float in [0, 10].
+
+    Opus output is untrusted (prompt injection risk) and has zero schema
+    validation on the way in — a malicious/broken response could hand us a
+    non-numeric or out-of-range "score" that later gets rendered client-side.
+    Falls back to a neutral mid score when the value isn't a usable number.
+    """
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if n != n:  # NaN check without importing math
+        return fallback
+    return max(0.0, min(10.0, n))
+
+
 def get_cached_analysis(config: TiroConfig, article_id: int) -> dict | None:
     """Return cached ingenuity analysis for an article, or None."""
     conn = get_connection(config.db_path)
@@ -109,6 +126,13 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
         cleaned = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
     analysis = json.loads(cleaned)
+
+    # Coerce dimension scores to safe numbers — Opus output has no schema
+    # validation, and a non-numeric score would otherwise propagate straight
+    # into the frontend's innerHTML rendering.
+    for dimension in ("bias", "factual_confidence", "novelty"):
+        if isinstance(analysis.get(dimension), dict) and "score" in analysis[dimension]:
+            analysis[dimension]["score"] = _coerce_score(analysis[dimension]["score"])
 
     # Embed timestamp before caching
     analysis["analyzed_at"] = datetime.now(timezone.utc).isoformat()

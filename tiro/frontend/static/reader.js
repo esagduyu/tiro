@@ -202,7 +202,7 @@ function formatDate(isoStr) {
 function esc(str) {
     const el = document.createElement("span");
     el.textContent = str;
-    return el.innerHTML;
+    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* --- Ingenuity Analysis Panel --- */
@@ -334,6 +334,11 @@ function analysisTimeAgo(isoStr) {
     return `${diffDay} days ago`;
 }
 
+function num(x) {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : "?";
+}
+
 function renderAnalysis(data) {
     const bodyEl = document.getElementById("analysis-body");
 
@@ -366,7 +371,7 @@ function renderAnalysis(data) {
         <details class="analysis-dimension">
             <summary class="dimension-header">
                 <span class="dimension-title">Bias</span>
-                <span class="dimension-score ${scoreColor(biasScore)}">${biasScore}/10</span>
+                <span class="dimension-score ${scoreColor(biasScore)}">${num(biasScore)}/10</span>
             </summary>
             <div class="dimension-content">
                 <div class="dimension-detail">
@@ -380,7 +385,7 @@ function renderAnalysis(data) {
         <details class="analysis-dimension">
             <summary class="dimension-header">
                 <span class="dimension-title">Factual Confidence</span>
-                <span class="dimension-score ${scoreColor(factScore)}">${factScore}/10</span>
+                <span class="dimension-score ${scoreColor(factScore)}">${num(factScore)}/10</span>
             </summary>
             <div class="dimension-content">
                 ${renderList("Well-sourced claims", data.factual_confidence?.well_sourced_claims)}
@@ -392,7 +397,7 @@ function renderAnalysis(data) {
         <details class="analysis-dimension">
             <summary class="dimension-header">
                 <span class="dimension-title">Novelty</span>
-                <span class="dimension-score ${scoreColor(novelScore)}">${novelScore}/10</span>
+                <span class="dimension-score ${scoreColor(novelScore)}">${num(novelScore)}/10</span>
             </summary>
             <div class="dimension-content">
                 <div class="dimension-detail">${esc(data.novelty?.assessment || "")}</div>

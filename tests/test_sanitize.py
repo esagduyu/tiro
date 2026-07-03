@@ -1,5 +1,6 @@
 """Server-side sanitization: HTML at ingestion, markdown for AI output."""
 
+from tiro.intelligence.analysis import _coerce_score
 from tiro.sanitize import sanitize_html, sanitize_markdown
 
 
@@ -69,3 +70,20 @@ def test_ingested_email_is_sanitized(authenticated_client, configured_library):
     assert "onerror" not in saved
     assert "javascript:" not in saved
     assert "Legitimate paragraph content" in saved
+
+
+def test_coerce_score_numeric_passthrough():
+    assert _coerce_score("5") == 5.0
+    assert _coerce_score(7) == 7.0
+    assert _coerce_score(3.5) == 3.5
+
+
+def test_coerce_score_non_numeric_falls_back():
+    assert _coerce_score("<img src=x onerror=alert(1)>") == 5.0
+    assert _coerce_score(None) == 5.0
+    assert _coerce_score(float("nan")) == 5.0
+
+
+def test_coerce_score_out_of_range_is_clamped():
+    assert _coerce_score(11) == 10.0
+    assert _coerce_score(-3) == 0.0

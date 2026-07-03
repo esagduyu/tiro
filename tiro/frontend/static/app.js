@@ -976,7 +976,7 @@ function formatDate(isoStr) {
 function esc(str) {
     const el = document.createElement("span");
     el.textContent = str;
-    return el.innerHTML;
+    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* ---- Sort ---- */
