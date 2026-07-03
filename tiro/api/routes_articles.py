@@ -367,26 +367,20 @@ async def delete_article_route(article_id: int, request: Request):
 
 
 @router.get("/{article_id}/analysis")
-async def get_analysis(
-    article_id: int,
-    request: Request,
-    refresh: bool = False,
-    cache_only: bool = False,
-):
-    """Get or trigger ingenuity/trust analysis for an article."""
+async def get_analysis(article_id: int, request: Request):
+    """Read cached analysis. Pure read — data is null when nothing is cached;
+    running Opus is POST /api/articles/{id}/analysis (M4b)."""
+    config = request.app.state.config
+    cached = get_cached_analysis(config, article_id)
+    return {"success": True, "data": cached}
+
+
+@router.post("/{article_id}/analysis")
+async def run_analysis(article_id: int, request: Request):
+    """Run (or re-run) ingenuity/trust analysis with Opus."""
     config = request.app.state.config
 
-    # Return cached unless refresh requested
-    if not refresh:
-        cached = get_cached_analysis(config, article_id)
-        if cached:
-            return {"success": True, "data": cached}
-
-    # If cache_only, don't trigger a new analysis
-    if cache_only:
-        return {"success": True, "data": None}
-
-    # Run Opus analysis (blocking call wrapped in thread)
+    # Blocking Opus call wrapped in thread — can take up to a minute
     try:
         analysis = await asyncio.to_thread(analyze_article, config, article_id)
         return {"success": True, "data": analysis}
