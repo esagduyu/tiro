@@ -430,14 +430,19 @@
         // IMAP status
         html += '<div class="status-card">';
         html += '<div class="status-card-header">';
-        html += '<span class="status-indicator ' + (data.imap_configured ? 'status-ok' : 'status-off') + '"></span>';
+        var imapActive = data.imap_configured && data.imap_enabled;
+        html += '<span class="status-indicator ' + (imapActive ? 'status-ok' : 'status-off') + '"></span>';
         html += '<strong>Receive Newsletters</strong>';
         html += '</div>';
         if (data.imap_configured) {
             html += '<div class="status-detail">' + escapeHtml(data.imap_user) + '</div>';
-            html += '<div class="status-detail muted">Label: ' + escapeHtml(data.imap_label) + '</div>';
-            var syncText = data.imap_sync_interval > 0 ? 'Auto-sync every ' + data.imap_sync_interval + ' min' : 'Manual only';
-            html += '<div class="status-detail muted">' + syncText + '</div>';
+            if (imapActive) {
+                html += '<div class="status-detail muted">Label: ' + escapeHtml(data.imap_label) + '</div>';
+                var syncText = data.imap_sync_interval > 0 ? 'Auto-sync every ' + data.imap_sync_interval + ' min' : 'Manual only';
+                html += '<div class="status-detail muted">' + syncText + '</div>';
+            } else {
+                html += '<div class="status-detail muted">Disabled</div>';
+            }
         } else {
             html += '<div class="status-detail muted">Not configured</div>';
         }
@@ -532,7 +537,7 @@
         var prefillLabel = (emailData && emailData.imap_label) || 'tiro';
         var prefillInterval = (emailData && emailData.imap_sync_interval) || 15;
         var smtpChecked = emailData ? emailData.smtp_configured : true;
-        var imapChecked = emailData ? emailData.imap_configured : true;
+        var imapChecked = emailData ? (emailData.imap_configured && emailData.imap_enabled) : true;
 
         var overlay = document.createElement('div');
         overlay.id = 'settings-modal-overlay';

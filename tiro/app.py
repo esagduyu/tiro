@@ -178,8 +178,16 @@ async def lifespan(app: FastAPI):
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
-    # Cancel background tasks on shutdown
-    for task in [getattr(app.state, "imap_task", None), digest_task, vector_retry_task]:
+    # Cancel background tasks on shutdown. Read digest_task/imap_task off
+    # app.state (not the local variables from startup) — POST
+    # /api/settings/digest-schedule and /api/settings/email can replace
+    # app.state.{digest,imap}_task at runtime; using the stale local would
+    # cancel a dead task object and leak the live one.
+    for task in [
+        getattr(app.state, "imap_task", None),
+        getattr(app.state, "digest_task", None),
+        vector_retry_task,
+    ]:
         if task and not task.done():
             task.cancel()
             try:

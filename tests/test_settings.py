@@ -109,6 +109,38 @@ def test_email_settings_restart_imap_task(authenticated_client, configured_libra
     })
     assert r.status_code == 200, r.text
     assert app.state.imap_task is None
+    assert "imap_enabled: false" in _cfg_text(configured_library)
+
+
+def test_email_settings_get_distinguishes_configured_from_enabled(authenticated_client, configured_library):
+    """GET /api/settings/email must report imap_enabled separately from
+    imap_configured (credential presence) so the UI can tell "receive is
+    configured but disabled" apart from "receive is on"."""
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": False, "enable_receive": True,
+        "gmail_address": "u@gmail.com", "app_password": "xxxx yyyy zzzz aaaa",
+        "imap_label": "tiro", "imap_sync_interval": 15,
+    })
+    assert r.status_code == 200, r.text
+
+    r = authenticated_client.get("/api/settings/email")
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["imap_configured"] is True
+    assert data["imap_enabled"] is True
+
+    # Disable receive while keeping credentials (the "disable round-trip" case)
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": False, "enable_receive": False,
+        "gmail_address": "u@gmail.com", "app_password": "xxxx yyyy zzzz aaaa",
+    })
+    assert r.status_code == 200, r.text
+
+    r = authenticated_client.get("/api/settings/email")
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["imap_configured"] is True  # creds kept
+    assert data["imap_enabled"] is False  # but disabled
 
 
 def test_no_cwd_relative_config_writes_left():
