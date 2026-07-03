@@ -325,9 +325,7 @@ function setupAnalysis(articleId) {
         } else {
             // Check for cached analysis without triggering a new one
             try {
-                const res = await fetch(
-                    `/api/articles/${articleId}/analysis?cache_only=true`
-                );
+                const res = await fetch(`/api/articles/${articleId}/analysis`);
                 const json = await res.json();
                 if (json.success && json.data) {
                     analysisResult = json.data;
@@ -343,11 +341,11 @@ function setupAnalysis(articleId) {
     });
 
     runBtn.addEventListener("click", () => {
-        fetchAnalysis(articleId, false);
+        fetchAnalysis(articleId);
     });
 
     retryBtn.addEventListener("click", () => {
-        fetchAnalysis(articleId, true);
+        fetchAnalysis(articleId);
     });
 }
 
@@ -365,7 +363,7 @@ function showAnalysisBody() {
     document.getElementById("analysis-body").style.display = "block";
 }
 
-async function fetchAnalysis(articleId, refresh) {
+async function fetchAnalysis(articleId) {
     const introEl = document.getElementById("analysis-intro");
     const loadingEl = document.getElementById("analysis-loading");
     const errorEl = document.getElementById("analysis-error");
@@ -377,8 +375,9 @@ async function fetchAnalysis(articleId, refresh) {
     bodyEl.style.display = "none";
 
     try {
-        const url = `/api/articles/${articleId}/analysis${refresh ? "?refresh=true" : ""}`;
-        const res = await fetch(url);
+        const res = await fetch(`/api/articles/${articleId}/analysis`, {
+            method: "POST",
+        });
         const json = await res.json();
 
         if (!res.ok || !json.success) {
@@ -495,9 +494,13 @@ function renderAnalysis(data) {
         </details>
 
         <div class="analysis-actions">
-            <button onclick="fetchAnalysis(${document.getElementById('reader').dataset.articleId}, true)" class="analysis-refresh-btn">Re-analyze</button>
+            <button class="analysis-refresh-btn">Re-analyze</button>
         </div>
     `;
+
+    bodyEl.querySelector(".analysis-refresh-btn").addEventListener("click", () => {
+        fetchAnalysis(document.getElementById("reader").dataset.articleId);
+    });
 }
 
 /* --- Related articles --- */
@@ -695,7 +698,7 @@ function readerRunAnalysis(articleId) {
     if (runBtn && runBtn.offsetParent !== null) {
         runBtn.click();
     } else {
-        fetchAnalysis(articleId, true);
+        fetchAnalysis(articleId);
     }
 }
 

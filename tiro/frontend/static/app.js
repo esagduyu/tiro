@@ -379,8 +379,12 @@ async function loadDigest(refresh) {
     if (refreshBtn) refreshBtn.disabled = true;
 
     try {
-        const url = refresh ? "/api/digest/today?refresh=true" : "/api/digest/today";
-        const res = await fetch(url);
+        // GET is a pure cache read; generation is POST (M4b). A 404 means
+        // no digest exists yet — generate one, preserving first-visit UX.
+        let res = refresh ? null : await fetch("/api/digest/today");
+        if (!res || res.status === 404) {
+            res = await fetch("/api/digest/today", { method: "POST" });
+        }
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
