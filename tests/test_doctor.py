@@ -253,3 +253,41 @@ def test_fix_surfaces_reembed_failures(initialized_library, monkeypatch):
     result = fix(initialized_library)
     assert result["reembed_failures"] >= 1
     assert any("still pending" in a for a in result["actions"])
+
+
+def test_fix_refuses_mass_delete_when_articles_dir_missing(initialized_library):
+    import shutil
+
+    from tiro.doctor import fix
+
+    a, _ = _make_article(initialized_library, "Survivor A")
+    b, _ = _make_article(initialized_library, "Survivor B")
+    moved = initialized_library.library / "articles-moved"
+    shutil.move(str(initialized_library.articles_dir), str(moved))
+
+    result = fix(initialized_library)
+    assert any("REFUSED" in act for act in result["actions"])
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 2, "rows must survive a missing articles dir"
+
+
+def test_scan_normalizes_absolute_markdown_paths(initialized_library):
+    from tiro.doctor import scan
+
+    aid, md_name = _make_article(initialized_library, "Legacy Abs Path")
+    abs_path = str(initialized_library.articles_dir / md_name)
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute("UPDATE articles SET markdown_path = ? WHERE id = ?", (abs_path, aid))
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = scan(initialized_library)
+    assert not any(r["id"] == aid for r in report["missing_markdown"])
+    assert md_name not in report["orphaned_markdown"]

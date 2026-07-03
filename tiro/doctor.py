@@ -9,6 +9,7 @@ server's writes can produce false positives.
 """
 
 import logging
+from pathlib import Path
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -39,14 +40,16 @@ def scan(config: TiroConfig) -> dict:
     finally:
         conn.close()
 
-    known_files = {row["markdown_path"] for row in rows}
+    # Compare basenames, not raw values: a legacy row may store an absolute
+    # markdown_path (M-1) which would never match the on-disk filename set.
+    known_files = {Path(row["markdown_path"]).name for row in rows}
     disk_files = {p.name for p in config.articles_dir.glob("*.md")}
 
     orphaned_markdown = sorted(disk_files - known_files)
     missing_markdown = [
         {"id": row["id"], "title": row["title"], "markdown_path": row["markdown_path"]}
         for row in rows
-        if not (config.articles_dir / row["markdown_path"]).exists()
+        if not (config.articles_dir / Path(row["markdown_path"]).name).exists()
     ]
 
     collection = get_collection()
@@ -74,6 +77,7 @@ def scan(config: TiroConfig) -> dict:
     audio_files_without_row = sorted(audio_disk - audio_known)
 
     report = {
+        "total_articles": len(rows),
         "orphaned_markdown": orphaned_markdown,
         "missing_markdown": missing_markdown,
         "orphaned_vectors": orphaned_vectors,
@@ -119,12 +123,30 @@ def fix(config: TiroConfig) -> dict:
             (config.articles_dir / name).rename(dest)
             actions.append(f"moved orphaned markdown {name} -> .orphaned/{dest.name}")
 
-    # (b) DB rows whose markdown file is gone -> complete the interrupted delete
-    for item in report["missing_markdown"]:
-        delete_article(config, item["id"])
+    # (b) DB rows whose markdown file is gone -> complete the interrupted delete.
+    # Guard against a moved/unmounted articles dir masquerading as mass delete
+    # residue (interim review I-1): refuse when the articles dir itself is
+    # absent, or when EVERY row is missing_markdown (more than one row) —
+    # per-article delete-crash residue should never cover the whole library.
+    total_articles = report["total_articles"]
+    mass_delete = (
+        not config.articles_dir.exists()
+        or (len(report["missing_markdown"]) == total_articles and total_articles > 1)
+    )
+    deleted_ids: set = set()
+    if mass_delete and report["missing_markdown"]:
         actions.append(
-            f"deleted article {item['id']} ({item['title']!r}): markdown file missing"
+            f"REFUSED: {len(report['missing_markdown'])}/{total_articles} articles have no "
+            "markdown file — articles directory missing or moved? Fix library_path "
+            "(or delete rows individually with tiro delete) and re-run."
         )
+    else:
+        for item in report["missing_markdown"]:
+            delete_article(config, item["id"])
+            deleted_ids.add(item["id"])
+            actions.append(
+                f"deleted article {item['id']} ({item['title']!r}): markdown file missing"
+            )
 
     # (c) vectors with no DB row -> delete from ChromaDB
     if report["orphaned_vectors"]:
@@ -132,8 +154,9 @@ def fix(config: TiroConfig) -> dict:
         actions.append(f"deleted {len(report['orphaned_vectors'])} orphaned vector(s)")
 
     # (d) status drift -> correct the status, then re-embed pending rows.
-    #     Rows deleted by (b) are excluded (their ids are gone from articles).
-    deleted_ids = {item["id"] for item in report["missing_markdown"]}
+    #     Rows actually deleted by (b) are excluded (their ids are gone from
+    #     articles); a REFUSED mass-delete leaves deleted_ids empty, so
+    #     surviving rows still get their vector-status drift corrected below.
     conn = get_connection(config.db_path)
     try:
         for aid in report["vector_missing"]:
