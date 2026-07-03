@@ -2,9 +2,18 @@
 
 delete_article() is best-effort per store so it doubles as ingestion
 rollback — a missing file or vector is not an error. SQLite's articles-row
-deletion is the authoritative "did it exist" signal. Files/vectors are
-removed before SQLite rows so a mid-delete crash leaves recoverable file
-orphans (tiro doctor, M5), never dangling DB rows pointing at nothing.
+deletion is the authoritative "did it exist" signal.
+
+Two residual-orphan classes are possible and both are tolerated by design:
+- Ingestion crashes (process killed, not a caught exception) can leave a
+  markdown FILE with no DB row referencing it, since the file is written
+  before the row is inserted.
+- Delete crashes: vectors/files are removed before the SQLite row (so a
+  mid-delete crash after that point leaves a DB ROW pointing at an
+  already-deleted file/vector, not the reverse).
+Either way the reader degrades gracefully (missing file/vector is handled,
+not fatal) and re-running delete_article() on the same id is idempotent.
+Reconciling both classes is `tiro doctor`'s job (M5), not this module's.
 """
 
 import logging

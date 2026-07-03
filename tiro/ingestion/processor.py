@@ -141,28 +141,35 @@ def process_article(
         logger.info("Saved markdown to %s", md_path)
 
         # --- Insert into SQLite ---
-        cursor = conn.execute(
-            """INSERT INTO articles
-               (source_id, title, author, url, slug, markdown_path,
-                word_count, reading_time_min, published_at, ingested_at,
-                ingestion_method)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                source_id,
-                title,
-                author,
-                url or "",
-                slug,
-                md_filename,
-                word_count,
-                reading_time_min,
-                pub_date.isoformat() if published_at else None,
-                now.isoformat(),
-                ingestion_method,
-            ),
-        )
-        article_id = cursor.lastrowid
-        conn.commit()
+        # The markdown file above already exists on disk but no DB row
+        # references it yet. If the INSERT (or its commit) raises, unlink
+        # the file so it doesn't become an orphan, then re-raise.
+        try:
+            cursor = conn.execute(
+                """INSERT INTO articles
+                   (source_id, title, author, url, slug, markdown_path,
+                    word_count, reading_time_min, published_at, ingested_at,
+                    ingestion_method)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source_id,
+                    title,
+                    author,
+                    url or "",
+                    slug,
+                    md_filename,
+                    word_count,
+                    reading_time_min,
+                    pub_date.isoformat() if published_at else None,
+                    now.isoformat(),
+                    ingestion_method,
+                ),
+            )
+            article_id = cursor.lastrowid
+            conn.commit()
+        except Exception:
+            md_path.unlink(missing_ok=True)
+            raise
         logger.info("Inserted article %d into SQLite", article_id)
 
         # --- Update reading stats ---
@@ -223,7 +230,7 @@ def process_article(
             # --- Store in ChromaDB (non-fatal: retry loop indexes failures) ---
             try:
                 collection = get_collection()
-                collection.add(
+                collection.upsert(
                     ids=[f"article_{article_id}"],
                     documents=[content_md],
                     metadatas=[
@@ -266,7 +273,13 @@ def process_article(
             conn.close()
             from tiro.lifecycle import delete_article
 
-            delete_article(config, article_id)
+            try:
+                delete_article(config, article_id)
+            except Exception as rollback_err:
+                logger.error(
+                    "Rollback failed for article %d — orphan row/file may remain: %s",
+                    article_id, rollback_err,
+                )
             raise
 
         return {

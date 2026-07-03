@@ -64,21 +64,54 @@ def retry_pending_vectors(config) -> int:
     for row in rows:
         md = config.articles_dir / row["markdown_path"]
         if not md.exists():
+            # Markdown file is gone (e.g. deleted mid-retry, or an earlier
+            # orphan). Mark it failed so it stops being rescanned every
+            # cycle and `tiro doctor` (M5) has a signal to reconcile.
+            try:
+                conn2 = get_connection(config.db_path)
+                try:
+                    conn2.execute(
+                        "UPDATE articles SET vector_status = 'failed' WHERE id = ?",
+                        (row["id"],),
+                    )
+                    conn2.commit()
+                finally:
+                    conn2.close()
+            except Exception as e:
+                logger.error("Failed to mark article %d as vector_status=failed: %s", row["id"], e)
             continue
         try:
             post = frontmatter.load(str(md))
-            collection.add(
+            # upsert (not add): idempotent if a prior attempt already wrote
+            # the vector but crashed before the status UPDATE committed —
+            # add() would error on a re-add of an existing id.
+            collection.upsert(
                 ids=[f"article_{row['id']}"],
                 documents=[post.content],
                 metadatas=[{"title": row["title"], "article_id": row["id"]}],
             )
             conn2 = get_connection(config.db_path)
             try:
-                conn2.execute("UPDATE articles SET vector_status = 'indexed' WHERE id = ?", (row["id"],))
+                cursor = conn2.execute(
+                    "UPDATE articles SET vector_status = 'indexed' WHERE id = ?", (row["id"],)
+                )
                 conn2.commit()
+                rowcount = cursor.rowcount
             finally:
                 conn2.close()
-            indexed += 1
+            if rowcount == 0:
+                # Article was deleted mid-retry: the row is gone, so the
+                # vector we just (re)added is now an orphan. Best-effort
+                # clean it up.
+                try:
+                    collection.delete(ids=[f"article_{row['id']}"])
+                except Exception as e:
+                    logger.warning(
+                        "Failed to delete orphaned vector for deleted article %d: %s",
+                        row["id"], e,
+                    )
+            else:
+                indexed += 1
         except Exception as e:
             logger.error("Vector retry failed for %d: %s", row["id"], e)
     return indexed

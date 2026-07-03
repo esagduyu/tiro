@@ -69,6 +69,66 @@ def test_failure_after_insert_rolls_back_no_orphan(initialized_library, monkeypa
     assert stray == [], f"orphan markdown left: {stray}"
 
 
+def test_failure_after_tag_commit_rolls_back_junctions(initialized_library, monkeypatch):
+    """Fail at the post-metadata frontmatter rewrite, which runs AFTER the
+    tag/entity commit (conn.commit() in process_article). Proves
+    delete_article() rolls back the already-committed article_tags rows,
+    not just the article row + file.
+
+    extract_metadata() is monkeypatched to return real tags/entities
+    (tests run with ANTHROPIC_API_KEY unset, where it would otherwise
+    return empty defaults and the article_tags commit would be a no-op —
+    that would make this test pass trivially without exercising anything).
+    """
+    from tiro.database import get_connection
+    from tiro.ingestion import processor
+
+    monkeypatch.setattr(
+        processor,
+        "extract_metadata",
+        lambda title, content, config: {
+            "tags": ["testing", "rollback"],
+            "entities": [{"name": "Tiro", "type": "product"}],
+            "summary": "A test summary.",
+        },
+    )
+
+    original_dumps = processor.frontmatter.dumps
+    call_count = {"n": 0}
+
+    def boom(post, *a, **k):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            # First call is the pre-enrichment frontmatter write (before
+            # the tag commit); second call is the post-metadata rewrite
+            # (after tags/entities are committed) — fail there.
+            raise RuntimeError("frontmatter rewrite failure")
+        return original_dumps(post, *a, **k)
+
+    monkeypatch.setattr(processor.frontmatter, "dumps", boom)
+    ex = _extracted()
+    before = _count_articles(initialized_library)
+    with pytest.raises(RuntimeError):
+        processor.process_article(**ex, config=initialized_library, ingestion_method="email")
+
+    # No orphan row, no orphan file
+    assert _count_articles(initialized_library) == before
+    stray = list(initialized_library.articles_dir.glob("*.md"))
+    assert stray == [], f"orphan markdown left: {stray}"
+
+    # Committed junction rows (article_tags/article_entities) must also
+    # have been rolled back, proving delete_article() unwinds more than
+    # just the article row + file.
+    conn = get_connection(initialized_library.db_path)
+    try:
+        n_tags = conn.execute("SELECT COUNT(*) AS n FROM article_tags").fetchone()["n"]
+        n_entities = conn.execute("SELECT COUNT(*) AS n FROM article_entities").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n_tags == 0, "orphan article_tags rows left after rollback"
+    assert n_entities == 0, "orphan article_entities rows left after rollback"
+
+
 def _count_articles(config):
     from tiro.database import get_connection
 
