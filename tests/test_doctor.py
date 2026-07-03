@@ -420,3 +420,38 @@ def test_scan_normalizes_absolute_markdown_paths(initialized_library):
     report = scan(initialized_library)
     assert not any(r["id"] == aid for r in report["missing_markdown"])
     assert md_name not in report["orphaned_markdown"]
+
+
+def test_scan_flags_failed_rows_without_vector(initialized_library):
+    from tiro.doctor import scan
+
+    aid, _ = _make_article(initialized_library, "Failed Residue")
+    get_collection().delete(ids=[f"article_{aid}"])
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute("UPDATE articles SET vector_status = 'failed' WHERE id = ?", (aid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = scan(initialized_library)
+    assert aid in report["vector_failed"]
+    assert report["structurally_consistent"] is False
+
+
+def test_fix_heals_failed_rows_without_vector(initialized_library):
+    from tiro.doctor import fix, scan
+
+    aid, _ = _make_article(initialized_library, "Failed But Healable")
+    get_collection().delete(ids=[f"article_{aid}"])
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute("UPDATE articles SET vector_status = 'failed' WHERE id = ?", (aid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    fix(initialized_library)
+    report = scan(initialized_library)
+    assert report["clean"] is True, report
+    assert get_collection().get(ids=[f"article_{aid}"])["ids"] == [f"article_{aid}"]

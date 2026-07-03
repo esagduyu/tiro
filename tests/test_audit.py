@@ -238,3 +238,86 @@ def test_audit_date_month_mutually_exclusive(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
     assert exc_info.value.code == 2
+
+
+def test_cmd_audit_tolerates_sparse_entries_and_zero_values(initialized_library, capsys):
+    import json as _json
+    from datetime import date as _date
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    audit_dir = initialized_library.library / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        _json.dumps({"service": "imap", "endpoint": "check", "count": 0, "success": True}),  # no timestamp
+        _json.dumps({"timestamp": "t", "service": "anthropic", "endpoint": "digest",
+                     "cost_estimate": 0.0, "success": True}),
+    ]
+    (audit_dir / f"{_date.today().isoformat()}.jsonl").write_text("\n".join(lines) + "\n")
+
+    cli.cmd_audit(SimpleNamespace(config="unused", date=None, month=None, service=None,
+                                  json=False, _config_override=initialized_library))
+    out = capsys.readouterr().out
+    assert "imap" in out            # sparse entry printed, no KeyError
+    assert "$0.0000" in out         # real zero cost rendered, not blanked
+    assert " 0" in out              # count=0 shown, not dropped
+
+
+def test_cmd_audit_rejects_bad_month_format(initialized_library, capsys):
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    from tiro import cli
+
+    with _pytest.raises(SystemExit):
+        cli.cmd_audit(SimpleNamespace(config="unused", date=None, month="2026",
+                                      service=None, json=False,
+                                      _config_override=initialized_library))
+
+
+def test_smtp_auth_error_gets_app_password_hint(initialized_library, monkeypatch):
+    import smtplib
+
+    import tiro.intelligence.email_digest as ed
+
+    initialized_library.digest_email = "u@example.com"
+    initialized_library.smtp_user = "u@example.com"
+    initialized_library.smtp_password = "bad"
+
+    class AuthFailSMTP:
+        def __init__(self, *a, **k): ...
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def starttls(self): ...
+        def login(self, *a): raise smtplib.SMTPAuthenticationError(535, b"bad creds")
+
+    monkeypatch.setattr(ed.smtplib, "SMTP", AuthFailSMTP)
+    monkeypatch.setattr(ed, "get_cached_digest", lambda *a, **k: {
+        "ranked": {"content": "# d", "article_ids": [], "created_at": "2026-07-03 10:00:00"}
+    })
+    with pytest.raises(RuntimeError) as exc:
+        ed.send_digest_email(initialized_library)
+    assert "App Password" in str(exc.value)
+
+
+def test_imap_logout_failure_does_not_drop_success_entry(initialized_library, monkeypatch):
+    import tiro.ingestion.imap as imap_mod
+
+    initialized_library.imap_user = "u@example.com"
+    initialized_library.imap_password = "pw"
+
+    class FakeIMAP:
+        def __init__(self, *a, **k): ...
+        def login(self, *a): ...
+        def select(self, *a, **k): return ("OK", [b"0"])
+        def search(self, *a): return ("OK", [b""])   # no unseen messages
+        def close(self): ...
+        def logout(self): raise OSError("connection dropped")
+
+    monkeypatch.setattr(imap_mod.imaplib, "IMAP4_SSL", FakeIMAP)
+    result = imap_mod.check_imap_inbox(initialized_library)   # must not raise
+    assert result["fetched"] == 0
+    entries = read_audit_entries(initialized_library, service="imap")
+    assert entries and entries[-1]["success"] is True

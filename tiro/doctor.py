@@ -66,6 +66,12 @@ def scan(config: TiroConfig) -> dict:
         if row["vector_status"] in ("pending", "failed")
         and f"article_{row['id']}" in vec_ids
     ]
+    vector_failed = [
+        row["id"] for row in rows
+        if row["vector_status"] == "failed"
+        and f"article_{row['id']}" not in vec_ids
+        and (config.articles_dir / Path(row["markdown_path"]).name).exists()
+    ]
 
     audio_dir = config.library / "audio"
     audio_known = {row["file_path"] for row in audio_rows}
@@ -83,6 +89,7 @@ def scan(config: TiroConfig) -> dict:
         "orphaned_vectors": orphaned_vectors,
         "vector_missing": vector_missing,
         "vector_unmarked": vector_unmarked,
+        "vector_failed": vector_failed,
         "audio_rows_missing_file": audio_rows_missing_file,
         "audio_files_without_row": audio_files_without_row,
         "unreferenced_tags": unreferenced_tags,
@@ -91,7 +98,7 @@ def scan(config: TiroConfig) -> dict:
     }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",
-        "vector_missing", "vector_unmarked",
+        "vector_missing", "vector_unmarked", "vector_failed",
         "audio_rows_missing_file", "audio_files_without_row",
     )
     report["structurally_consistent"] = not any(report[k] for k in structural_keys)
@@ -158,14 +165,18 @@ def fix(config: TiroConfig) -> dict:
     # (d) status drift -> correct the status, then re-embed pending rows.
     #     Rows actually deleted by (b) are excluded (their ids are gone from
     #     articles). Rows REFUSED by the mass-delete guard are also excluded
-    #     from the indexed->pending flip only: their markdown is unreachable
-    #     (that's why the refusal fired), so retry_pending_vectors would
-    #     immediately mark them 'failed', making the drift invisible to a
-    #     future scan() (failed + no vector + present file matches no
-    #     detection class). Leaving them 'indexed' keeps the drift visible as
-    #     vector_missing so the user's mandated re-run (after fixing
-    #     library_path) heals it. The indexed<-unmarked flip stays
-    #     unconditional — it never touches missing-markdown rows.
+    #     from the indexed->pending and failed->pending flips: their markdown
+    #     is unreachable (that's why the refusal fired), so retry_pending_vectors
+    #     would immediately mark them 'failed' again, making the drift invisible
+    #     to a future scan() (failed + no vector + present file matches no
+    #     detection class). Leaving them 'indexed'/'failed' keeps the drift
+    #     visible (as vector_missing / vector_failed) so the user's mandated
+    #     re-run (after fixing library_path) heals it. vector_failed rows are
+    #     by definition markdown-present (scan()'s detection requires it), so
+    #     they can never coincide with refused_ids in practice, but the same
+    #     skip is applied for defense-in-depth and readability. The
+    #     indexed<-unmarked flip stays unconditional — it never touches
+    #     missing-markdown rows.
     conn = get_connection(config.db_path)
     try:
         for aid in report["vector_missing"]:
@@ -175,6 +186,13 @@ def fix(config: TiroConfig) -> dict:
                 "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (aid,)
             )
             actions.append(f"article {aid}: vector_status indexed -> pending (no vector)")
+        for aid in report["vector_failed"]:
+            if aid in deleted_ids or aid in refused_ids:
+                continue
+            conn.execute(
+                "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (aid,)
+            )
+            actions.append(f"article {aid}: vector_status failed -> pending (re-embed queued)")
         for aid in report["vector_unmarked"]:
             if aid in deleted_ids:
                 continue

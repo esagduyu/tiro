@@ -87,7 +87,10 @@ def check_imap_inbox(config: TiroConfig) -> dict:
             imap.close()
         except Exception:
             pass
-        imap.logout()
+        try:
+            imap.logout()
+        except Exception:
+            logger.warning("IMAP logout failed (ignored)")
 
     log_api_call(config, "imap", endpoint="check", count=result["fetched"])
     return result

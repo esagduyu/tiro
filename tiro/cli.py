@@ -466,8 +466,14 @@ def cmd_audit(args):
     import json as _json
     from datetime import date as _date
 
+    import re
+
     from tiro.audit import read_audit_entries, summarize
     from tiro.config import load_config
+
+    if args.month and not re.fullmatch(r"\d{4}-\d{2}", args.month):
+        print("Invalid --month (expected YYYY-MM, e.g. 2026-07).")
+        sys.exit(2)
 
     config = getattr(args, "_config_override", None) or load_config(args.config)
     day = args.date
@@ -494,9 +500,12 @@ def cmd_audit(args):
         return
     for e in entries:
         status = "ok" if e.get("success", True) else "FAIL"
-        cost = f" ${e['cost_estimate']:.4f}" if e.get("cost_estimate") else ""
-        detail = e.get("model") or e.get("count") or ""
-        print(f"{e['timestamp']}  {e['service']:10} {e['endpoint']:16} {status}{cost}  {detail}")
+        cost_val = e.get("cost_estimate")
+        cost = f" ${cost_val:.4f}" if cost_val is not None else ""
+        count_val = e.get("count")
+        detail = e.get("model") or (str(count_val) if count_val is not None else "")
+        print(f"{e.get('timestamp', '?')}  {e.get('service', '?'):10} "
+              f"{e.get('endpoint', '?'):16} {status}{cost}  {detail}")
     if not entries:
         print(f"No audit entries for {day or args.month}.")
 

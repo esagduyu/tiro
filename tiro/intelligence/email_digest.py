@@ -126,19 +126,19 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
             with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
                 server.sendmail(from_addr, [config.digest_email], payload)
         logger.info("Digest email sent to %s via %s:%d", config.digest_email, config.smtp_host, config.smtp_port)
-    except (ConnectionRefusedError, OSError) as e:
-        log_api_call(config, "smtp", endpoint="send_digest", success=False, error=str(e))
-        raise RuntimeError(
-            f"Could not connect to SMTP server at {config.smtp_host}:{config.smtp_port}. "
-            f"For Gmail, use smtp.gmail.com:587 with an app password. "
-            f"For local testing, run: docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog"
-        ) from e
     except smtplib.SMTPAuthenticationError as e:
         log_api_call(config, "smtp", endpoint="send_digest", success=False, error=str(e))
         raise RuntimeError(
             f"SMTP authentication failed for {config.smtp_user}. "
             f"For Gmail, use an App Password (not your regular password): "
             f"https://myaccount.google.com/apppasswords"
+        ) from e
+    except (ConnectionRefusedError, OSError) as e:
+        log_api_call(config, "smtp", endpoint="send_digest", success=False, error=str(e))
+        raise RuntimeError(
+            f"Could not connect to SMTP server at {config.smtp_host}:{config.smtp_port}. "
+            f"For Gmail, use smtp.gmail.com:587 with an app password. "
+            f"For local testing, run: docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog"
         ) from e
 
     log_api_call(config, "smtp", endpoint="send_digest", bytes_out=len(payload))

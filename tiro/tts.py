@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
@@ -139,6 +140,7 @@ async def stream_article_audio(
     The browser's <audio> element handles progressive MP3 download natively,
     so playback starts within ~1-2 seconds of the first bytes arriving.
     """
+    start = time.monotonic()
     speech_text = _prepare_article_text(article_id, config)
     chunks = chunk_text(speech_text)
     if not chunks:
@@ -175,6 +177,7 @@ async def stream_article_audio(
                     log_api_call(
                         config, "openai_tts", endpoint="speech", model=config.tts_model,
                         success=False, error=f"HTTP {response.status_code}",
+                        duration_ms=int((time.monotonic() - start) * 1000),
                     )
                     raise RuntimeError(f"OpenAI TTS API returned {response.status_code}")
 
@@ -214,6 +217,7 @@ async def stream_article_audio(
     log_api_call(
         config, "openai_tts", endpoint="speech", model=config.tts_model,
         chars=total_chars, bytes_out=len(all_bytes),
+        duration_ms=int((time.monotonic() - start) * 1000),
     )
 
     logger.info(
