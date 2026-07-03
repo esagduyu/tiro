@@ -156,15 +156,11 @@ def migrate_db(db_path: Path) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
         if "ingestion_method" not in cols:
             conn.execute("ALTER TABLE articles ADD COLUMN ingestion_method TEXT DEFAULT 'manual'")
-            try:
-                conn.execute("""
-                    UPDATE articles SET ingestion_method = 'email'
-                    WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
-                    AND ingestion_method = 'manual'
-                """)
-            except sqlite3.OperationalError:
-                # Legacy/partial tables (e.g. missing source_id/sources) — nothing to backfill.
-                pass
+            conn.execute("""
+                UPDATE articles SET ingestion_method = 'email'
+                WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
+                AND ingestion_method = 'manual'
+            """)
             conn.commit()
             logger.info("Migrated: added ingestion_method column")
         if "vector_status" not in cols:
