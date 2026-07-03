@@ -31,14 +31,23 @@ let selectedForDelete = new Set(); // article ids checked for bulk delete
 function applyTheme(mode) {
     document.documentElement.setAttribute('data-theme', mode);
     const themeLink = document.getElementById('theme-css');
-    const themeName = mode === 'dark' ? 'roman-night' : 'papyrus';
     if (themeLink) {
-        // Derive the cache-bust version from the link's current href instead
-        // of hardcoding it, so theme switches always match whatever version
-        // base.html is currently serving (avoids stale-cache drift).
-        const currentVersion = new URL(themeLink.href, window.location.origin).searchParams.get('v');
-        const versionSuffix = currentVersion ? `?v=${currentVersion}` : '';
-        themeLink.href = `/static/themes/${themeName}.css${versionSuffix}`;
+        // Read the server-resolved hrefs off the link element (set from
+        // config.theme_light/theme_dark in the template context) instead of
+        // hardcoding papyrus/roman-night, so a configured custom theme is
+        // honored on toggle too. Falls back to the hardcoded pair if the
+        // data attributes are absent (e.g. an older cached page).
+        const href = mode === 'dark'
+            ? themeLink.getAttribute('data-dark-href')
+            : themeLink.getAttribute('data-light-href');
+        if (href) {
+            themeLink.href = href;
+        } else {
+            const themeName = mode === 'dark' ? 'roman-night' : 'papyrus';
+            const currentVersion = new URL(themeLink.href, window.location.origin).searchParams.get('v');
+            const versionSuffix = currentVersion ? `?v=${currentVersion}` : '';
+            themeLink.href = `/static/themes/${themeName}.css${versionSuffix}`;
+        }
     }
     document.querySelectorAll('#theme-toggle, #mobile-theme-toggle').forEach(btn => {
         const icon = btn.querySelector('.sidebar-icon');

@@ -21,6 +21,15 @@ mcp = FastMCP("Tiro Reading Library")
 _config: TiroConfig | None = None
 
 
+def _config_path() -> str:
+    """Config path for the MCP server. Claude Desktop spawns us with an
+    arbitrary CWD, so ./config.yaml is usually wrong there — set TIRO_CONFIG
+    in the MCP client's env block to the absolute path."""
+    import os
+
+    return os.environ.get("TIRO_CONFIG", "config.yaml")
+
+
 def _require_token_gate(config: TiroConfig) -> None:
     """Single-user gating for the MCP server. When the Tiro instance has a
     password configured, the MCP process must present a valid API token via
@@ -64,7 +73,7 @@ def _require_token_gate(config: TiroConfig) -> None:
 def _get_config() -> TiroConfig:
     global _config
     if _config is None:
-        _config = load_config()
+        _config = load_config(_config_path())
         # Initialize ChromaDB so get_collection() works
         init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     # Enforced on every call (not just first init) so token revocation takes
@@ -533,7 +542,9 @@ def main():
         prog="tiro-mcp",
         description="Tiro MCP server (stdio transport). Exposes the reading "
         "library to Claude Desktop/Code. Requires TIRO_API_TOKEN when the "
-        "Tiro instance has a password. Config: ./config.yaml.",
+        "Tiro instance has a password. Config: ./config.yaml, or set "
+        "TIRO_CONFIG to an absolute path (recommended for Claude Desktop, "
+        "which spawns this process with an arbitrary CWD).",
     )
     parser.parse_args()  # handles --help/-h and exits before any heavy init
 
@@ -543,7 +554,7 @@ def main():
     )
 
     global _config
-    _config = load_config()
+    _config = load_config(_config_path())
     _require_token_gate(_config)
     init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     logger.info("Tiro MCP server starting (library: %s)", _config.library)

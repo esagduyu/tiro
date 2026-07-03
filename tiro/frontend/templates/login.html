@@ -4,8 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tiro ⁊ Sign in</title>
-  <link rel="stylesheet" href="/static/themes/papyrus.css">
-  <link rel="stylesheet" href="/static/themes/roman-night.css" media="(prefers-color-scheme: dark)">
+  <link id="theme-css" rel="stylesheet" href="{{ theme_light_href }}"
+        data-light-href="{{ theme_light_href }}" data-dark-href="{{ theme_dark_href }}">
+  <script>
+    (function () {
+      var mode = localStorage.getItem('tiro-mode');
+      if (!mode) mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      var link = document.getElementById('theme-css');
+      if (mode === 'dark') link.href = link.getAttribute('data-dark-href');
+      document.documentElement.setAttribute('data-theme', mode);
+    })();
+  </script>
   <style>
     body {
       display: flex; align-items: center; justify-content: center;

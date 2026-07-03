@@ -480,11 +480,11 @@ def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeyp
     raw = auth.create_api_token(configured_library.db_path, "mcp")
     monkeypatch.setenv("TIRO_API_TOKEN", raw)
     monkeypatch.setattr(mcp_server, "_config", None)
-    # _get_config() calls the module's own load_config() when _config is
-    # None; point it at configured_library so the gate checks the same DB
-    # the token was created/revoked against (otherwise it'd load a bare
-    # default config with no password and the gate would be a no-op).
-    monkeypatch.setattr(mcp_server, "load_config", lambda: configured_library)
+    # _get_config() calls the module's own load_config(_config_path()) when
+    # _config is None; point it at configured_library so the gate checks the
+    # same DB the token was created/revoked against (otherwise it'd load a
+    # bare default config with no password and the gate would be a no-op).
+    monkeypatch.setattr(mcp_server, "load_config", lambda *a, **k: configured_library)
     monkeypatch.setattr(mcp_server, "init_vectorstore", lambda *a, **k: None)
     mcp_server._get_config()  # passes
 

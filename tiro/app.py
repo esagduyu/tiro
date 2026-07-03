@@ -23,6 +23,36 @@ logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
+# Cache-bust version for the theme link hrefs ONLY (base.html's other static
+# includes keep their own literal `?v=` counter for now — Task 4 bumps the
+# whole shared counter, including this constant, together).
+STATIC_VERSION = "54"
+
+
+def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
+    """Resolve a configured theme name to a servable href.
+
+    Builtin themes ship under frontend/static/themes/; custom themes live in
+    the user's library under themes/ (served via the /library/themes mount).
+    Falls back to the given builtin fallback name if neither exists.
+    """
+    builtin = FRONTEND_DIR / "static" / "themes" / f"{name}.css"
+    custom = config.library / "themes" / f"{name}.css"
+    if builtin.exists():
+        return f"/static/themes/{name}.css?v={STATIC_VERSION}"
+    if custom.exists():
+        return f"/library/themes/{name}.css?v={STATIC_VERSION}"
+    return f"/static/themes/{fallback}.css?v={STATIC_VERSION}"
+
+
+def _theme_context(config: TiroConfig) -> dict:
+    """Server-resolved theme hrefs injected into every page template."""
+    return {
+        "theme_light_href": _theme_href(config, config.theme_light, "papyrus"),
+        "theme_dark_href": _theme_href(config, config.theme_dark, "roman-night"),
+    }
+
+
 _DIR_SIZE_CACHE_TTL = 30  # seconds
 _dir_size_cache: dict[Path, tuple[float, int]] = {}
 
@@ -396,7 +426,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
-        return templates.TemplateResponse(request, "login.html")
+        return templates.TemplateResponse(request, "login.html", _theme_context(request.app.state.config))
 
     @app.exception_handler(auth.NotAuthenticated)
     async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
@@ -410,26 +440,28 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/inbox", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def inbox_page(request: Request):
-        return templates.TemplateResponse(request, "inbox.html")
+        return templates.TemplateResponse(request, "inbox.html", _theme_context(request.app.state.config))
 
     @app.get("/digest", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def digest_page(request: Request):
-        return templates.TemplateResponse(request, "digest.html")
+        return templates.TemplateResponse(request, "digest.html", _theme_context(request.app.state.config))
 
     @app.get("/articles/{article_id}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def reader(request: Request, article_id: int):
-        return templates.TemplateResponse(request, "reader.html", {"article_id": article_id})
+        return templates.TemplateResponse(
+            request, "reader.html", {"article_id": article_id, **_theme_context(request.app.state.config)}
+        )
 
     @app.get("/stats", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def stats_page(request: Request):
-        return templates.TemplateResponse(request, "stats.html")
+        return templates.TemplateResponse(request, "stats.html", _theme_context(request.app.state.config))
 
     @app.get("/settings", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def settings_page(request: Request):
-        return templates.TemplateResponse(request, "settings.html")
+        return templates.TemplateResponse(request, "settings.html", _theme_context(request.app.state.config))
 
     @app.get("/graph", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def graph_page(request: Request):
-        return templates.TemplateResponse(request, "graph.html")
+        return templates.TemplateResponse(request, "graph.html", _theme_context(request.app.state.config))
 
     return app

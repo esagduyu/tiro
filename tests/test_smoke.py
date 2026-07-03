@@ -61,7 +61,6 @@ def test_cwd_is_isolated(tmp_path):
 def test_no_cdn_references_in_templates():
     from pathlib import Path
 
-    templates = Path("tiro/frontend/templates")
     # Templates live in the package, not CWD — resolve from the tiro package
     import tiro
 
@@ -73,3 +72,40 @@ def test_no_cdn_references_in_templates():
             if ("<script" in line or "<link" in line) and "http" in line and "://" in line:
                 offenders.append(f"{tpl.name}:{line_no}")
     assert not offenders, f"CDN references remain: {offenders}"
+
+
+def test_no_cdn_references_in_static_js():
+    from pathlib import Path
+
+    import tiro
+
+    static = Path(tiro.__file__).parent / "frontend" / "static"
+    offenders = []
+    for js in static.glob("*.js"):  # top level only — vendor/ is the vendored copy itself
+        text = js.read_text()
+        for marker in ("cdn.jsdelivr", "unpkg.com", "cdnjs.", "googleapis.com"):
+            if marker in text:
+                offenders.append(f"{js.name}: {marker}")
+    assert not offenders, f"CDN references in static JS: {offenders}"
+
+
+def test_page_renders_configured_custom_theme(authenticated_client, configured_library):
+    themes_dir = configured_library.library / "themes"
+    themes_dir.mkdir(parents=True, exist_ok=True)
+    (themes_dir / "my-custom.css").write_text(":root { --tiro-bg: #123456; }")
+    configured_library.theme_light = "my-custom"
+
+    r = authenticated_client.get("/inbox")
+    assert r.status_code == 200
+    assert "/library/themes/my-custom.css" in r.text
+    assert 'data-dark-href="/static/themes/roman-night.css' in r.text
+
+
+def test_mcp_config_env_override(monkeypatch, tmp_path):
+    cfg = tmp_path / "elsewhere.yaml"
+    cfg.write_text(f'library_path: "{tmp_path / "lib"}"\n')
+    monkeypatch.setenv("TIRO_CONFIG", str(cfg))
+
+    from tiro.mcp.server import _config_path
+
+    assert str(_config_path()) == str(cfg)
