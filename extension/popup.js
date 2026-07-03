@@ -1,11 +1,31 @@
 const TIRO_URL = 'http://localhost:8000';
 
+let apiToken = '';
+
+function authHeaders(extra) {
+  var h = extra || {};
+  if (apiToken) h['Authorization'] = 'Bearer ' + apiToken;
+  return h;
+}
+
+function loadToken(cb) {
+  chrome.storage.local.get(['tiroToken'], function (result) {
+    apiToken = result.tiroToken || '';
+    cb();
+  });
+}
+
+function saveToken(value, cb) {
+  chrome.storage.local.set({ tiroToken: value }, cb);
+}
+
 const els = {
   stateReady: document.getElementById('state-ready'),
   stateSaving: document.getElementById('state-saving'),
   stateSuccess: document.getElementById('state-success'),
   stateError: document.getElementById('state-error'),
   stateAlready: document.getElementById('state-already'),
+  stateToken: document.getElementById('state-token'),
   pageTitle: document.getElementById('page-title'),
   pageUrl: document.getElementById('page-url'),
   vipToggle: document.getElementById('vip-toggle'),
@@ -18,12 +38,15 @@ const els = {
   alreadyTitle: document.getElementById('already-title'),
   alreadyTime: document.getElementById('already-time'),
   alreadyLink: document.getElementById('already-link'),
+  tokenInput: document.getElementById('token-input'),
+  tokenSaveBtn: document.getElementById('token-save-btn'),
+  tokenGear: document.getElementById('token-gear'),
 };
 
 let currentUrl = '';
 
 function showState(name) {
-  ['stateReady', 'stateSaving', 'stateSuccess', 'stateError', 'stateAlready'].forEach(function (key) {
+  ['stateReady', 'stateSaving', 'stateSuccess', 'stateError', 'stateAlready', 'stateToken'].forEach(function (key) {
     els[key].classList.toggle('active', key === 'state' + name.charAt(0).toUpperCase() + name.slice(1));
   });
 }
@@ -44,18 +67,24 @@ function formatTimeAgo(isoStr) {
 }
 
 // Get current tab info on popup open, then check if already saved
-chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-  if (tabs[0]) {
-    currentUrl = tabs[0].url;
-    els.pageTitle.textContent = tabs[0].title || 'Untitled page';
-    els.pageUrl.textContent = currentUrl;
-    checkIfSaved(currentUrl);
-  }
+loadToken(function () {
+  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    if (tabs[0]) {
+      currentUrl = tabs[0].url;
+      els.pageTitle.textContent = tabs[0].title || 'Untitled page';
+      els.pageUrl.textContent = currentUrl;
+      checkIfSaved(currentUrl);
+    }
+  });
 });
 
 async function checkIfSaved(url) {
   try {
-    var res = await fetch(TIRO_URL + '/api/ingest/check?url=' + encodeURIComponent(url));
+    var res = await fetch(TIRO_URL + '/api/ingest/check?url=' + encodeURIComponent(url), { headers: authHeaders() });
+    if (res.status === 401) {
+      showState('token');
+      return;
+    }
     var data = await res.json();
     if (data.success && data.saved) {
       els.alreadyTitle.textContent = data.data.title;
@@ -82,9 +111,14 @@ async function saveArticle() {
   try {
     var res = await fetch(TIRO_URL + '/api/ingest/url', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ url: currentUrl, ingestion_method: "extension" }),
     });
+
+    if (res.status === 401) {
+      showState('token');
+      return;
+    }
 
     var data = await res.json();
 
@@ -99,6 +133,7 @@ async function saveArticle() {
         try {
           await fetch(TIRO_URL + '/api/sources/' + article.source_id + '/vip', {
             method: 'PATCH',
+            headers: authHeaders(),
           });
         } catch (_) {
           // VIP toggle is best-effort
@@ -125,3 +160,18 @@ async function saveArticle() {
     showState('error');
   }
 }
+
+els.tokenSaveBtn.addEventListener('click', function () {
+  var value = els.tokenInput.value.trim();
+  if (!value) return;
+  saveToken(value, function () {
+    apiToken = value;
+    showState('ready');
+    checkIfSaved(currentUrl);
+  });
+});
+
+els.tokenGear.addEventListener('click', function () {
+  els.tokenInput.value = '';
+  showState('token');
+});
