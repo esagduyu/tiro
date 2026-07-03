@@ -297,6 +297,7 @@ function esc(str) {
 /* --- Ingenuity Analysis Panel --- */
 
 let analysisResult = null;
+let analysisInFlight = false; // in-flight guard so rapid r-presses/clicks can't fire concurrent POSTs
 
 function setupAnalysis(articleId) {
     const btn = document.getElementById("analysis-btn");
@@ -364,6 +365,9 @@ function showAnalysisBody() {
 }
 
 async function fetchAnalysis(articleId) {
+    if (analysisInFlight) return;
+    analysisInFlight = true;
+
     const introEl = document.getElementById("analysis-intro");
     const loadingEl = document.getElementById("analysis-loading");
     const errorEl = document.getElementById("analysis-error");
@@ -392,6 +396,8 @@ async function fetchAnalysis(articleId) {
         console.error("Analysis failed:", err);
         loadingEl.style.display = "none";
         errorEl.style.display = "block";
+    } finally {
+        analysisInFlight = false;
     }
 }
 

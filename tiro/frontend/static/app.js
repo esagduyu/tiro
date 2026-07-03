@@ -13,6 +13,7 @@ function renderMarkdown(md) {
 
 let digestData = null; // cached digest response
 let digestLoaded = false;
+let digestGenerating = false; // in-flight guard so rapid r-presses/clicks can't fire concurrent POSTs
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
 let selectedIndex = -1; // keyboard-selected article index
@@ -366,6 +367,9 @@ function setupDigestTabs() {
 /* ---- Load digest ---- */
 
 async function loadDigest(refresh) {
+    if (digestGenerating) return;
+    digestGenerating = true;
+
     const loadingEl = document.getElementById("digest-loading");
     const errorEl = document.getElementById("digest-error");
     const contentEl = document.getElementById("digest-content");
@@ -378,11 +382,13 @@ async function loadDigest(refresh) {
     emptyEl.style.display = "none";
     if (refreshBtn) refreshBtn.disabled = true;
 
+    let phase = refresh ? "generate" : "load";
     try {
         // GET is a pure cache read; generation is POST (M4b). A 404 means
         // no digest exists yet — generate one, preserving first-visit UX.
         let res = refresh ? null : await fetch("/api/digest/today");
         if (!res || res.status === 404) {
+            phase = "generate";
             res = await fetch("/api/digest/today", { method: "POST" });
         }
 
@@ -430,9 +436,12 @@ async function loadDigest(refresh) {
         console.error("Digest load failed:", err);
         loadingEl.style.display = "none";
         document.getElementById("digest-error-msg").textContent =
-            `Failed to generate digest: ${err.message}`;
+            phase === "load"
+                ? `Failed to load digest: ${err.message}`
+                : `Failed to generate digest: ${err.message}`;
         errorEl.style.display = "block";
     } finally {
+        digestGenerating = false;
         if (refreshBtn) refreshBtn.disabled = false;
     }
 }

@@ -117,3 +117,10 @@ def test_get_digest_by_type_cached_and_404(authenticated_client, configured_libr
 
     # Invalid type still 400
     assert authenticated_client.get("/api/digest/today/bogus").status_code == 400
+
+
+def test_post_digest_generic_error_maps_500(authenticated_client, monkeypatch):
+    import tiro.api.routes_digest as rd
+
+    monkeypatch.setattr(rd, "generate_digest", _raise(KeyError("boom")))
+    assert authenticated_client.post("/api/digest/today").status_code == 500

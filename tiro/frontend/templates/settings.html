@@ -617,11 +617,6 @@
                 return;
             }
 
-            if (!enableSend && !enableReceive) {
-                showToast('Select at least one feature', 'error');
-                return;
-            }
-
             var saveBtn = this;
             saveBtn.disabled = true;
             saveBtn.textContent = 'Saving...';

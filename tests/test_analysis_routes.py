@@ -63,3 +63,13 @@ def test_post_analysis_error_mapping(authenticated_client, monkeypatch):
 
     monkeypatch.setattr(ra, "analyze_article", raise_(RuntimeError("no api key")))
     assert authenticated_client.post("/api/articles/1/analysis").status_code == 503
+
+
+def test_post_analysis_generic_error_maps_500(authenticated_client, monkeypatch):
+    import tiro.api.routes_articles as ra
+
+    def boom(*a, **k):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(ra, "analyze_article", boom)
+    assert authenticated_client.post("/api/articles/1/analysis").status_code == 500
