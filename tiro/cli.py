@@ -145,10 +145,11 @@ def cmd_run(args):
     # (ANTHROPIC_API_KEY, etc.) that router imports may depend on
     from tiro.app import create_app
 
-    # Persist the effective host onto the config object BEFORE create_app —
-    # create_app derives app.state.lan_ips (and the Host-validation
-    # allowlist) from config.host, so --lan must be visible there too, not
-    # just in the local `effective_host` variable used for uvicorn.run below.
+    # Set the effective host on the in-memory config BEFORE create_app (never
+    # written to config.yaml) — create_app derives app.state.lan_ips (and the
+    # Host-validation allowlist) from config.host, so --lan must be visible
+    # there too, not just in the local `effective_host` variable used for
+    # uvicorn.run below.
     config.host = effective_host
 
     app = create_app(config)

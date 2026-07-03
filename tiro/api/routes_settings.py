@@ -17,12 +17,8 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _mask_password(pw: str | None) -> str | None:
-    """Mask a password for display, showing first 2 and last 2 chars."""
-    if not pw:
-        return None
-    if len(pw) <= 4:
-        return "****"
-    return pw[:2] + "*" * (len(pw) - 4) + pw[-2:]
+    """Fixed-width mask: reveals neither characters nor length."""
+    return "********" if pw else None
 
 
 @router.get("/network")
@@ -83,11 +79,22 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     """Update email configuration in config.yaml and reload."""
     config = request.app.state.config
 
-    if not body.gmail_address or not body.app_password:
-        raise HTTPException(status_code=400, detail="Gmail address and app password are required")
-
-    # Note: both enable_send and enable_receive may be False — that's a valid
-    # request to turn a previously-enabled feature (typically receive/IMAP) off.
+    # Both enable_send and enable_receive may be False — that's a valid
+    # request to turn a previously-enabled feature (typically receive/IMAP)
+    # off, and disabling everything needs no credentials at all. Credentials
+    # are only demanded when actually enabling a feature, and only if none
+    # are already stored — an enable post that omits the password reuses the
+    # stored smtp_password/imap_password instead of forcing a re-paste.
+    enabling = body.enable_send or body.enable_receive
+    if enabling and not body.gmail_address:
+        raise HTTPException(status_code=400, detail="Gmail address is required to enable email features")
+    stored_password = config.smtp_password or config.imap_password
+    password = body.app_password or stored_password
+    if enabling and not password:
+        raise HTTPException(
+            status_code=400,
+            detail="App password is required (none stored yet — paste your Gmail app password)",
+        )
 
     # Update config.yaml
     updates: dict = {}
@@ -96,7 +103,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         updates["smtp_host"] = "smtp.gmail.com"
         updates["smtp_port"] = 587
         updates["smtp_user"] = body.gmail_address
-        updates["smtp_password"] = body.app_password
+        updates["smtp_password"] = password
         updates["smtp_use_tls"] = True
         updates["digest_email"] = body.gmail_address
 
@@ -104,7 +111,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         updates["imap_host"] = "imap.gmail.com"
         updates["imap_port"] = 993
         updates["imap_user"] = body.gmail_address
-        updates["imap_password"] = body.app_password
+        updates["imap_password"] = password
         updates["imap_label"] = body.imap_label
         updates["imap_enabled"] = True
         updates["imap_sync_interval"] = body.imap_sync_interval
@@ -121,7 +128,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         config.smtp_host = "smtp.gmail.com"
         config.smtp_port = 587
         config.smtp_user = body.gmail_address
-        config.smtp_password = body.app_password
+        config.smtp_password = password
         config.smtp_use_tls = True
         config.digest_email = body.gmail_address
 
@@ -129,7 +136,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         config.imap_host = "imap.gmail.com"
         config.imap_port = 993
         config.imap_user = body.gmail_address
-        config.imap_password = body.app_password
+        config.imap_password = password
         config.imap_label = body.imap_label
         config.imap_enabled = True
         config.imap_sync_interval = body.imap_sync_interval

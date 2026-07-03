@@ -29,7 +29,9 @@ _dir_size_cache: dict[Path, tuple[float, int]] = {}
 
 def _cached_dir_bytes(path: Path) -> int:
     """`dir_bytes` behind a 30s TTL cache — avoids rglob-walking the chroma/audio
-    dirs on every /healthz call (they only grow, so brief staleness is fine)."""
+    dirs on every /healthz call. Not a monotonicity assumption (audio shrinks
+    on delete): the cache is just a 30s staleness bound, which is fine for a
+    health-check byte count."""
     now = time.monotonic()
     cached = _dir_size_cache.get(path)
     if cached is not None and now - cached[0] < _DIR_SIZE_CACHE_TTL:

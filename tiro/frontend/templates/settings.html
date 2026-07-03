@@ -538,6 +538,7 @@
         var prefillInterval = (emailData && emailData.imap_sync_interval) || 15;
         var smtpChecked = emailData ? emailData.smtp_configured : true;
         var imapChecked = emailData ? (emailData.imap_configured && emailData.imap_enabled) : true;
+        var alreadyConfigured = !!(emailData && (emailData.smtp_configured || emailData.imap_configured));
 
         var overlay = document.createElement('div');
         overlay.id = 'settings-modal-overlay';
@@ -556,7 +557,7 @@
                     '</div>' +
                     '<div class="settings-field">' +
                         '<label>App Password</label>' +
-                        '<input type="password" id="cfg-password" placeholder="16-character app password">' +
+                        '<input type="password" id="cfg-password" placeholder="' + (alreadyConfigured ? 'unchanged' : '16-character app password') + '">' +
                     '</div>' +
                     '<div class="settings-field">' +
                         '<label>Features</label>' +
@@ -616,9 +617,14 @@
             var enableReceive = document.getElementById('cfg-receive').checked;
             var label = document.getElementById('cfg-label').value.trim() || 'tiro';
             var syncInterval = parseInt(document.getElementById('cfg-interval').value) || 0;
+            var enabling = enableSend || enableReceive;
 
-            if (!gmail || !password) {
-                showToast('Gmail address and app password are required', 'error');
+            if (enabling && !gmail) {
+                showToast('Gmail address is required', 'error');
+                return;
+            }
+            if (enabling && !password && !alreadyConfigured) {
+                showToast('App password is required', 'error');
                 return;
             }
 

@@ -492,3 +492,15 @@ def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeyp
     auth.revoke_api_token(configured_library.db_path, tid)
     with pytest.raises(RuntimeError):
         mcp_server._get_config()  # revocation now bites on next call
+
+
+def test_cross_site_setup_rejected(auth_client):
+    r = auth_client.post("/api/auth/setup", json={"password": "x", "confirm": "x"},
+                         headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+
+
+def test_cross_site_logout_rejected(auth_client):
+    r = auth_client.post("/api/auth/logout",
+                         headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403

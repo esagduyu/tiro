@@ -194,3 +194,46 @@ def test_no_naive_yaml_config_writes_left():
         capture_output=True, text=True, cwd=repo_root,
     )
     assert out.stdout == "", f"naive YAML config writes remain:\n{out.stdout}"
+
+
+def test_mask_never_reveals_secret_characters():
+    from tiro.api.routes_settings import _mask_password
+
+    assert _mask_password(None) is None
+    masked = _mask_password("abcd efgh ijkl mnop")
+    assert masked == "********"
+    for ch in "abcdefghijklmnop":
+        assert ch not in masked
+    assert _mask_password("xy") == "********"  # length not leaked either
+
+
+def test_disable_email_requires_no_credentials(authenticated_client, configured_library):
+    configured_library.smtp_user = "u@gmail.com"
+    configured_library.smtp_password = "stored-app-password"
+    configured_library.imap_user = "u@gmail.com"
+    configured_library.imap_password = "stored-app-password"
+    configured_library.imap_enabled = True
+
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": False, "enable_receive": False,
+    })
+    assert r.status_code == 200, r.text
+    assert configured_library.imap_enabled is False
+
+
+def test_enable_reuses_stored_password_when_not_resent(authenticated_client, configured_library):
+    configured_library.smtp_user = "u@gmail.com"
+    configured_library.smtp_password = "stored-app-password"
+
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": True, "enable_receive": False, "gmail_address": "u@gmail.com",
+    })
+    assert r.status_code == 200, r.text
+    assert configured_library.smtp_password == "stored-app-password"
+
+
+def test_enable_without_any_password_still_400(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": True, "enable_receive": False, "gmail_address": "u@gmail.com",
+    })
+    assert r.status_code == 400
