@@ -41,8 +41,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/esagduyu/project-tiro"
-Repository = "https://github.com/esagduyu/project-tiro"
+Homepage = "https://github.com/esagduyu/tiro"
+Repository = "https://github.com/esagduyu/tiro"
 
 [project.scripts]
 tiro = "tiro.cli:main"

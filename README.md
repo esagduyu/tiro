@@ -39,8 +39,8 @@ Named after [Cicero's freedman](https://en.wikipedia.org/wiki/Marcus_Tullius_Tir
 **Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/), [Anthropic API key](https://console.anthropic.com/), optionally [OpenAI API key](https://platform.openai.com/api-keys) for TTS:
 
 ```bash
-git clone https://github.com/esagduyu/project-tiro.git
-cd project-tiro
+git clone https://github.com/esagduyu/tiro.git
+cd tiro
 uv sync                       # creates venv + installs all dependencies
 uv run tiro init              # creates config, library, prompts for API key
 uv run tiro run               # starts server at localhost:8000, opens browser
@@ -229,7 +229,7 @@ Add to your project's `.mcp.json` (or `~/.claude/settings.json` under `mcpServer
   "mcpServers": {
     "tiro": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/project-tiro", "tiro-mcp"],
+      "args": ["run", "--directory", "/path/to/tiro", "tiro-mcp"],
       "env": {
         "ANTHROPIC_API_KEY": "sk-...",
         "TIRO_API_TOKEN": "<from tiro token create mcp>",
@@ -251,7 +251,7 @@ Add to your Claude Desktop config file:
   "mcpServers": {
     "tiro": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/project-tiro", "tiro-mcp"],
+      "args": ["run", "--directory", "/path/to/tiro", "tiro-mcp"],
       "env": {
         "ANTHROPIC_API_KEY": "sk-...",
         "TIRO_API_TOKEN": "<from tiro token create mcp>",
@@ -262,7 +262,7 @@ Add to your Claude Desktop config file:
 }
 ```
 
-Replace `/path/to/project-tiro` with the actual path to your clone, add your Anthropic API key, and fill in `TIRO_API_TOKEN`/`TIRO_CONFIG` as described above.
+Replace `/path/to/tiro` with the actual path to your clone, add your Anthropic API key, and fill in `TIRO_API_TOKEN`/`TIRO_CONFIG` as described above.
 
 ---
 
@@ -350,7 +350,7 @@ Also available via the API (`GET /api/export`) and the Export button on the Stat
 ## Project Structure
 
 ```
-project-tiro/
+tiro/
 ├── tiro/                       # Python package
 │   ├── app.py                  # FastAPI app, router registration
 │   ├── cli.py                  # CLI commands (init, run, export, import-emails, setup-email, check-email)
