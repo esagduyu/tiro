@@ -321,6 +321,66 @@ def test_fix_keeps_vector_drift_visible_during_mass_delete_refusal(initialized_l
     assert get_collection().get(ids=[f"article_{bid}"])["ids"] == [f"article_{bid}"]
 
 
+def test_fix_does_not_fail_pending_rows_during_mass_delete_refusal(initialized_library):
+    """Important review finding: fix() called retry_pending_vectors()
+    unconditionally, even when the mass-delete refusal fired. During a
+    refusal every markdown file is unreachable (that's why the refusal
+    fired), so retry_pending_vectors marks ANY 'pending' row it can't reach
+    as 'failed' — including a row that was legitimately 'pending' for an
+    unrelated reason (e.g. a ChromaDB outage at ingestion time, well before
+    the articles dir went missing). Once flipped to 'failed', the row is
+    invisible to scan() (vector_missing needs 'indexed'; vector_unmarked
+    needs a vector present) and excluded from reembed_failures (counts only
+    'pending'), so after the user restores the dir and re-runs as instructed,
+    the article is permanently unsearchable with doctor reporting clean.
+    fix() must skip the doomed-and-destructive retry during a refusal and
+    leave the row 'pending' so it stays healable."""
+    import shutil
+
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    aid, _ = _make_article(config, "Survivor A")
+    bid, _ = _make_article(config, "Outage Residue")
+    # Simulate ingestion-time ChromaDB outage residue: status 'pending' with
+    # no vector ever written, unrelated to the mass-delete that follows.
+    get_collection().delete(ids=[f"article_{bid}"])
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (bid,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    moved = config.library / "articles-moved"
+    shutil.move(str(config.articles_dir), str(moved))
+
+    result = fix(config)
+    assert any("REFUSED" in act for act in result["actions"])
+
+    conn = get_connection(config.db_path)
+    try:
+        status = conn.execute(
+            "SELECT vector_status FROM articles WHERE id = ?", (bid,)
+        ).fetchone()["vector_status"]
+    finally:
+        conn.close()
+    assert status == "pending", (
+        "refused row's legitimately-pending status must NOT be flipped to "
+        "'failed' by a doomed retry_pending_vectors() call — it must stay "
+        "'pending' so it remains healable after the dir is restored"
+    )
+
+    # Heal: restore the articles dir and re-run. Everything converges clean.
+    shutil.move(str(moved), str(config.articles_dir))
+    fix(config)
+    report = scan(config)
+    assert report["clean"] is True, report
+    assert get_collection().get(ids=[f"article_{bid}"])["ids"] == [f"article_{bid}"]
+
+
 def test_fix_repairs_single_missing_markdown_when_dir_present(initialized_library):
     """Minor: the total_articles > 1 guard boundary. A single article with a
     missing markdown file (articles dir itself still present) is ordinary

@@ -185,9 +185,30 @@ def fix(config: TiroConfig) -> dict:
         conn.commit()
     finally:
         conn.close()
-    n = retry_pending_vectors(config)
-    if n:
-        actions.append(f"re-embedded {n} article(s)")
+    # During a mass-delete refusal, EVERY markdown file is unreachable (that's
+    # why the refusal fired). retry_pending_vectors() marks any 'pending' row
+    # whose file it can't reach as 'failed' — including rows that were
+    # legitimately 'pending' for an unrelated reason (e.g. a ChromaDB outage
+    # at ingestion time), before the mass-delete ever happened. Once flipped
+    # to 'failed', such a row becomes invisible to scan() (vector_missing
+    # needs 'indexed'; vector_unmarked needs a vector present) and is
+    # excluded from reembed_failures (which only counts 'pending'), so the
+    # article would be permanently unsearchable even after the user restores
+    # the directory and re-runs as instructed. Skip the doomed-and-destructive
+    # retry here; the still-pending re-query below still counts these rows
+    # honestly (they DO still need re-embedding), which keeps exit code 1 via
+    # structurally_consistent anyway.
+    if mass_delete and report["missing_markdown"]:
+        actions.append(
+            "SKIPPED re-embed retry: articles directory is unreachable during "
+            "the mass-delete refusal above — retrying would mark legitimately "
+            "pending rows as permanently 'failed'. Fix the articles directory "
+            "and re-run to retry them safely."
+        )
+    else:
+        n = retry_pending_vectors(config)
+        if n:
+            actions.append(f"re-embedded {n} article(s)")
 
     conn = get_connection(config.db_path)
     try:
