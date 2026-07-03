@@ -21,22 +21,33 @@ ANTHROPIC_PRICING = {
     "claude-haiku-4-5": (1.00, 5.00),
 }
 
-# Per 1M characters.
+# Per 1M characters. Declaration order is not load-bearing: estimate_cost()
+# matches candidates longest-prefix-first, so tts-1 vs tts-1-hd resolve
+# correctly regardless of the order these are listed in.
 OPENAI_TTS_PRICING = {
-    "tts-1-hd": 30.00,  # longest prefix first — tts-1 is a prefix of tts-1-hd
+    "tts-1-hd": 30.00,
     "tts-1": 15.00,
 }
 
 
 def estimate_cost(service, model, tokens_in, tokens_out, chars):
-    """Best-effort cost estimate in USD; None when unknown (never guess)."""
+    """Best-effort cost estimate in USD; None when unknown (never guess).
+
+    Candidates are sorted by prefix length descending so the longest (most
+    specific) match wins regardless of the tables' declaration order —
+    ordering in ANTHROPIC_PRICING/OPENAI_TTS_PRICING is no longer load-bearing.
+    """
     if service == "anthropic" and model:
-        for prefix, (in_rate, out_rate) in ANTHROPIC_PRICING.items():
+        for prefix, (in_rate, out_rate) in sorted(
+            ANTHROPIC_PRICING.items(), key=lambda kv: -len(kv[0])
+        ):
             if model.startswith(prefix):
                 return ((tokens_in or 0) / 1_000_000) * in_rate + \
                        ((tokens_out or 0) / 1_000_000) * out_rate
     if service == "openai_tts" and model:
-        for prefix, rate in OPENAI_TTS_PRICING.items():
+        for prefix, rate in sorted(
+            OPENAI_TTS_PRICING.items(), key=lambda kv: -len(kv[0])
+        ):
             if model.startswith(prefix):
                 return ((chars or 0) / 1_000_000) * rate
     return None
@@ -92,13 +103,18 @@ def read_audit_entries(
 ) -> list[dict]:
     """Read audit entries. date='YYYY-MM-DD' reads one file; month='YYYY-MM'
     reads every file in that month; neither reads everything."""
+    # Alias immediately: the `date` parameter name is part of the public
+    # signature (callers use it as a keyword), but it shadows the
+    # module-level `datetime.date` import for the rest of this function.
+    # Using `day` internally avoids that trap without renaming the param.
+    day = date
     audit_dir = config.library / "audit"
     if not audit_dir.exists():
         return []
     entries: list[dict] = []
     for path in sorted(audit_dir.glob("*.jsonl")):
         stem = path.stem
-        if date and stem != date:
+        if day and stem != day:
             continue
         if month and not stem.startswith(month):
             continue

@@ -110,3 +110,42 @@ def test_audited_anthropic_call_logs_failure_and_reraises(initialized_library):
     entry = json.loads(_today_file(initialized_library).read_text().splitlines()[-1])
     assert entry["success"] is False
     assert "api down" in entry["error"]
+
+
+def test_read_audit_entries_date_exact_match(initialized_library):
+    # A real entry logged "today", plus a second file for an unrelated date
+    # written directly (no log_api_call involved) to prove date= is an exact
+    # filename match, not a prefix/substring match.
+    log_api_call(initialized_library, "anthropic", endpoint="digest",
+                 model="claude-opus-4-6", tokens_in=10, tokens_out=5)
+
+    old_file = initialized_library.library / "audit" / "2020-01-01.jsonl"
+    old_entry = {"service": "anthropic", "endpoint": "old", "success": True}
+    old_file.write_text(json.dumps(old_entry) + "\n")
+
+    today = date.today().isoformat()
+
+    old_results = read_audit_entries(initialized_library, date="2020-01-01")
+    assert len(old_results) == 1
+    assert old_results[0]["endpoint"] == "old"
+
+    today_results = read_audit_entries(initialized_library, date=today)
+    assert len(today_results) == 1
+    assert today_results[0]["endpoint"] == "digest"
+
+
+def test_read_audit_entries_skips_corrupt_lines(initialized_library, caplog):
+    log_api_call(initialized_library, "anthropic", endpoint="digest",
+                 model="claude-opus-4-6", tokens_in=10, tokens_out=5)
+
+    today_file = _today_file(initialized_library)
+    with today_file.open("a") as f:
+        f.write("{not json\n")
+        f.write(json.dumps({"service": "anthropic", "endpoint": "second", "success": True}) + "\n")
+
+    with caplog.at_level("WARNING"):
+        entries = read_audit_entries(initialized_library)
+
+    assert len(entries) == 2
+    assert {e["endpoint"] for e in entries} == {"digest", "second"}
+    assert any("corrupt audit line" in record.message for record in caplog.records)
