@@ -157,9 +157,9 @@ async def lifespan(app: FastAPI):
     recalculate_decay(config)
 
     # Start IMAP sync background task if configured
-    sync_task = None
+    app.state.imap_task = None
     if config.imap_enabled and config.imap_sync_interval > 0:
-        sync_task = asyncio.create_task(_imap_sync_loop(config))
+        app.state.imap_task = asyncio.create_task(_imap_sync_loop(config))
         logger.info("IMAP sync started: every %d minutes", config.imap_sync_interval)
 
     # Start digest schedule background task if configured
@@ -179,7 +179,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cancel background tasks on shutdown
-    for task in [sync_task, digest_task, vector_retry_task]:
+    for task in [getattr(app.state, "imap_task", None), digest_task, vector_retry_task]:
         if task and not task.done():
             task.cancel()
             try:

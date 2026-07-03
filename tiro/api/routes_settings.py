@@ -86,8 +86,8 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     if not body.gmail_address or not body.app_password:
         raise HTTPException(status_code=400, detail="Gmail address and app password are required")
 
-    if not body.enable_send and not body.enable_receive:
-        raise HTTPException(status_code=400, detail="Select at least one feature (send or receive)")
+    # Note: both enable_send and enable_receive may be False — that's a valid
+    # request to turn a previously-enabled feature (typically receive/IMAP) off.
 
     # Update config.yaml
     updates: dict = {}
@@ -108,6 +108,8 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         updates["imap_label"] = body.imap_label
         updates["imap_enabled"] = True
         updates["imap_sync_interval"] = body.imap_sync_interval
+    else:
+        updates["imap_enabled"] = False
 
     try:
         persist_config(config, updates)
@@ -131,8 +133,28 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
         config.imap_label = body.imap_label
         config.imap_enabled = True
         config.imap_sync_interval = body.imap_sync_interval
+    else:
+        config.imap_enabled = False
 
     logger.info("Email settings updated: send=%s, receive=%s", body.enable_send, body.enable_receive)
+
+    # Dynamically restart the IMAP sync task to reflect the new config
+    existing_task = getattr(request.app.state, "imap_task", None)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+        try:
+            await existing_task
+        except asyncio.CancelledError:
+            pass
+
+    if config.imap_enabled and config.imap_sync_interval > 0:
+        from tiro.app import _imap_sync_loop
+
+        request.app.state.imap_task = asyncio.create_task(_imap_sync_loop(config))
+        logger.info("IMAP sync restarted: every %d min", config.imap_sync_interval)
+    else:
+        request.app.state.imap_task = None
+        logger.info("IMAP sync disabled")
 
     return {
         "success": True,

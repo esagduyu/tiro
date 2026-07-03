@@ -90,6 +90,27 @@ def test_digest_schedule_persists_to_config_path(authenticated_client, configure
     assert "08:30" in _cfg_text(configured_library)
 
 
+def test_email_settings_restart_imap_task(authenticated_client, configured_library):
+    app = authenticated_client.app
+    assert getattr(app.state, "imap_task", None) is None  # disabled at startup
+
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": False, "enable_receive": True,
+        "gmail_address": "u@gmail.com", "app_password": "xxxx yyyy zzzz aaaa",
+        "imap_label": "tiro", "imap_sync_interval": 15,
+    })
+    assert r.status_code == 200, r.text
+    task = app.state.imap_task
+    assert task is not None and not task.done()
+
+    r = authenticated_client.post("/api/settings/email", json={
+        "enable_send": False, "enable_receive": False,
+        "gmail_address": "u@gmail.com", "app_password": "xxxx yyyy zzzz aaaa",
+    })
+    assert r.status_code == 200, r.text
+    assert app.state.imap_task is None
+
+
 def test_no_cwd_relative_config_writes_left():
     import subprocess
 
