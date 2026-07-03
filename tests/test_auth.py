@@ -494,10 +494,32 @@ def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeyp
         mcp_server._get_config()  # revocation now bites on next call
 
 
-def test_cross_site_setup_rejected(auth_client):
+def test_cross_site_setup_rejected(auth_client, client):
+    # On a configured library, "already configured" would also 403 here even
+    # if CSRF were removed — so the status code alone doesn't pin CSRF.
+    # Assert the detail string proves _check_csrf actually fired.
     r = auth_client.post("/api/auth/setup", json={"password": "x", "confirm": "x"},
                          headers={"Sec-Fetch-Site": "cross-site"})
     assert r.status_code == 403
+    assert "cross-site" in r.json()["detail"].lower()
+
+    # On an *unconfigured* library there's no masking branch to hide behind:
+    # cross-site must still 403 with the same CSRF detail.
+    r2 = client.post(
+        "/api/auth/setup",
+        json={"password": "a-valid-password-123"},
+        headers={"Sec-Fetch-Site": "cross-site"},
+    )
+    assert r2.status_code == 403
+    assert "cross-site" in r2.json()["detail"].lower()
+
+    # Control: the identical request minus the cross-site header must NOT
+    # be blocked by CSRF — it proceeds to normal setup semantics (200).
+    r3 = client.post(
+        "/api/auth/setup",
+        json={"password": "a-valid-password-123"},
+    )
+    assert r3.status_code == 200
 
 
 def test_cross_site_logout_rejected(auth_client):
