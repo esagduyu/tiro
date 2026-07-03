@@ -85,6 +85,29 @@
     <button id="btn-configure-tts" class="settings-configure-btn">Configure TTS</button>
 </div>
 
+<!-- API Tokens -->
+<div class="settings-section">
+    <h3 class="settings-section-title">API Tokens</h3>
+    <p class="settings-section-desc">Tokens let the Chrome extension, MCP server, and scripts access your library. Treat them like passwords.</p>
+
+    <div id="tokens-status" class="settings-status">
+        <div class="settings-loading">
+            <div class="digest-spinner"></div>
+            <p>Loading tokens...</p>
+        </div>
+    </div>
+
+    <div id="token-create-form" style="margin-top: 1rem;">
+        <div class="settings-field">
+            <label>New token name</label>
+            <input type="text" id="token-name-input" placeholder="e.g. Chrome extension" maxlength="100">
+        </div>
+        <button id="btn-create-token" class="settings-configure-btn">Create Token</button>
+    </div>
+
+    <div id="token-reveal" style="display: none; margin-top: 1rem;"></div>
+</div>
+
 <script>
 (function() {
     let appearanceData = null;
@@ -787,6 +810,191 @@
         });
     }
 
+    // --- API Tokens ---
+    let tokensData = [];
+
+    function formatTokenDate(s) {
+        if (!s) return null;
+        var d = new Date(s.replace(' ', 'T') + 'Z');
+        if (isNaN(d.getTime())) return s;
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    async function loadTokens() {
+        var statusEl = document.getElementById('tokens-status');
+        try {
+            var res = await fetch('/api/tokens');
+            var json = await res.json();
+            if (!json.success) throw new Error('API error');
+            tokensData = json.data;
+            renderTokensList(tokensData);
+        } catch (err) {
+            while (statusEl.firstChild) statusEl.removeChild(statusEl.firstChild);
+            var p = document.createElement('p');
+            p.className = 'settings-error';
+            p.textContent = 'Failed to load tokens.';
+            statusEl.appendChild(p);
+        }
+    }
+
+    function renderTokensList(tokens) {
+        var statusEl = document.getElementById('tokens-status');
+        while (statusEl.firstChild) statusEl.removeChild(statusEl.firstChild);
+
+        if (!tokens || tokens.length === 0) {
+            var empty = document.createElement('p');
+            empty.className = 'status-detail muted';
+            empty.textContent = 'No tokens yet.';
+            statusEl.appendChild(empty);
+            return;
+        }
+
+        tokens.forEach(function(t) {
+            var row = document.createElement('div');
+            row.className = 'status-card';
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.justifyContent = 'space-between';
+            row.style.gap = '0.75rem';
+            row.style.marginBottom = '0.5rem';
+
+            var line = document.createElement('span');
+            line.className = 'status-detail';
+            var created = formatTokenDate(t.created_at) || 'unknown';
+            var lastUsed = formatTokenDate(t.last_used_at) || 'never';
+            line.textContent = t.name + ' · created ' + created + ' · last used ' + lastUsed;
+
+            var revokeBtn = document.createElement('button');
+            revokeBtn.className = 'settings-configure-btn settings-configure-btn-secondary';
+            revokeBtn.textContent = 'Revoke';
+            revokeBtn.addEventListener('click', function() { revokeToken(t.id, t.name); });
+
+            row.appendChild(line);
+            row.appendChild(revokeBtn);
+            statusEl.appendChild(row);
+        });
+    }
+
+    async function revokeToken(id, name) {
+        if (!confirm('Revoke token "' + name + '"? Anything using it will stop working immediately.')) return;
+
+        try {
+            var res = await fetch('/api/tokens/' + id, { method: 'DELETE' });
+            if (!res.ok) {
+                var json = await res.json().catch(function() { return {}; });
+                showToast(json.detail || 'Failed to revoke token', 'error');
+                return;
+            }
+            showToast('Token revoked', 'success');
+            loadTokens();
+        } catch (err) {
+            showToast('Connection error', 'error');
+        }
+    }
+
+    document.getElementById('btn-create-token').addEventListener('click', async function() {
+        var input = document.getElementById('token-name-input');
+        var name = input.value.trim();
+        if (!name) {
+            showToast('Token name is required', 'error');
+            return;
+        }
+
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Creating...';
+
+        try {
+            var res = await fetch('/api/tokens', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name }),
+            });
+            var json = await res.json();
+            if (!res.ok) {
+                showToast(json.detail || 'Failed to create token', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Create Token';
+                return;
+            }
+
+            input.value = '';
+            btn.disabled = false;
+            btn.textContent = 'Create Token';
+            showNewToken(json.data.token);
+            loadTokens();
+        } catch (err) {
+            showToast('Connection error', 'error');
+            btn.disabled = false;
+            btn.textContent = 'Create Token';
+        }
+    });
+
+    function showNewToken(rawToken) {
+        document.getElementById('token-create-form').style.display = 'none';
+
+        var reveal = document.getElementById('token-reveal');
+        while (reveal.firstChild) reveal.removeChild(reveal.firstChild);
+        reveal.style.display = '';
+
+        var field = document.createElement('div');
+        field.className = 'settings-field';
+
+        var label = document.createElement('label');
+        label.textContent = 'Your new token';
+        field.appendChild(label);
+
+        var codeRow = document.createElement('div');
+        codeRow.style.display = 'flex';
+        codeRow.style.alignItems = 'center';
+        codeRow.style.gap = '0.5rem';
+
+        var code = document.createElement('code');
+        code.style.flex = '1';
+        code.style.padding = '0.5rem 0.75rem';
+        code.style.border = '1px solid var(--tiro-border)';
+        code.style.borderRadius = '6px';
+        code.style.background = 'var(--tiro-bg)';
+        code.style.fontFamily = 'monospace';
+        code.style.fontSize = '0.85rem';
+        code.style.overflowWrap = 'anywhere';
+        code.textContent = rawToken;
+
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'settings-configure-btn settings-configure-btn-secondary';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', function() {
+            navigator.clipboard.writeText(rawToken).then(function() {
+                showToast('Token copied to clipboard', 'success');
+            }).catch(function() {
+                showToast('Could not copy — select and copy manually', 'error');
+            });
+        });
+
+        codeRow.appendChild(code);
+        codeRow.appendChild(copyBtn);
+        field.appendChild(codeRow);
+
+        var warning = document.createElement('p');
+        warning.className = 'settings-modal-hint';
+        warning.style.color = 'var(--tiro-rate-dislike)';
+        warning.textContent = "Copy it now — it won't be shown again.";
+
+        var doneBtn = document.createElement('button');
+        doneBtn.className = 'settings-save-btn';
+        doneBtn.textContent = 'Done';
+        doneBtn.addEventListener('click', function() {
+            reveal.style.display = 'none';
+            while (reveal.firstChild) reveal.removeChild(reveal.firstChild);
+            document.getElementById('token-create-form').style.display = '';
+            loadTokens();
+        });
+
+        reveal.appendChild(field);
+        reveal.appendChild(warning);
+        reveal.appendChild(doneBtn);
+    }
+
     // --- Toast notifications ---
     function showToast(message, type) {
         var existing = document.querySelector('.settings-toast');
@@ -883,6 +1091,7 @@
     loadAppearanceSettings();
     loadEmailSettings();
     loadTtsSettings();
+    loadTokens();
 })();
 </script>
 {% endblock %}
