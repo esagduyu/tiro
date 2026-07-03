@@ -120,7 +120,7 @@ def list_api_tokens(db_path: Path) -> list[dict]:
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT id, name, created_at, last_used_at FROM api_tokens ORDER BY created_at"
+            "SELECT id, name, created_at, last_used_at FROM api_tokens ORDER BY created_at, id"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
