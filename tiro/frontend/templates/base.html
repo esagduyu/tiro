@@ -6,8 +6,8 @@
     <title>{% block title %}Tiro{% endblock %}</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any">
     <link rel="icon" href="/static/favicon-32.png" type="image/png" sizes="32x32">
-    <link id="theme-css" rel="stylesheet" href="/static/themes/papyrus.css?v=48">
-    <link rel="stylesheet" href="/static/styles.css?v=48">
+    <link id="theme-css" rel="stylesheet" href="/static/themes/papyrus.css?v=49">
+    <link rel="stylesheet" href="/static/styles.css?v=49">
     <script>
     // Apply theme before render to prevent flash
     (function() {
@@ -15,7 +15,7 @@
         if (!mode) mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         document.documentElement.setAttribute('data-theme', mode);
         var theme = mode === 'dark' ? 'roman-night' : 'papyrus';
-        document.getElementById('theme-css').href = '/static/themes/' + theme + '.css?v=48';
+        document.getElementById('theme-css').href = '/static/themes/' + theme + '.css?v=49';
     })();
     </script>
 </head>
@@ -121,8 +121,8 @@
             <div id="shortcuts-body" class="shortcuts-body"></div>
         </div>
     </div>
-    <script src="/static/vendor/marked.min.js?v=48"></script>
-    <script src="/static/vendor/purify.min.js?v=48"></script>
-    <script src="/static/app.js?v=48"></script>
+    <script src="/static/vendor/marked.min.js?v=49"></script>
+    <script src="/static/vendor/purify.min.js?v=49"></script>
+    <script src="/static/app.js?v=49"></script>
 </body>
 </html>

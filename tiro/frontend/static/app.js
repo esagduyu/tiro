@@ -1404,7 +1404,7 @@ function renderFilterSection(title, items, scrollable) {
     const optionsHtml = items.map(item =>
         `<button class="filter-option${isActive(item) ? " active" : ""}"
                 data-key="${item.key}" data-value="${esc(item.value)}">
-            <span>${item.label}</span>
+            <span>${esc(item.label)}</span>
             <span class="filter-option-count">${item.count}</span>
         </button>`
     ).join("");

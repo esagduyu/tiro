@@ -199,7 +199,7 @@
         var themes = data.themes || [];
 
         var themeOptions = themes.map(function(t) {
-            return '<option value="' + t.name + '">' + t.name + (t.builtin ? '' : ' (custom)') + '</option>';
+            return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) + (t.builtin ? '' : ' (custom)') + '</option>';
         }).join('');
 
         var pageSizes = [
