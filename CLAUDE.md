@@ -116,7 +116,16 @@ lsof -ti :8000 | xargs kill -9
 
 ## Current Status
 
-**Completed:** 17 spec checkpoints + 6 beyond-spec (Gmail IMAP/SMTP, TTS, IMAP scheduler, knowledge graph, UX redesign, digest scheduling & history). Seed script updated with full demo library (22 URLs + ratings/VIP).
+**Hackathon build (on `master`):** 17 spec checkpoints + 6 beyond-spec (Gmail IMAP/SMTP, TTS, IMAP scheduler, knowledge graph, UX redesign, digest scheduling & history). Seed script updated with full demo library (22 URLs + ratings/VIP).
+
+**Phase 0 — Security & Integrity Release (in progress, branch `phase-0-security-integrity`):** transitioning from demo to public alpha (`0.2`). Milestones M0–M4a complete and reviewed; M4b, M5, M6, M7 remain. Local-only source of truth for status + next action + gotchas: `docs/plans/phase-0-progress.md` (docs/ is gitignored). Full spec: `docs/plans/2026-07-02-phase-0-security-integrity-design.md`.
+
+**Load-bearing conventions introduced on the Phase 0 branch** (a session working on this branch must know these; the hackathon docs above predate them):
+- **Auth is now required.** All `/api/*` routes except `POST /api/auth/login`, `POST /api/auth/setup` (while unconfigured), `GET /api/auth/status`, `POST /api/auth/logout`, `GET /healthz` return 401 unauthenticated; HTML pages 302 → `/login`; FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`) are disabled. Auth backend in `tiro/auth.py` (bcrypt password in `config.yaml` `auth_password_hash`, SQLite `sessions` + `api_tokens` tables, `require_auth`/`require_page_auth` deps, Host-header validation + `Sec-Fetch-Site` CSRF). Tests use the `authenticated_client`/`auth_client`/`configured_library` conftest fixtures. `tiro set-password` / `tiro token create|list|revoke` CLIs. MCP server gated on `TIRO_API_TOKEN` when a password is set.
+- **Sanitize invariant:** `tiro/sanitize.py` (`sanitize_html` via nh3) runs in the EXTRACTION functions (`web.py`/`email.py`) before markdownify — NOT in `processor.py`. Content reaching `process_article()` is already sanitized. Client renders markdown through `renderMarkdown` (marked → DOMPurify) and escapes every server string at `innerHTML` sinks via `esc()`/`num()`. Never route the already-clean settings token UI through a sanitize+innerHTML path.
+- **Frontend deps vendored** in `tiro/frontend/static/vendor/` (marked 15.0.12, DOMPurify 3.4.11, Chart.js 4.4.7, d3 7.9.0) — no CDN at runtime (test-enforced). **Cache-bust is at `v=52`** and is a single shared counter — bump ALL `?v=` occurrences across every template together when changing static JS/CSS (grep first).
+- **Delete + atomic ingestion:** `tiro/lifecycle.py` `delete_article()` is the one coordinator cleaning all four stores (SQLite rows+junctions, ChromaDB, markdown, MP3), shared by `DELETE /api/articles/{id}`, `tiro delete`, and ingestion rollback. `process_article()` is a staged pipeline: failures after row+file exist roll back through `delete_article`; ChromaDB failure is non-fatal (`articles.vector_status='pending'`, background retry loop with idempotent `upsert`). Residual inconsistencies (file-without-row, row-without-file) are recoverable and are `tiro doctor`'s job (M5).
+- **Test harness:** `pytest` under `tests/`, isolated fixtures in `conftest.py` (temp library, offline, autouse CWD guard). Route-walk test (`test_auth.py`) enforces the auth allowlist as an invariant over `app.routes` — new routes are auto-covered.
 
 <!-- UPDATE THIS SECTION AS YOU COMPLETE CHECKPOINTS -->
 <!--
