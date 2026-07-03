@@ -83,3 +83,18 @@ def test_token_cli_lifecycle(tmp_path, capsys):
     tid = auth.list_api_tokens(db)[0]["id"]
     cmd_token(_token_args(cfg_file, "revoke", id=tid))
     assert auth.list_api_tokens(db) == []
+
+
+def test_mcp_gate_friendly_error_on_uninitialized_library(tmp_path, monkeypatch):
+    from tiro.config import TiroConfig
+    from tiro.mcp.server import _require_token_gate
+
+    monkeypatch.setenv("TIRO_API_TOKEN", "some-nonempty-token")
+
+    cfg = TiroConfig(library_path=str(tmp_path / "never-initialized"))
+    cfg.auth_password_hash = "$2b$12$fakefakefakefakefakefakefakefakefakefakefakefakefak"
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError) as exc:
+        _require_token_gate(cfg)
+    assert "tiro init" in str(exc.value)

@@ -169,3 +169,18 @@ def test_retry_pending_vectors_indexes_them(initialized_library, monkeypatch):
         conn.close()
     assert vs == "indexed"
     assert get_collection().get(ids=[f"article_{result['id']}"])["ids"]
+
+
+def test_email_duplicate_409_is_structured(authenticated_client):
+    from pathlib import Path
+
+    eml = (Path(__file__).parent / "fixtures" / "newsletter.eml").read_bytes()
+    files = {"file": ("newsletter.eml", eml, "message/rfc822")}
+    assert authenticated_client.post("/api/ingest/email", files=files).status_code == 200
+    r = authenticated_client.post("/api/ingest/email", files=files)
+    assert r.status_code == 409
+    body = r.json()
+    assert body["error"] == "already_saved"
+    assert isinstance(body["data"]["id"], int)
+    assert body["data"]["title"]
+    assert "detail" in body  # backward-compatible human string

@@ -35,14 +35,29 @@ def _require_token_gate(config: TiroConfig) -> None:
 
     if not config.auth_password_hash:
         return
-    from tiro import auth
 
     token = os.environ.get("TIRO_API_TOKEN", "")
-    if not token or not auth.validate_api_token(config.db_path, token):
+    if not token:
         raise RuntimeError(
             "Tiro has a password configured. Set TIRO_API_TOKEN to a valid "
             "API token (create one with: tiro token create mcp) in your MCP "
             "client config's env block."
+        )
+    import sqlite3
+
+    from tiro import auth
+
+    try:
+        valid = auth.validate_api_token(config.db_path, token)
+    except sqlite3.OperationalError as e:
+        raise RuntimeError(
+            "Tiro library is not initialized — run `uv run tiro init` (and "
+            "start Tiro once) before connecting the MCP server."
+        ) from e
+    if not valid:
+        raise RuntimeError(
+            "TIRO_API_TOKEN is not a valid API token. Create one with: "
+            "tiro token create mcp"
         )
 
 

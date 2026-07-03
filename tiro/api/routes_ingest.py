@@ -131,7 +131,7 @@ async def ingest_email(file: UploadFile, request: Request):
     conn = get_connection(config.db_path)
     try:
         existing = conn.execute(
-            "SELECT a.id, a.title FROM articles a "
+            "SELECT a.id, a.title, a.ingested_at, s.name AS source_name FROM articles a "
             "JOIN sources s ON a.source_id = s.id "
             "WHERE a.title = ? AND s.email_sender = ?",
             (extracted["title"], extracted["email_sender"]),
@@ -140,7 +140,20 @@ async def ingest_email(file: UploadFile, request: Request):
         conn.close()
     if existing:
         logger.info("Duplicate email skipped: '%s' already saved as article %d", existing["title"], existing["id"])
-        raise HTTPException(status_code=409, detail=f"Article already saved: \"{existing['title']}\" (id={existing['id']})")
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "error": "already_saved",
+                "detail": f"Article already saved: \"{existing['title']}\" (id={existing['id']})",
+                "data": {
+                    "id": existing["id"],
+                    "title": existing["title"],
+                    "source": existing["source_name"],
+                    "ingested_at": existing["ingested_at"],
+                },
+            },
+        )
 
     try:
         article = await asyncio.to_thread(
