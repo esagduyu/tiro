@@ -5,6 +5,7 @@ import logging
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from tiro.intelligence.digest import (
     generate_digest,
@@ -18,20 +19,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/digest", tags=["digest"])
 
 
+class DigestGenerateRequest(BaseModel):
+    unread_only: bool = False
+
+
 @router.get("/today")
-async def digest_today(request: Request, refresh: bool = False, unread_only: bool = False):
-    """Generate or retrieve today's cached digest (all three variants)."""
+async def digest_today(request: Request):
+    """Return today's cached digest (all three variants). Pure read —
+    generation is POST /api/digest/today (M4b: no side effects via GET)."""
     config = request.app.state.config
     today = date.today().isoformat()
+    cached = await asyncio.to_thread(get_cached_digest, config, today)
+    if cached:
+        logger.info("Returning cached digest for %s", today)
+        return {"success": True, "data": cached, "cached": True}
+    raise HTTPException(status_code=404, detail="No digest cached yet")
 
-    # Return cached unless refresh requested
-    if not refresh:
-        cached = await asyncio.to_thread(get_cached_digest, config, today)
-        if cached:
-            logger.info("Returning cached digest for %s", today)
-            return {"success": True, "data": cached, "cached": True}
 
-    # Generate fresh digest (offloaded to thread — Opus call can take 10-30s)
+@router.post("/today")
+async def digest_generate(request: Request, payload: DigestGenerateRequest | None = None):
+    """Generate a fresh digest (all three variants) with Opus."""
+    config = request.app.state.config
+    unread_only = payload.unread_only if payload else False
+
+    # Offloaded to thread — Opus call can take 10-30s
     try:
         result = await asyncio.to_thread(generate_digest, config, unread_only=unread_only)
         return {"success": True, "data": result, "cached": False}
@@ -45,8 +56,9 @@ async def digest_today(request: Request, refresh: bool = False, unread_only: boo
 
 
 @router.get("/today/{digest_type}")
-async def digest_by_type(digest_type: str, request: Request, refresh: bool = False):
-    """Get a specific digest variant: ranked, by_topic, or by_entity."""
+async def digest_by_type(digest_type: str, request: Request):
+    """Get a specific cached digest variant: ranked, by_topic, or by_entity.
+    Pure read — 404 on miss; POST /api/digest/today to generate."""
     if digest_type not in ("ranked", "by_topic", "by_entity"):
         raise HTTPException(
             status_code=400,
@@ -55,26 +67,10 @@ async def digest_by_type(digest_type: str, request: Request, refresh: bool = Fal
 
     config = request.app.state.config
     today = date.today().isoformat()
-
-    # Return cached unless refresh requested
-    if not refresh:
-        cached = await asyncio.to_thread(get_cached_digest, config, today, digest_type)
-        if cached:
-            return {"success": True, "data": cached, "cached": True}
-
-    # Generate all three (Opus generates them together in one prompt)
-    try:
-        result = await asyncio.to_thread(generate_digest, config)
-        if digest_type in result:
-            return {"success": True, "data": {digest_type: result[digest_type]}, "cached": False}
-        raise HTTPException(status_code=500, detail=f"Digest type '{digest_type}' was not generated")
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Digest generation failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Digest generation failed")
+    cached = await asyncio.to_thread(get_cached_digest, config, today, digest_type)
+    if cached:
+        return {"success": True, "data": cached, "cached": True}
+    raise HTTPException(status_code=404, detail=f"No cached '{digest_type}' digest")
 
 
 @router.get("/history")
