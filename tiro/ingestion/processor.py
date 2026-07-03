@@ -171,77 +171,103 @@ def process_article(
         except Exception as e:
             logger.error("Failed to update reading stats: %s", e)
 
-        # --- AI metadata extraction (Haiku) ---
-        ai = extract_metadata(title, content_md, config)
-        summary = ai["summary"]
-        tag_names = ai["tags"]
-        entity_list = ai["entities"]
-
-        if summary:
-            conn.execute(
-                "UPDATE articles SET summary = ? WHERE id = ?",
-                (summary, article_id),
-            )
-
-        for tag_name in tag_names:
-            conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
-            tag_row = conn.execute(
-                "SELECT id FROM tags WHERE name = ?", (tag_name,)
-            ).fetchone()
-            conn.execute(
-                "INSERT OR IGNORE INTO article_tags (article_id, tag_id) VALUES (?, ?)",
-                (article_id, tag_row["id"]),
-            )
-
-        for entity in entity_list:
-            conn.execute(
-                "INSERT OR IGNORE INTO entities (name, entity_type) VALUES (?, ?)",
-                (entity["name"], entity["type"]),
-            )
-            ent_row = conn.execute(
-                "SELECT id FROM entities WHERE name = ? AND entity_type = ?",
-                (entity["name"], entity["type"]),
-            ).fetchone()
-            conn.execute(
-                "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
-                (article_id, ent_row["id"]),
-            )
-
-        conn.commit()
-
-        # Update frontmatter with AI-extracted metadata
-        post.metadata["tags"] = tag_names
-        post.metadata["entities"] = [e["name"] for e in entity_list]
-        if summary:
-            post.metadata["summary"] = summary
-        md_path.write_text(frontmatter.dumps(post))
-
-        # --- Store in ChromaDB ---
-        collection = get_collection()
-        collection.add(
-            ids=[f"article_{article_id}"],
-            documents=[content_md],
-            metadatas=[
-                {
-                    "title": title,
-                    "source": source_name,
-                    "is_vip": is_vip,
-                    "tags": ",".join(tag_names),
-                    "published_at": pub_date.strftime("%Y-%m-%d"),
-                    "article_id": article_id,
-                }
-            ],
-        )
-        logger.info("Added article %d to ChromaDB", article_id)
-
-        # --- Find and store related articles ---
+        # Row + markdown file now exist and are committed. Everything below
+        # this point is rollback-guarded: a failure in enrichment/frontmatter
+        # unwinds via delete_article() and re-raises (no orphan row/file).
         try:
-            relations = find_related_articles(article_id, config, limit=5)
-            if relations:
-                generate_connection_notes(summary or "", title, relations, config)
-                store_relations(article_id, relations, config)
-        except Exception as e:
-            logger.error("Related articles failed for %d: %s", article_id, e)
+            # --- AI metadata extraction (Haiku) ---
+            ai = extract_metadata(title, content_md, config)
+            summary = ai["summary"]
+            tag_names = ai["tags"]
+            entity_list = ai["entities"]
+
+            if summary:
+                conn.execute(
+                    "UPDATE articles SET summary = ? WHERE id = ?",
+                    (summary, article_id),
+                )
+
+            for tag_name in tag_names:
+                conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
+                tag_row = conn.execute(
+                    "SELECT id FROM tags WHERE name = ?", (tag_name,)
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO article_tags (article_id, tag_id) VALUES (?, ?)",
+                    (article_id, tag_row["id"]),
+                )
+
+            for entity in entity_list:
+                conn.execute(
+                    "INSERT OR IGNORE INTO entities (name, entity_type) VALUES (?, ?)",
+                    (entity["name"], entity["type"]),
+                )
+                ent_row = conn.execute(
+                    "SELECT id FROM entities WHERE name = ? AND entity_type = ?",
+                    (entity["name"], entity["type"]),
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
+                    (article_id, ent_row["id"]),
+                )
+
+            conn.commit()
+
+            # Update frontmatter with AI-extracted metadata
+            post.metadata["tags"] = tag_names
+            post.metadata["entities"] = [e["name"] for e in entity_list]
+            if summary:
+                post.metadata["summary"] = summary
+            md_path.write_text(frontmatter.dumps(post))
+
+            # --- Store in ChromaDB (non-fatal: retry loop indexes failures) ---
+            try:
+                collection = get_collection()
+                collection.add(
+                    ids=[f"article_{article_id}"],
+                    documents=[content_md],
+                    metadatas=[
+                        {
+                            "title": title,
+                            "source": source_name,
+                            "is_vip": is_vip,
+                            "tags": ",".join(tag_names),
+                            "published_at": pub_date.strftime("%Y-%m-%d"),
+                            "article_id": article_id,
+                        }
+                    ],
+                )
+                conn.execute(
+                    "UPDATE articles SET vector_status = 'indexed' WHERE id = ?",
+                    (article_id,),
+                )
+                conn.commit()
+                logger.info("Added article %d to ChromaDB", article_id)
+            except Exception as e:
+                logger.error("ChromaDB add failed for %d (will retry): %s", article_id, e)
+                conn.execute(
+                    "UPDATE articles SET vector_status = 'pending' WHERE id = ?",
+                    (article_id,),
+                )
+                conn.commit()
+
+            # --- Find and store related articles (non-fatal) ---
+            try:
+                relations = find_related_articles(article_id, config, limit=5)
+                if relations:
+                    generate_connection_notes(summary or "", title, relations, config)
+                    store_relations(article_id, relations, config)
+            except Exception as e:
+                logger.error("Related articles failed for %d: %s", article_id, e)
+        except Exception:
+            # Enrichment/frontmatter stage failed: unwind the row + file.
+            # delete_article() opens its own connection, so release ours
+            # first to avoid a SQLite write-lock deadlock.
+            conn.close()
+            from tiro.lifecycle import delete_article
+
+            delete_article(config, article_id)
+            raise
 
         return {
             "id": article_id,
