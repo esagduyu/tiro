@@ -294,18 +294,23 @@ async def rate_article(article_id: int, body: RateRequest, request: Request):
     config = request.app.state.config
     conn = get_connection(config.db_path)
     try:
-        cursor = conn.execute(
+        row = conn.execute(
+            "SELECT rating FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Article not found")
+        first_rating = row["rating"] is None
+        conn.execute(
             "UPDATE articles SET rating = ? WHERE id = ?",
             (body.rating, article_id),
         )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Article not found")
         conn.commit()
 
-        try:
-            update_stat(config, "articles_rated")
-        except Exception as e:
-            logger.error("Failed to update reading stats: %s", e)
+        if first_rating:
+            try:
+                update_stat(config, "articles_rated")
+            except Exception as e:
+                logger.error("Failed to update reading stats: %s", e)
 
         return {"success": True, "data": {"id": article_id, "rating": body.rating}}
     finally:
@@ -318,25 +323,27 @@ async def mark_read(article_id: int, request: Request):
     config = request.app.state.config
     conn = get_connection(config.db_path)
     try:
-        cursor = conn.execute(
+        row = conn.execute(
+            "SELECT is_read, reading_time_min FROM articles WHERE id = ?",
+            (article_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Article not found")
+        was_read = bool(row["is_read"])
+        conn.execute(
             "UPDATE articles SET is_read = 1, opened_count = opened_count + 1 WHERE id = ?",
             (article_id,),
         )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Article not found")
         conn.commit()
 
         # Update reading stats
-        try:
-            update_stat(config, "articles_read")
-            reading_time = conn.execute(
-                "SELECT reading_time_min FROM articles WHERE id = ?",
-                (article_id,),
-            ).fetchone()
-            if reading_time and reading_time["reading_time_min"]:
-                update_stat(config, "total_reading_time_min", reading_time["reading_time_min"])
-        except Exception as e:
-            logger.error("Failed to update reading stats: %s", e)
+        if not was_read:
+            try:
+                update_stat(config, "articles_read")
+                if row["reading_time_min"]:
+                    update_stat(config, "total_reading_time_min", row["reading_time_min"])
+            except Exception as e:
+                logger.error("Failed to update reading stats: %s", e)
 
         row = conn.execute(
             "SELECT is_read, opened_count FROM articles WHERE id = ?",

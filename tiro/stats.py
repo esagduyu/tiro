@@ -8,6 +8,10 @@ from tiro.database import get_connection
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_STAT_FIELDS = {
+    "articles_saved", "articles_read", "articles_rated", "total_reading_time_min",
+}
+
 
 def update_stat(config: TiroConfig, field: str, increment: int = 1) -> None:
     """Upsert today's reading_stats row and increment the given field.
@@ -16,6 +20,8 @@ def update_stat(config: TiroConfig, field: str, increment: int = 1) -> None:
         field: One of 'articles_saved', 'articles_read', 'articles_rated', 'total_reading_time_min'.
         increment: Amount to add (default 1).
     """
+    if field not in ALLOWED_STAT_FIELDS:
+        raise ValueError(f"Unknown stat field: {field!r}")
     today = date.today().isoformat()
     conn = get_connection(config.db_path)
     try:
