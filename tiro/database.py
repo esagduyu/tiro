@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS articles (
     ai_tier TEXT,
     relevance_weight REAL DEFAULT 1.0,
     ingenuity_analysis TEXT,
-    ingestion_method TEXT DEFAULT 'manual'
+    ingestion_method TEXT DEFAULT 'manual',
+    vector_status TEXT DEFAULT 'pending'
 );
 
 -- Tags (extracted topics)
@@ -155,12 +156,22 @@ def migrate_db(db_path: Path) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
         if "ingestion_method" not in cols:
             conn.execute("ALTER TABLE articles ADD COLUMN ingestion_method TEXT DEFAULT 'manual'")
-            conn.execute("""
-                UPDATE articles SET ingestion_method = 'email'
-                WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
-                AND ingestion_method = 'manual'
-            """)
+            try:
+                conn.execute("""
+                    UPDATE articles SET ingestion_method = 'email'
+                    WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
+                    AND ingestion_method = 'manual'
+                """)
+            except sqlite3.OperationalError:
+                # Legacy/partial tables (e.g. missing source_id/sources) — nothing to backfill.
+                pass
             conn.commit()
             logger.info("Migrated: added ingestion_method column")
+        if "vector_status" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN vector_status TEXT DEFAULT 'pending'")
+            # Existing rows already have their vectors — mark them indexed, not pending
+            conn.execute("UPDATE articles SET vector_status = 'indexed' WHERE vector_status = 'pending'")
+            conn.commit()
+            logger.info("Migrated: added vector_status column")
     finally:
         conn.close()
