@@ -20,7 +20,10 @@ config.yaml
 docs/
 
 # Playwright
-playwright-tests/
+playwright-tests/*
+!playwright-tests/phase0.spec.js
+!playwright-tests/package.json
+!playwright-tests/README.md
 .playwright-mcp/
 
 # Seed data

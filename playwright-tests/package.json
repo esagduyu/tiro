@@ -1,0 +1,12 @@
+{
+  "name": "tiro-playwright-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phase 0 end-to-end Playwright tests for Tiro (hand-run, not yet wired into CI).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}
