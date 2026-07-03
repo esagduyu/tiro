@@ -133,6 +133,9 @@ async function loadArticle(id) {
         // Rating buttons
         setupRating(a.id, a.rating);
 
+        // Delete button
+        setupDelete(a.id, a.title);
+
         // Related articles
         loadRelatedArticles(a.id);
 
@@ -183,6 +186,91 @@ function setupRating(articleId, currentRating) {
             }
         });
     });
+}
+
+/* --- Delete --- */
+
+function setupDelete(articleId, title) {
+    const btn = document.getElementById("delete-btn");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+        readerDeleteFlow(articleId, title);
+    });
+}
+
+function readerDeleteFlow(articleId, title) {
+    showReaderDeleteConfirm(title, async () => {
+        await deleteReaderArticle(articleId);
+    });
+}
+
+function showReaderDeleteConfirm(title, onConfirm) {
+    const existing = document.getElementById("delete-overlay");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "delete-overlay";
+    overlay.className = "export-overlay";
+    overlay.innerHTML =
+        '<div class="export-dialog">' +
+            "<h3>Delete article</h3>" +
+            `<p>Permanently delete <strong>${esc(title || "this article")}</strong> from your library? This cannot be undone.</p>` +
+            '<div class="export-dialog-actions">' +
+                '<button class="export-cancel-btn" id="delete-cancel">Cancel</button>' +
+                '<button class="export-confirm-btn" id="delete-confirm">Delete</button>' +
+            "</div>" +
+        "</div>";
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    document.getElementById("delete-cancel").addEventListener("click", close);
+    document.getElementById("delete-confirm").addEventListener("click", () => {
+        close();
+        onConfirm();
+    });
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close();
+    });
+    document.addEventListener("keydown", function handler(e) {
+        if (e.key === "Escape") {
+            close();
+            document.removeEventListener("keydown", handler);
+        }
+    });
+}
+
+async function deleteReaderArticle(articleId) {
+    try {
+        const res = await fetch(`/api/articles/${articleId}`, { method: "DELETE" });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showReaderToast(err.detail || "Failed to delete article", "error");
+            return;
+        }
+        showReaderToast("Article deleted", "success");
+        setTimeout(() => {
+            window.location.href = "/inbox";
+        }, 500);
+    } catch (err) {
+        console.error("Delete failed:", err);
+        showReaderToast("Failed to delete article", "error");
+    }
+}
+
+function showReaderToast(message, type) {
+    const existing = document.querySelector(".settings-toast");
+    if (existing) existing.remove();
+
+    const toast = document.createElement("div");
+    toast.className = "settings-toast settings-toast-" + (type || "info");
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    setTimeout(() => toast.classList.add("show"), 10);
+    setTimeout(() => {
+        toast.classList.remove("show");
+        setTimeout(() => toast.remove(), 300);
+    }, 3500);
 }
 
 function formatDate(isoStr) {
@@ -540,6 +628,10 @@ function setupReaderKeyboard(articleId) {
             case "r":
                 e.preventDefault();
                 readerRunAnalysis(articleId);
+                break;
+            case "x":
+                e.preventDefault();
+                document.getElementById("delete-btn")?.click();
                 break;
             case "d":
                 e.preventDefault();

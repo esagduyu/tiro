@@ -23,6 +23,7 @@ let perPage = 50; // default page size
 let activeFilters = {}; // e.g. { is_read: "false", ai_tier: "must-read", tag: "AI" }
 let filterPanelOpen = false;
 let filterData = null; // cached /api/filters response
+let selectedForDelete = new Set(); // article ids checked for bulk delete
 
 /* ---- Theme management ---- */
 
@@ -269,6 +270,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setupSearch();
         setupSort();
         setupFilterPanel();
+        setupBulkDeleteToolbar();
     }
     if (document.querySelector(".view-tab")) {
         setupViewTabs();
@@ -846,8 +848,11 @@ function renderArticle(a, showScore) {
         ? '<span class="tier-badge tier-badge-summary-enough">Summary</span>'
         : "";
 
+    const checked = selectedForDelete.has(Number(a.id)) ? "checked" : "";
+
     return `
     <article class="${classes.join(" ")}" data-id="${a.id}">
+        <input type="checkbox" class="bulk-select-checkbox" data-id="${a.id}" title="Select for bulk delete" ${checked}>
         <div class="article-main">
             <div class="article-meta">
                 ${tierBadge}
@@ -883,6 +888,20 @@ function renderArticle(a, showScore) {
 }
 
 function attachListeners() {
+    // Bulk-select checkboxes
+    document.querySelectorAll(".bulk-select-checkbox").forEach((cb) => {
+        cb.addEventListener("click", (e) => e.stopPropagation());
+        cb.addEventListener("change", () => {
+            const id = Number(cb.dataset.id);
+            if (cb.checked) {
+                selectedForDelete.add(id);
+            } else {
+                selectedForDelete.delete(id);
+            }
+            updateBulkDeleteToolbar();
+        });
+    });
+
     // Rating buttons
     document.querySelectorAll(".rate-btn").forEach((btn) => {
         btn.addEventListener("click", async (e) => {
@@ -1145,6 +1164,9 @@ function updateToolbar(articles) {
     classifyBtn.onclick = classifyArticles;
     discardToggle.onclick = toggleDiscarded;
     if (archivedToggle) archivedToggle.onclick = toggleArchived;
+
+    // Bulk-delete toolbar button reflects current selection
+    updateBulkDeleteToolbar();
 }
 
 async function classifyArticles() {
@@ -1704,6 +1726,10 @@ function handleInboxKeydown(e) {
             e.preventDefault();
             rateSelected(cards, 2); // love
             break;
+        case "x":
+            e.preventDefault();
+            deleteSelectedArticle(cards);
+            break;
         case "/":
             e.preventDefault();
             document.getElementById("search-input")?.focus();
@@ -1802,6 +1828,140 @@ function rateSelected(cards, rating) {
 }
 
 
+/* ---- Delete (single via keyboard + bulk via checkboxes) ---- */
+
+function setupBulkDeleteToolbar() {
+    const toolbar = document.getElementById("inbox-toolbar");
+    if (!toolbar || document.getElementById("bulk-delete-btn")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "bulk-delete-btn";
+    btn.className = "discard-toggle";
+    btn.style.display = "none";
+    btn.addEventListener("click", showBulkDeleteConfirm);
+    toolbar.appendChild(btn);
+}
+
+function updateBulkDeleteToolbar() {
+    const btn = document.getElementById("bulk-delete-btn");
+    if (!btn) return;
+    const n = selectedForDelete.size;
+    if (n > 0) {
+        btn.textContent = `Delete selected (${n})`;
+        btn.style.display = "inline-flex";
+    } else {
+        btn.style.display = "none";
+    }
+}
+
+function deleteSelectedArticle(cards) {
+    if (selectedIndex < 0 || selectedIndex >= cards.length) return;
+    const card = cards[selectedIndex];
+    const id = Number(card.dataset.id);
+    const article = cachedArticles.find((a) => Number(a.id) === id);
+    const title = article ? article.title : "this article";
+
+    showDeleteConfirm(
+        `Permanently delete <strong>${esc(title)}</strong> from your library? This cannot be undone.`,
+        () => performDelete([id])
+    );
+}
+
+function showBulkDeleteConfirm() {
+    const n = selectedForDelete.size;
+    if (!n) return;
+
+    showDeleteConfirm(
+        `Permanently delete <strong>${n}</strong> selected article${n === 1 ? "" : "s"} from your library? This cannot be undone.`,
+        () => performDelete(Array.from(selectedForDelete))
+    );
+}
+
+function showDeleteConfirm(bodyHtml, onConfirm) {
+    const existing = document.getElementById("delete-overlay");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "delete-overlay";
+    overlay.className = "export-overlay";
+    overlay.innerHTML =
+        '<div class="export-dialog">' +
+            "<h3>Delete article</h3>" +
+            `<p>${bodyHtml}</p>` +
+            '<div class="export-dialog-actions">' +
+                '<button class="export-cancel-btn" id="delete-cancel">Cancel</button>' +
+                '<button class="export-confirm-btn" id="delete-confirm">Delete</button>' +
+            "</div>" +
+        "</div>";
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    document.getElementById("delete-cancel").addEventListener("click", close);
+    document.getElementById("delete-confirm").addEventListener("click", () => {
+        close();
+        onConfirm();
+    });
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close();
+    });
+    document.addEventListener("keydown", function handler(e) {
+        if (e.key === "Escape") {
+            close();
+            document.removeEventListener("keydown", handler);
+        }
+    });
+}
+
+async function performDelete(ids) {
+    const failed = [];
+    for (const id of ids) {
+        try {
+            const res = await fetch(`/api/articles/${id}`, { method: "DELETE" });
+            if (!res.ok) failed.push(id);
+        } catch (err) {
+            console.error("Delete failed:", err);
+            failed.push(id);
+        }
+    }
+
+    const succeeded = ids.filter((id) => !failed.includes(id));
+    if (succeeded.length) {
+        cachedArticles = cachedArticles.filter((a) => !succeeded.includes(Number(a.id)));
+        succeeded.forEach((id) => selectedForDelete.delete(id));
+        renderArticleList(cachedArticles);
+        updateToolbar(cachedArticles);
+        updateBulkDeleteToolbar();
+    }
+
+    if (failed.length) {
+        showInboxToast(
+            succeeded.length
+                ? `Deleted ${succeeded.length}, failed to delete ${failed.length}`
+                : `Failed to delete ${failed.length === 1 ? "article" : "articles"}`,
+            "error"
+        );
+    } else {
+        showInboxToast(`Deleted ${succeeded.length} article${succeeded.length === 1 ? "" : "s"}`, "success");
+    }
+}
+
+function showInboxToast(message, type) {
+    const existing = document.querySelector(".settings-toast");
+    if (existing) existing.remove();
+
+    const toast = document.createElement("div");
+    toast.className = "settings-toast settings-toast-" + (type || "info");
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    setTimeout(() => toast.classList.add("show"), 10);
+    setTimeout(() => {
+        toast.classList.remove("show");
+        setTimeout(() => toast.remove(), 300);
+    }, 3500);
+}
+
+
 /* ---- Shortcuts overlay ---- */
 
 const INBOX_SHORTCUTS = [
@@ -1818,6 +1978,7 @@ const INBOX_SHORTCUTS = [
     { keys: ["1"], desc: "Rate dislike" },
     { keys: ["2"], desc: "Rate like" },
     { keys: ["3"], desc: "Rate love" },
+    { keys: ["x"], desc: "Delete selected article" },
     { keys: ["n"], desc: "Save new item (URL or email)" },
     { keys: ["c"], desc: "Classify / reclassify inbox" },
     { keys: ["f"], desc: "Toggle filter panel" },
@@ -1838,6 +1999,7 @@ const READER_SHORTCUTS = [
     { keys: ["1"], desc: "Rate dislike" },
     { keys: ["2"], desc: "Rate like" },
     { keys: ["3"], desc: "Rate love" },
+    { keys: ["x"], desc: "Delete article" },
     { keys: ["i"], desc: "Toggle analysis panel" },
     { keys: ["r"], desc: "Run / re-run analysis (panel open)" },
     { keys: ["p"], desc: "Play / pause audio" },
