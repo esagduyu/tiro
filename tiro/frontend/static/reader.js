@@ -1,6 +1,22 @@
 /* Tiro — Reader view */
 
+function renderMarkdown(md) {
+    var raw = marked.parse(md || '');
+    return DOMPurify.sanitize(raw, {
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'style'],
+        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover'],
+        ADD_ATTR: ['loading'],
+    });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+    // reader.js is loaded (via base.html's {% block content %}) before the
+    // marked/DOMPurify vendor scripts at the bottom of base.html, so `marked`
+    // isn't defined until later in the document parse. DOMContentLoaded only
+    // fires after the whole document (including those later scripts) has
+    // parsed, so it's safe to configure marked here.
+    marked.setOptions({ breaks: false, gfm: true });
+
     const reader = document.getElementById("reader");
     const articleId = reader.dataset.articleId;
     loadArticle(articleId);
@@ -104,7 +120,7 @@ async function loadArticle(id) {
         // Markdown body
         const bodyEl = document.getElementById("reader-body");
         if (a.content) {
-            bodyEl.innerHTML = marked.parse(a.content);
+            bodyEl.innerHTML = renderMarkdown(a.content);
             // Open external links in new tab
             bodyEl.querySelectorAll("a").forEach((link) => {
                 if (link.hostname && link.hostname !== location.hostname) {

@@ -1,5 +1,16 @@
 /* Tiro — frontend */
 
+marked.setOptions({ breaks: false, gfm: true });
+
+function renderMarkdown(md) {
+    var raw = marked.parse(md || '');
+    return DOMPurify.sanitize(raw, {
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'style'],
+        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover'],
+        ADD_ATTR: ['loading'],
+    });
+}
+
 let digestData = null; // cached digest response
 let digestLoaded = false;
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
@@ -419,7 +430,7 @@ function renderDigestSection(type, data) {
     if (!el || !data) return;
 
     const content = data.content || "";
-    el.innerHTML = marked.parse(content);
+    el.innerHTML = renderMarkdown(content);
 
     // Make article links work (they're /articles/ID)
     el.querySelectorAll("a").forEach((link) => {
