@@ -11,6 +11,7 @@ import anthropic
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import daily_digest_prompt
+from tiro.sanitize import sanitize_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,11 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     for dtype in DIGEST_TYPES:
         if dtype not in sections:
             sections[dtype] = "*This section was not generated. Try refreshing the digest.*"
+
+    # Sanitize Opus's markdown output before it's cached to SQLite (and
+    # returned to the caller) — surgically strips raw script/iframe HTML
+    # islands and javascript: links without touching markdown syntax.
+    sections = {dtype: sanitize_markdown(content) for dtype, content in sections.items()}
 
     # Cache
     today = date.today().isoformat()

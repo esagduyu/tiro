@@ -14,6 +14,8 @@ from lxml.html import fromstring, tostring
 from markdownify import markdownify as md
 from readability import Document
 
+from tiro.sanitize import sanitize_html
+
 logger = logging.getLogger(__name__)
 
 # UTM and tracking query parameters to strip from links
@@ -195,6 +197,10 @@ def parse_eml(source: str | Path | bytes) -> dict:
     # --- Strip layout tables (same as web.py) ---
     from tiro.ingestion.web import _strip_layout_tables
     content_html = _strip_layout_tables(content_html)
+
+    # --- Sanitize HTML (strip scripts, event handlers, javascript: URLs) —
+    # last point content is still HTML, right before markdownify ---
+    content_html = sanitize_html(content_html)
 
     # --- Convert to markdown ---
     content_md = md(

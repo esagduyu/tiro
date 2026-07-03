@@ -1,0 +1,37 @@
+From: Test Sender <newsletter@example.com>
+To: reader@example.com
+Subject: Hostile Content Test
+Date: Mon, 05 Jan 2026 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><body>
+<h1>Local-First Software Weekly</h1>
+<p>Welcome to the first issue of this newsletter about local-first software.
+The core idea of local-first software is that your data lives on your own
+devices first, and the network is used for synchronization rather than as
+the primary home of your information. This gives users ownership, offline
+capability, and longevity that cloud-only applications cannot match.</p>
+<p>This week we look at how reading applications handle data ownership.
+Most read-it-later services store your library on their servers, which
+means the day the company shuts down, your archive disappears with it.
+A local-first reader keeps markdown files on disk, uses an embedded
+database for metadata, and treats any cloud component as an optional
+convenience rather than a requirement for daily use.</p>
+<p>Legitimate paragraph content that should absolutely survive the sanitization
+pass, with enough length that readability keeps it as real article text.</p>
+<script>alert('xss')</script>
+<img src="x.png" onerror="alert('xss')">
+<a href="javascript:alert('xss')">click me</a>
+<iframe src="https://evil.example"></iframe>
+<p>We also examine synchronization strategies. Conflict-free replicated
+data types allow multiple devices to edit the same notes without a central
+coordinator, while simpler last-write-wins semantics are often good enough
+for metadata like read status and ratings. The engineering trade-off is
+between implementation complexity and the actual frequency of concurrent
+edits in a single-user system.</p>
+<p>Finally, a short note on portability. Plain files in open formats are
+the most durable escape hatch an application can offer. If your notes are
+markdown and your metadata is a SQLite file, you can leave at any time,
+and paradoxically that freedom is what makes staying attractive.</p>
+</body></html>

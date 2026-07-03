@@ -9,6 +9,8 @@ from lxml.html import fromstring, tostring
 from markdownify import markdownify as md
 from readability import Document
 
+from tiro.sanitize import sanitize_html
+
 logger = logging.getLogger(__name__)
 
 # Tags used for layout tables — strip these so markdownify doesn't
@@ -240,6 +242,11 @@ async def fetch_and_extract(url: str) -> dict:
 
     # Strip layout tables (common on old-school sites) before markdown conversion
     content_html = _strip_layout_tables(content_html)
+
+    # Sanitize HTML (strip scripts, event handlers, javascript: URLs) — this
+    # is the last point content is still HTML, right before markdownify, so
+    # it covers both readability's output and the re-injected <figure> images.
+    content_html = sanitize_html(content_html)
 
     # Convert to clean markdown — preserves links and code blocks by default
     content_md = md(
