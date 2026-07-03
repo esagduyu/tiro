@@ -1691,6 +1691,16 @@ function handleInboxKeydown(e) {
         return;
     }
 
+    // Don't capture when delete-confirm overlay is open (except Escape to close)
+    const deleteOverlay = document.getElementById("delete-overlay");
+    if (deleteOverlay) {
+        if (e.key === "Escape") {
+            document.getElementById("delete-cancel")?.click();
+            e.preventDefault();
+        }
+        return;
+    }
+
     const cards = getVisibleCards();
 
     switch (e.key) {
@@ -1895,7 +1905,13 @@ function showDeleteConfirm(bodyHtml, onConfirm) {
         "</div>";
     document.body.appendChild(overlay);
 
-    const close = () => overlay.remove();
+    function onDeleteOverlayKeydown(e) {
+        if (e.key === "Escape") close();
+    }
+    function close() {
+        overlay.remove();
+        document.removeEventListener("keydown", onDeleteOverlayKeydown);
+    }
     document.getElementById("delete-cancel").addEventListener("click", close);
     document.getElementById("delete-confirm").addEventListener("click", () => {
         close();
@@ -1904,12 +1920,7 @@ function showDeleteConfirm(bodyHtml, onConfirm) {
     overlay.addEventListener("click", (e) => {
         if (e.target === overlay) close();
     });
-    document.addEventListener("keydown", function handler(e) {
-        if (e.key === "Escape") {
-            close();
-            document.removeEventListener("keydown", handler);
-        }
-    });
+    document.addEventListener("keydown", onDeleteOverlayKeydown);
 }
 
 async function performDelete(ids) {
