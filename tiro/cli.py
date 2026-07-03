@@ -408,6 +408,57 @@ def cmd_delete(args):
         sys.exit(1)
 
 
+def cmd_doctor(args):
+    """Check (and optionally repair) consistency across all four stores."""
+    import json as _json
+
+    from tiro.config import load_config
+    from tiro.database import init_db, migrate_db
+    from tiro.doctor import fix, scan
+    from tiro.vectorstore import get_collection, init_vectorstore
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+    migrate_db(config.db_path)
+    try:
+        get_collection()
+    except RuntimeError:
+        init_vectorstore(config.chroma_dir, config.default_embedding_model)
+
+    report = fix(config) if args.fix else scan(config)
+
+    if args.json:
+        print(_json.dumps(report, indent=2))
+    else:
+        if args.fix:
+            for action in report.get("actions", []):
+                print(f"  fixed: {action}")
+        for key in ("orphaned_markdown", "missing_markdown", "orphaned_vectors",
+                    "vector_missing", "vector_unmarked",
+                    "audio_rows_missing_file", "audio_files_without_row"):
+            items = report[key]
+            if items:
+                print(f"{key}: {len(items)}")
+                for item in items:
+                    print(f"  - {item}")
+        for key in ("unreferenced_tags", "unreferenced_entities", "expired_sessions"):
+            if report[key]:
+                print(f"{key}: {report[key]}")
+        if report["clean"]:
+            print("All stores consistent. ✓")
+        elif args.fix:
+            print("Repairs applied — run `tiro doctor` again to verify.")
+        else:
+            print("Issues found. Run `tiro doctor --fix` (stop the server first).")
+
+    if args.fix:
+        post = scan(config)
+        sys.exit(0 if post["clean"] else 1)
+    sys.exit(0 if report["clean"] else 1)
+
+
 def cmd_set_password(args):
     """Set or reset the Tiro password."""
     import getpass
@@ -498,6 +549,15 @@ def main():
     subparsers.add_parser("check-email", help="Check IMAP inbox for new newsletters")
     subparsers.add_parser("set-password", help="Set or reset the Tiro password")
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check consistency across SQLite, ChromaDB, markdown and audio stores",
+    )
+    doctor_parser.add_argument("--fix", action="store_true",
+                               help="Repair findings (stop the server first)")
+    doctor_parser.add_argument("--json", action="store_true",
+                               help="Machine-readable report")
+
     token_parser = subparsers.add_parser("token", help="Manage API tokens")
     token_sub = token_parser.add_subparsers(dest="token_command", required=True)
     token_create = token_sub.add_parser("create", help="Create a token (shown once)")
@@ -524,6 +584,8 @@ def main():
         cmd_check_email(args)
     elif args.command == "set-password":
         cmd_set_password(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     elif args.command == "token":
         cmd_token(args)
     else:

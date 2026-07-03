@@ -30,11 +30,11 @@ def scan(config: TiroConfig) -> dict:
         ).fetchone()["n"]
         unreferenced_tags = conn.execute(
             "SELECT COUNT(*) AS n FROM tags WHERE id NOT IN "
-            "(SELECT DISTINCT tag_id FROM article_tags)"
+            "(SELECT tag_id FROM article_tags WHERE tag_id IS NOT NULL)"
         ).fetchone()["n"]
         unreferenced_entities = conn.execute(
             "SELECT COUNT(*) AS n FROM entities WHERE id NOT IN "
-            "(SELECT DISTINCT entity_id FROM article_entities)"
+            "(SELECT entity_id FROM article_entities WHERE entity_id IS NOT NULL)"
         ).fetchone()["n"]
     finally:
         conn.close()
@@ -89,4 +89,92 @@ def scan(config: TiroConfig) -> dict:
         v for k, v in report.items()
         if k not in ("unreferenced_tags", "unreferenced_entities", "expired_sessions")
     ) and unreferenced_tags == 0 and unreferenced_entities == 0 and expired_sessions == 0
+    return report
+
+
+def fix(config: TiroConfig) -> dict:
+    """Repair every discrepancy scan() finds. Returns the pre-fix report
+    plus an 'actions' list. Safe to re-run: every repair is idempotent."""
+    from tiro.lifecycle import delete_article
+    from tiro.vectorstore import retry_pending_vectors
+
+    report = scan(config)
+    actions: list[str] = []
+
+    # (a) markdown files with no DB row -> preserve under .orphaned/
+    if report["orphaned_markdown"]:
+        orphan_dir = config.library / ".orphaned"
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        for name in report["orphaned_markdown"]:
+            (config.articles_dir / name).rename(orphan_dir / name)
+            actions.append(f"moved orphaned markdown {name} -> .orphaned/")
+
+    # (b) DB rows whose markdown file is gone -> complete the interrupted delete
+    for item in report["missing_markdown"]:
+        delete_article(config, item["id"])
+        actions.append(
+            f"deleted article {item['id']} ({item['title']!r}): markdown file missing"
+        )
+
+    # (c) vectors with no DB row -> delete from ChromaDB
+    if report["orphaned_vectors"]:
+        get_collection().delete(ids=report["orphaned_vectors"])
+        actions.append(f"deleted {len(report['orphaned_vectors'])} orphaned vector(s)")
+
+    # (d) status drift -> correct the status, then re-embed pending rows.
+    #     Rows deleted by (b) are excluded (their ids are gone from articles).
+    deleted_ids = {item["id"] for item in report["missing_markdown"]}
+    conn = get_connection(config.db_path)
+    try:
+        for aid in report["vector_missing"]:
+            if aid in deleted_ids:
+                continue
+            conn.execute(
+                "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (aid,)
+            )
+            actions.append(f"article {aid}: vector_status indexed -> pending (no vector)")
+        for aid in report["vector_unmarked"]:
+            if aid in deleted_ids:
+                continue
+            conn.execute(
+                "UPDATE articles SET vector_status = 'indexed' WHERE id = ?", (aid,)
+            )
+            actions.append(f"article {aid}: vector_status -> indexed (vector present)")
+        conn.commit()
+    finally:
+        conn.close()
+    n = retry_pending_vectors(config)
+    if n:
+        actions.append(f"re-embedded {n} article(s)")
+
+    # (e) audio mismatches
+    conn = get_connection(config.db_path)
+    try:
+        for aid in report["audio_rows_missing_file"]:
+            conn.execute("DELETE FROM audio WHERE article_id = ?", (aid,))
+            actions.append(f"deleted audio row for article {aid} (file missing)")
+        # vacuum + session purge
+        cur = conn.execute(
+            "DELETE FROM tags WHERE id NOT IN "
+            "(SELECT tag_id FROM article_tags WHERE tag_id IS NOT NULL)"
+        )
+        if cur.rowcount:
+            actions.append(f"vacuumed {cur.rowcount} unreferenced tag(s)")
+        cur = conn.execute(
+            "DELETE FROM entities WHERE id NOT IN "
+            "(SELECT entity_id FROM article_entities WHERE entity_id IS NOT NULL)"
+        )
+        if cur.rowcount:
+            actions.append(f"vacuumed {cur.rowcount} unreferenced entit(y/ies)")
+        cur = conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')")
+        if cur.rowcount:
+            actions.append(f"purged {cur.rowcount} expired session(s)")
+        conn.commit()
+    finally:
+        conn.close()
+    for name in report["audio_files_without_row"]:
+        (config.library / "audio" / name).unlink(missing_ok=True)
+        actions.append(f"deleted orphaned audio file {name}")
+
+    report["actions"] = actions
     return report
