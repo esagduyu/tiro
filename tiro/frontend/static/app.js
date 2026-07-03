@@ -870,7 +870,9 @@ function renderArticle(a, showScore) {
         ? '<span class="tier-badge tier-badge-summary-enough">Summary</span>'
         : "";
 
-    const checked = selectedForDelete.has(Number(a.id)) ? "checked" : "";
+    const isSelectedForDelete = selectedForDelete.has(Number(a.id));
+    const checked = isSelectedForDelete ? "checked" : "";
+    if (isSelectedForDelete) classes.push("bulk-selected");
 
     return `
     <article class="${classes.join(" ")}" data-id="${a.id}">
@@ -915,10 +917,13 @@ function attachListeners() {
         cb.addEventListener("click", (e) => e.stopPropagation());
         cb.addEventListener("change", () => {
             const id = Number(cb.dataset.id);
+            const card = cb.closest(".article-card");
             if (cb.checked) {
                 selectedForDelete.add(id);
+                if (card) card.classList.add("bulk-selected");
             } else {
                 selectedForDelete.delete(id);
+                if (card) card.classList.remove("bulk-selected");
             }
             updateBulkDeleteToolbar();
         });
@@ -1868,7 +1873,7 @@ function setupBulkDeleteToolbar() {
 
     const btn = document.createElement("button");
     btn.id = "bulk-delete-btn";
-    btn.className = "discard-toggle";
+    btn.className = "danger-outline-btn";
     btn.style.display = "none";
     btn.addEventListener("click", showBulkDeleteConfirm);
     toolbar.appendChild(btn);
@@ -1922,7 +1927,7 @@ function showDeleteConfirm(bodyHtml, onConfirm) {
             `<p>${bodyHtml}</p>` +
             '<div class="export-dialog-actions">' +
                 '<button class="export-cancel-btn" id="delete-cancel">Cancel</button>' +
-                '<button class="export-confirm-btn" id="delete-confirm">Delete</button>' +
+                '<button class="danger-confirm-btn" id="delete-confirm">Delete</button>' +
             "</div>" +
         "</div>";
     document.body.appendChild(overlay);
@@ -2012,6 +2017,7 @@ const INBOX_SHORTCUTS = [
     { keys: ["2"], desc: "Rate like" },
     { keys: ["3"], desc: "Rate love" },
     { keys: ["x"], desc: "Delete selected article" },
+    { hint: "Click checkboxes to bulk-select articles for deletion" },
     { keys: ["n"], desc: "Save new item (URL or email)" },
     { keys: ["c"], desc: "Classify / reclassify inbox" },
     { keys: ["f"], desc: "Toggle filter panel" },
@@ -2051,6 +2057,9 @@ function showShortcuts(view) {
         .map((item) => {
             if (item.section) {
                 return `<div class="shortcut-section">${item.section}</div>`;
+            }
+            if (item.hint) {
+                return `<div class="shortcut-hint">${esc(item.hint)}</div>`;
             }
             const keys = item.keys
                 .map((k) => `<kbd>${esc(k)}</kbd>`)

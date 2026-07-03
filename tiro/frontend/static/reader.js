@@ -217,7 +217,7 @@ function showReaderDeleteConfirm(title, onConfirm) {
             `<p>Permanently delete <strong>${esc(title || "this article")}</strong> from your library? This cannot be undone.</p>` +
             '<div class="export-dialog-actions">' +
                 '<button class="export-cancel-btn" id="delete-cancel">Cancel</button>' +
-                '<button class="export-confirm-btn" id="delete-confirm">Delete</button>' +
+                '<button class="danger-confirm-btn" id="delete-confirm">Delete</button>' +
             "</div>" +
         "</div>";
     document.body.appendChild(overlay);

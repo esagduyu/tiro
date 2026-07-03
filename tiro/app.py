@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
-# Cache-bust version for the theme link hrefs ONLY (base.html's other static
-# includes keep their own literal `?v=` counter for now — Task 4 bumps the
-# whole shared counter, including this constant, together).
-STATIC_VERSION = "54"
+# Cache-bust version for the theme link hrefs. Shared with the literal `?v=`
+# counter on every other static include across all templates — bump this
+# constant AND every `?v=` occurrence together when changing static JS/CSS.
+STATIC_VERSION = "55"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:

@@ -951,20 +951,19 @@
         field.appendChild(label);
 
         var codeRow = document.createElement('div');
-        codeRow.style.display = 'flex';
-        codeRow.style.alignItems = 'center';
-        codeRow.style.gap = '0.5rem';
+        codeRow.className = 'token-reveal-row';
 
         var code = document.createElement('code');
-        code.style.flex = '1';
-        code.style.padding = '0.5rem 0.75rem';
-        code.style.border = '1px solid var(--tiro-border)';
-        code.style.borderRadius = '6px';
-        code.style.background = 'var(--tiro-bg)';
-        code.style.fontFamily = 'monospace';
-        code.style.fontSize = '0.85rem';
-        code.style.overflowWrap = 'anywhere';
+        code.className = 'token-code-block';
         code.textContent = rawToken;
+        code.title = 'Click to select';
+        code.addEventListener('click', function() {
+            var range = document.createRange();
+            range.selectNodeContents(code);
+            var sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+        });
 
         var copyBtn = document.createElement('button');
         copyBtn.className = 'settings-configure-btn settings-configure-btn-secondary';

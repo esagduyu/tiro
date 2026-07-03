@@ -393,6 +393,12 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
 
     updates: dict = {}
 
+    if body.theme_light is not None or body.theme_dark is not None:
+        available_names = {t["name"] for t in _list_available_themes(config)}
+        for field_name, value in (("theme_light", body.theme_light), ("theme_dark", body.theme_dark)):
+            if value is not None and value not in available_names:
+                raise HTTPException(status_code=400, detail=f"Unknown theme: {value}")
+
     if body.theme_light is not None:
         updates["theme_light"] = body.theme_light
     if body.theme_dark is not None:

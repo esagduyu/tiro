@@ -40,12 +40,17 @@ const els = {
   alreadyLink: document.getElementById('already-link'),
   tokenInput: document.getElementById('token-input'),
   tokenSaveBtn: document.getElementById('token-save-btn'),
+  tokenCancelBtn: document.getElementById('token-cancel-btn'),
   tokenGear: document.getElementById('token-gear'),
 };
 
 let currentUrl = '';
+let lastNonTokenState = 'ready';
 
 function showState(name) {
+  if (name !== 'token') {
+    lastNonTokenState = name;
+  }
   ['stateReady', 'stateSaving', 'stateSuccess', 'stateError', 'stateAlready', 'stateToken'].forEach(function (key) {
     els[key].classList.toggle('active', key === 'state' + name.charAt(0).toUpperCase() + name.slice(1));
   });
@@ -107,6 +112,7 @@ async function saveArticle() {
   if (!currentUrl) return;
 
   showState('saving');
+  els.tokenGear.disabled = true;
 
   try {
     var res = await fetch(TIRO_URL + '/api/ingest/url', {
@@ -158,6 +164,8 @@ async function saveArticle() {
       els.errorText.textContent = err.message || 'Could not save this page.';
     }
     showState('error');
+  } finally {
+    els.tokenGear.disabled = false;
   }
 }
 
@@ -169,6 +177,10 @@ els.tokenSaveBtn.addEventListener('click', function () {
     showState('ready');
     checkIfSaved(currentUrl);
   });
+});
+
+els.tokenCancelBtn.addEventListener('click', function () {
+  showState(lastNonTokenState);
 });
 
 els.tokenGear.addEventListener('click', function () {

@@ -468,6 +468,28 @@ main {
     margin-left: -1rem;
 }
 
+.article-card.bulk-selected {
+    background: var(--tiro-bg-surface);
+    box-shadow: inset 3px 0 0 var(--tiro-accent);
+    border-radius: 4px;
+}
+
+/* --- Bulk-select checkbox --- */
+
+.bulk-select-checkbox {
+    width: 17px;
+    height: 17px;
+    margin-top: 0.3rem;
+    flex-shrink: 0;
+    accent-color: var(--tiro-accent);
+    cursor: pointer;
+}
+
+.bulk-select-checkbox:focus-visible {
+    outline: 2px solid var(--tiro-accent);
+    outline-offset: 2px;
+}
+
 .article-main {
     flex: 1;
     min-width: 0;
@@ -783,6 +805,30 @@ main {
 .discard-toggle.active {
     background: var(--tiro-bg-surface);
     color: var(--tiro-fg-secondary);
+}
+
+/* Bulk-delete toolbar button — danger outline, distinct from the muted
+   discard-toggle it's rendered next to. */
+.danger-outline-btn {
+    padding: 0.4rem 0.9rem;
+    border: 1px solid var(--tiro-tier-must-read);
+    border-radius: 6px;
+    background: none;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--tiro-tier-must-read);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.danger-outline-btn:hover {
+    background: var(--tiro-tier-must-read);
+    color: white;
+}
+
+.danger-outline-btn:focus-visible {
+    outline: 2px solid var(--tiro-tier-must-read);
+    outline-offset: 2px;
 }
 
 #vip-toggle.active {
@@ -2254,6 +2300,14 @@ main {
     border-bottom: 1px solid var(--tiro-border);
 }
 
+.shortcut-hint {
+    font-size: 0.78rem;
+    color: var(--tiro-muted);
+    font-style: italic;
+    padding-left: calc(80px + 0.75rem);
+    margin-top: -0.15rem;
+}
+
 /* --- Nav link --- */
 
 .nav-link {
@@ -2479,6 +2533,31 @@ main {
 .export-confirm-btn:hover {
     background: var(--tiro-accent-hover);
     border-color: var(--tiro-accent-hover);
+}
+
+/* Destructive confirm action (delete dialogs) — crimson, distinct from the
+   terra-cotta accent used by non-destructive confirms like Export. */
+.danger-confirm-btn {
+    padding: 0.45rem 1rem;
+    border: 1px solid var(--tiro-tier-must-read);
+    border-radius: 6px;
+    background: var(--tiro-tier-must-read);
+    font-size: 0.85rem;
+    font-family: inherit;
+    font-weight: 500;
+    color: white;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.danger-confirm-btn:hover {
+    background: color-mix(in srgb, var(--tiro-tier-must-read) 82%, black);
+    border-color: color-mix(in srgb, var(--tiro-tier-must-read) 82%, black);
+}
+
+.danger-confirm-btn:focus-visible {
+    outline: 2px solid var(--tiro-tier-must-read);
+    outline-offset: 2px;
 }
 
 .stats-controls {
@@ -2907,6 +2986,28 @@ main {
 
 .settings-field input:focus {
     border-color: var(--tiro-accent);
+}
+
+/* --- Token reveal (copyable code block) --- */
+
+.token-reveal-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.token-code-block {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 6px;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-fg);
+    font-family: "SF Mono", "Courier New", monospace;
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+    cursor: text;
+    user-select: all;
 }
 
 .settings-checkboxes {

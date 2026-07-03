@@ -16,45 +16,103 @@
     })();
   </script>
   <style>
+    * { box-sizing: border-box; }
     body {
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; margin: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0; padding: 1.5rem;
       background: var(--tiro-bg, #FAF6F0);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--tiro-text, #2b2620);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--tiro-fg, #2C2520);
     }
     .login-card {
-      width: min(90vw, 360px); padding: 2rem;
-      background: var(--tiro-surface, #fff);
-      border: 1px solid var(--tiro-border, #e5dcc9); border-radius: 12px;
+      width: min(90vw, 380px); padding: 2.25rem 2rem;
+      background: var(--tiro-bg-surface, #F5EDE3);
+      border: 1px solid var(--tiro-border, #DDD5CA);
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
     }
-    .login-card h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
-    .login-card p.sub { margin: 0 0 1.25rem; opacity: 0.7; font-size: 0.9rem; }
+    .login-mark {
+      display: flex; align-items: center; gap: 0.65rem; margin-bottom: 1.5rem;
+    }
+    .login-mark img { width: 32px; height: 32px; border-radius: 7px; }
+    .login-card h1 {
+      margin: 0; font-size: 1.5rem; font-weight: 700;
+      font-family: Georgia, 'Times New Roman', serif;
+      color: var(--tiro-fg, #2C2520);
+    }
+    .login-card p.sub {
+      margin: 0 0 1.5rem; font-size: 0.9rem; line-height: 1.5;
+      color: var(--tiro-fg-secondary, #5C534A);
+    }
+    .login-card p.sub.setup-mode {
+      color: var(--tiro-accent, #C45B3E);
+      font-weight: 600;
+    }
+    .field-label {
+      display: block; font-size: 0.78rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--tiro-muted, #9C9389);
+      margin-bottom: 0.35rem;
+    }
     .login-card input {
-      width: 100%; box-sizing: border-box; padding: 0.6rem 0.75rem;
-      margin-bottom: 0.75rem; border: 1px solid var(--tiro-border, #e5dcc9);
-      border-radius: 8px; font-size: 1rem;
+      width: 100%; padding: 0.65rem 0.8rem;
+      margin-bottom: 1rem; border: 1px solid var(--tiro-border, #DDD5CA);
+      border-radius: 8px; font-size: 0.95rem; font-family: inherit;
+      background: var(--tiro-bg, #FAF6F0);
+      color: var(--tiro-fg, #2C2520);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .login-card input:focus {
+      border-color: var(--tiro-accent, #C45B3E);
+    }
+    .login-card input::placeholder {
+      color: var(--tiro-muted, #9C9389);
     }
     .login-card button {
-      width: 100%; padding: 0.6rem; border: none; border-radius: 8px;
+      width: 100%; padding: 0.7rem; border: none; border-radius: 8px;
       background: var(--tiro-accent, #C45B3E); color: #fff;
-      font-size: 1rem; cursor: pointer;
+      font-size: 0.95rem; font-weight: 600; font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
     }
-    .error { color: #B5334D; font-size: 0.85rem; min-height: 1.2em; margin: 0 0 0.5rem; }
+    .login-card button:hover {
+      background: var(--tiro-accent-hover, #A84A30);
+    }
+    .login-card button:focus-visible {
+      outline: 2px solid var(--tiro-accent, #C45B3E);
+      outline-offset: 2px;
+    }
+    .error {
+      color: var(--tiro-tier-must-read, #B5334D);
+      font-size: 0.85rem; line-height: 1.4;
+      min-height: 1.2em; margin: -0.4rem 0 0.85rem;
+    }
     .hidden { display: none; }
+    .login-footer {
+      margin-top: 1.5rem; text-align: center;
+      font-size: 0.75rem; font-style: italic;
+      color: var(--tiro-muted, #9C9389);
+    }
   </style>
 </head>
 <body>
   <div class="login-card">
-    <h1>Tiro ⁊</h1>
+    <div class="login-mark">
+      <img src="/static/logo-128.png" alt="Tiro">
+      <h1>Tiro ⁊</h1>
+    </div>
     <p class="sub" id="subtitle">Sign in to your library</p>
     <p class="error" id="error"></p>
     <form id="auth-form">
-      <input type="password" id="password" placeholder="Password" autofocus autocomplete="current-password">
-      <input type="password" id="confirm" class="hidden" placeholder="Confirm password" autocomplete="new-password">
+      <label class="field-label" for="password">Password</label>
+      <input type="password" id="password" placeholder="Enter your password" autofocus autocomplete="current-password">
+      <label class="field-label hidden" id="confirm-label" for="confirm">Confirm password</label>
+      <input type="password" id="confirm" class="hidden" placeholder="Re-enter your password" autocomplete="new-password">
       <button type="submit" id="submit">Sign in</button>
     </form>
   </div>
+  <p class="login-footer">&ldquo;...without you the oracle was dumb.&rdquo; &mdash; Cicero to Tiro, 53 BC</p>
   <script>
     let mode = "login";
     const $ = (id) => document.getElementById(id);
@@ -62,8 +120,10 @@
     fetch("/api/auth/status").then(r => r.json()).then(({ data }) => {
       if (!data.configured) {
         mode = "setup";
-        $("subtitle").textContent = "Welcome — create a password to protect your library";
+        $("subtitle").textContent = "Set a password to protect your library";
+        $("subtitle").classList.add("setup-mode");
         $("confirm").classList.remove("hidden");
+        $("confirm-label").classList.remove("hidden");
         $("submit").textContent = "Create password";
       } else if (data.authenticated) {
         window.location.href = "/inbox";

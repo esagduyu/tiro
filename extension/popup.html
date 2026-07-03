@@ -211,6 +211,12 @@
       color: #2C2520;
     }
 
+    .gear:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
     .title {
       font-weight: 600;
       font-size: 13px;
@@ -264,6 +270,34 @@
     }
 
     #token-save-btn:hover { background: #A84A30; }
+
+    .token-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .token-actions #token-save-btn {
+      flex: 1;
+      margin: 0;
+    }
+
+    #token-cancel-btn {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #E0D5C7;
+      border-radius: 6px;
+      background: #F5EDE3;
+      color: #5C534A;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    #token-cancel-btn:hover {
+      border-color: #C45B3E;
+      color: #C45B3E;
+    }
 
     /* Already saved state */
     .already-icon {
@@ -356,7 +390,10 @@
          Settings &rarr; API Tokens (or run <code>tiro token create chrome</code>),
          then paste it here. It is stored only in this browser.</p>
       <input type="password" id="token-input" placeholder="Paste API token">
-      <button id="token-save-btn">Save token</button>
+      <div class="token-actions">
+        <button id="token-save-btn">Save token</button>
+        <button id="token-cancel-btn">Cancel</button>
+      </div>
     </div>
   </div>
 

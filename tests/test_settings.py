@@ -82,6 +82,21 @@ def test_appearance_settings_persist_to_config_path(authenticated_client, config
     assert "inbox_page_size: 25" in _cfg_text(configured_library)
 
 
+def test_appearance_settings_rejects_unknown_theme_name(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/appearance", json={
+        "theme_light": "../evil",
+    })
+    assert r.status_code == 400, r.text
+
+
+def test_appearance_settings_accepts_builtin_theme_name(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/appearance", json={
+        "theme_dark": "roman-night",
+    })
+    assert r.status_code == 200, r.text
+    assert configured_library.theme_dark == "roman-night"
+
+
 def test_digest_schedule_persists_to_config_path(authenticated_client, configured_library):
     r = authenticated_client.post("/api/settings/digest-schedule", json={
         "enabled": False, "time": "08:30", "unread_only": True, "timezone_offset": -60,
