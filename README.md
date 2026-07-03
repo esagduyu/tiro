@@ -14,11 +14,13 @@ Tiro saves web pages and email newsletters as clean markdown on your machine, en
 
 Named after [Cicero's freedman](https://en.wikipedia.org/wiki/Marcus_Tullius_Tiro) who preserved and organized his master's works for posterity, Tiro does the same for your digital knowledge.
 
-*Built solo for the [Built with Opus 4.6: a Claude Code Hackathon](https://cerebralvalley.ai/e/claude-code-hackathon) (Feb 10–16, 2026) — a week-long virtual hackathon by Anthropic and Cerebral Valley celebrating one year of Claude Code.*
+*Born at the [Built with Opus 4.6: a Claude Code Hackathon](https://cerebralvalley.ai/e/claude-code-hackathon) (Feb 10–16, 2026) — a week-long virtual hackathon by Anthropic and Cerebral Valley celebrating one year of Claude Code — where it was built solo in six days and placed in the top 30 of ~500 entries.*
+
+The original hackathon submission is preserved, frozen, at [esagduyu/project-tiro](https://github.com/esagduyu/project-tiro) under its original MIT license. **This repository is the continuation**: development carries on here under AGPL-3.0-or-later, beginning with the 0.2.0 security & integrity release described below.
 
 ---
 
-## Video Walkthrough
+## Video Walkthrough (hackathon-era demo)
 
 ▶ **[Watch the 3-minute hackathon submission video here](https://www.loom.com/share/61ee7ffe076c4b68abeba6dd80423172)**
 
@@ -31,6 +33,35 @@ Named after [Cicero's freedman](https://en.wikipedia.org/wiki/Marcus_Tullius_Tir
 - **Opinionated intelligence** — Opus 4.6 generates ranked digests, clusters articles by topic and entity, and flags bias and unsourced claims.
 - **Minimal friction** — One command to run, clean distraction-free reader UI, full keyboard navigation.
 - **Own your context** — One-click export of your entire library as portable markdown + JSON.
+
+---
+
+## From hackathon to 0.2.0
+
+The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
+
+**Security spine**
+- **Password auth** with bcrypt hashing, sliding 30-day sessions, and hashed API tokens for non-browser clients (Chrome extension, MCP server, scripts). `tiro set-password`, `tiro token create|list|revoke` CLIs.
+- **Fail-closed routing** — every route requires auth except login/setup/status/logout/healthz; HTML pages redirect to `/login`; FastAPI's docs endpoints are disabled. A route-walk test enforces the allowlist as an executable invariant, so any future route is covered automatically.
+- **CSRF and Host-header hardening** — `Sec-Fetch-Site`/Origin checks on cookie-authenticated mutations (including the auth routes themselves) and Host validation derived from the effective bind address. LAN mode refuses to start without a password.
+- **XSS closed at both ends** — server-side [nh3](https://github.com/messense/nh3) sanitization of all fetched HTML before markdown conversion; client-side [DOMPurify](https://github.com/cure53/DOMPurify) over marked plus escaping at every `innerHTML` sink. A mid-phase review caught and fixed a stored-XSS via unvalidated LLM output — model responses are now validated at the source and escaped at the sink.
+- **Fully vendored frontend** (marked, DOMPurify, Chart.js, d3) — nothing loads from a CDN at runtime, test-enforced. Tiro runs, and stays auditable, fully offline.
+
+**Data integrity**
+- **Atomic ingestion** — saving an article is a staged pipeline that rolls back cleanly on failure, leaving no orphans across SQLite, ChromaDB, markdown files, and audio. ChromaDB outages are non-fatal: the article is marked `pending` and a background loop retries with an idempotent upsert.
+- **One delete coordinator** cleans all four stores, shared by the API endpoint, the CLI, the UI, and ingestion rollback.
+- **`tiro doctor [--fix]`** reconciles the four stores in both directions, quarantines orphaned markdown to `.orphaned/` instead of deleting it, and refuses mass row-deletion when the articles directory looks moved or missing.
+- **`persist_config()`** — every config write (server and CLI) is atomic, comment-preserving, and `0600` when it holds secrets.
+
+**Transparency & operations**
+- **External-API audit log** — every Anthropic, OpenAI TTS, IMAP, and SMTP call recorded as JSONL with tokens, duration, and a cost estimate; `tiro audit` / `tiro audit --month` roll it up per service.
+- **`tiro status`** — offline library summary; `/healthz` detail is gated behind auth (unauthenticated callers get only `{status, version}`).
+- **POST-only generation** — no GET request can trigger an Opus call or a write; digest and analysis generation are explicit POSTs with in-flight guards.
+- **UX hardening** — custom themes wired end-to-end (with name validation), a logout affordance, full-width secret masking in Settings, and extension-popup/dialog polish.
+
+**Verification**
+- **169-test pytest suite** (up from zero at the hackathon) with invariant pins: the auth route-walk, a no-CDN sweep over all templates and static JS, and a Python 3.11 syntax-floor guard.
+- A **Playwright end-to-end spec** (`playwright-tests/phase0.spec.js`) covering first-run setup, login, saving an article, and deleting it — run against a real uvicorn server.
 
 ---
 
@@ -383,6 +414,26 @@ tiro/
 ## Testing
 
 `uv run pytest` runs the Python test suite (`tests/`). A small end-to-end browser spec also lives at `playwright-tests/phase0.spec.js` (Playwright), covering the first-run setup flow, login, saving an article, and deleting it — see `playwright-tests/README.md` for how to run it.
+
+---
+
+## Where Tiro is going
+
+> **Tiro is the open-source reading OS that keeps everything you read as files on your machine — and puts a frontier-model research assistant, and your own agents, on top of them.**
+
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.2.0 alpha to a 1.0 with an optional hosted tier. Headlines:
+
+- **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
+- **Phase 2 — Highlights & notes (0.4):** anchored highlights and markdown notes stored as human-readable sidecar files next to your articles — Tiro becomes a place to think, not just to save.
+- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this.
+- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine.
+- **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
+- **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion once Phase 3 ships.
+- **Phase 6 — Agent runtime (0.8):** the ad-hoc AI calls become a library of inspectable local agents with replayable traces and cost accounting, provider adapters (Anthropic, OpenAI, local models via Ollama) making model-agnosticism shipped fact rather than aspiration, and a plugin API for community agents, connectors, and themes.
+- **Phase 7a — BYO cloud sync (0.9):** multi-device sync against storage *you* own (S3-compatible, WebDAV, or any synced folder) with client-side encryption. Tiro never holds your data.
+- **Phase 7b — Tiro Cloud (1.0):** an optional paid convenience tier — hosted sync and always-on agents — patterned on Obsidian Sync: it funds the open product and gates nothing. A user who never pays can use every feature.
+
+The product promise underneath all of it: original articles stay clean, portable markdown; your memory (highlights, notes, ratings, digests) lives in adjacent local files and transparent databases; anything paid makes Tiro easier to run across devices, never worse to own locally.
 
 ---
 
