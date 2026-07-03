@@ -15,13 +15,28 @@ from fastapi.templating import Jinja2Templates
 
 from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
-from tiro.database import init_db, migrate_db
+from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
 from tiro.vectorstore import init_vectorstore
 
 logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
+
+_DIR_SIZE_CACHE_TTL = 30  # seconds
+_dir_size_cache: dict[Path, tuple[float, int]] = {}
+
+
+def _cached_dir_bytes(path: Path) -> int:
+    """`dir_bytes` behind a 30s TTL cache — avoids rglob-walking the chroma/audio
+    dirs on every /healthz call (they only grow, so brief staleness is fine)."""
+    now = time.monotonic()
+    cached = _dir_size_cache.get(path)
+    if cached is not None and now - cached[0] < _DIR_SIZE_CACHE_TTL:
+        return cached[1]
+    size = dir_bytes(path)
+    _dir_size_cache[path] = (now, size)
+    return size
 
 
 async def _imap_sync_loop(config: TiroConfig):
@@ -306,26 +321,19 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         if config.auth_password_hash and not auth.is_authenticated(request):
             return body  # open readiness probe: no detail leak
 
-        import time as _time
-
-        from tiro.database import get_connection
-
-        def _dir_bytes(p):
-            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
-
         conn = get_connection(config.db_path)
         try:
             articles = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
         finally:
             conn.close()
         audio_dir = config.library / "audio"
-        body["uptime_seconds"] = int(_time.monotonic() - app.state.started_at)
+        body["uptime_seconds"] = int(time.monotonic() - app.state.started_at)
         body["stores"] = {
             "articles": articles,
             "db_bytes": config.db_path.stat().st_size if config.db_path.exists() else 0,
-            "chroma_bytes": _dir_bytes(config.chroma_dir),
+            "chroma_bytes": _cached_dir_bytes(config.chroma_dir),
             "audio_files": len(list(audio_dir.glob("*.mp3"))) if audio_dir.exists() else 0,
-            "audio_bytes": _dir_bytes(audio_dir),
+            "audio_bytes": _cached_dir_bytes(audio_dir),
         }
 
         def _running(name):

@@ -137,6 +137,11 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def dir_bytes(path: Path) -> int:
+    """Total size in bytes of all files under `path` (0 if it doesn't exist)."""
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if path.exists() else 0
+
+
 def init_db(db_path: Path) -> None:
     """Initialize the database with the full schema."""
     db_path.parent.mkdir(parents=True, exist_ok=True)

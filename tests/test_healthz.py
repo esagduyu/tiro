@@ -49,3 +49,19 @@ def test_cli_status(initialized_library, capsys):
     out = capsys.readouterr().out
     assert "Articles:" in out
     assert "0" in out
+
+
+def test_cli_status_no_library_exits_with_friendly_message(test_config, capsys):
+    """`tiro status` against a config whose db_path doesn't exist (no `tiro init`
+    run yet) must exit 1 with a friendly message, not crash."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    assert not test_config.db_path.exists()
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_status(SimpleNamespace(config="unused", _config_override=test_config))
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "No library found" in out

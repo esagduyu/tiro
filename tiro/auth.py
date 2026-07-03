@@ -180,7 +180,12 @@ def _cookie_authenticated(request: Request) -> bool:
 
 
 def is_authenticated(request: Request) -> bool:
-    """Read-only auth check for optional detail (no CSRF, never raises)."""
+    """Read-only auth check for optional detail (no CSRF check, never raises).
+
+    Not fully side-effect-free: the bearer-token path calls validate_api_token,
+    which UPDATEs api_tokens.last_used_at on every probe — the one write this
+    otherwise read-only check performs.
+    """
     config = request.app.state.config
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):

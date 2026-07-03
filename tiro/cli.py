@@ -505,7 +505,7 @@ def cmd_status(args):
     """Library status without needing a running server."""
     from tiro import __version__
     from tiro.config import load_config
-    from tiro.database import get_connection
+    from tiro.database import dir_bytes, get_connection
 
     config = getattr(args, "_config_override", None) or load_config(args.config)
     print(f"Tiro {__version__} — library: {config.library}")
@@ -525,12 +525,10 @@ def cmd_status(args):
     finally:
         conn.close()
 
-    def _dir_bytes(p):
-        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
-
-    print(f"Articles: {n} ({', '.join(f'{r['vector_status']}: {r['n']}' for r in by_status) or 'none'})")
-    print(f"SQLite: {config.db_path.stat().st_size:,} bytes | ChromaDB: {_dir_bytes(config.chroma_dir):,} bytes | "
-          f"Audio: {_dir_bytes(config.library / 'audio'):,} bytes")
+    breakdown = ", ".join(f"{r['vector_status']}: {r['n']}" for r in by_status) or "none"
+    print(f"Articles: {n} ({breakdown})")
+    print(f"SQLite: {config.db_path.stat().st_size:,} bytes | ChromaDB: {dir_bytes(config.chroma_dir):,} bytes | "
+          f"Audio: {dir_bytes(config.library / 'audio'):,} bytes")
     print(f"Active sessions: {sessions}")
     print(f"Password: {'set' if config.auth_password_hash else 'NOT SET'} | "
           f"IMAP sync: {'on' if config.imap_enabled else 'off'} | "
