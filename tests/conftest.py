@@ -102,6 +102,9 @@ def configured_library(tmp_path, _shared_embeddings):
     from tiro.vectorstore import init_vectorstore
 
     config = TiroConfig(library_path=str(tmp_path / "auth-library"))
+    cfg_file = tmp_path / "auth-config.yaml"
+    cfg_file.write_text(f'library_path: "{tmp_path / "auth-library"}"\n')
+    config.config_path = str(cfg_file)
     config.articles_dir.mkdir(parents=True, exist_ok=True)
     (config.library / "audio").mkdir(parents=True, exist_ok=True)
     init_db(config.db_path)

@@ -108,3 +108,33 @@ def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
         os.environ["OPENAI_API_KEY"] = config.openai_api_key
 
     return config
+
+
+def persist_config(config: TiroConfig, updates: dict) -> None:
+    """Merge updates into the YAML file at config.config_path.
+
+    Preserves comments, quoting, and key order (ruamel round-trip) and
+    writes atomically (temp file + os.replace) with 0600 permissions —
+    the same pattern as auth.save_password_hash, which delegates here.
+    Creates the file if it does not exist yet.
+    """
+    from ruamel.yaml import YAML
+
+    if not config.config_path:
+        raise ValueError("config has no config_path; cannot persist settings")
+    path = Path(config.config_path)
+    yaml_rt = YAML()
+    yaml_rt.preserve_quotes = True
+    data = yaml_rt.load(path.read_text()) if path.exists() else None
+    if data is None:
+        data = {}
+    for key, value in updates.items():
+        data[key] = value
+    tmp_path = path.with_suffix(".yaml.tmp")
+    try:
+        with tmp_path.open("w") as f:
+            yaml_rt.dump(data, f)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)

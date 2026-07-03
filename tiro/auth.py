@@ -7,7 +7,6 @@ TTL once more than a day of it has been consumed.
 
 import hashlib
 import logging
-import os
 import secrets
 from pathlib import Path
 
@@ -139,25 +138,9 @@ def revoke_api_token(db_path: Path, token_id: int) -> bool:
 
 def save_password_hash(config: TiroConfig, password_hash: str) -> None:
     """Persist the hash to config.yaml, preserving comments and key order."""
-    from ruamel.yaml import YAML
+    from tiro.config import persist_config
 
-    if not config.config_path:
-        raise ValueError("config has no config_path; cannot persist password")
-    path = Path(config.config_path)
-    yaml = YAML()
-    yaml.preserve_quotes = True
-    data = yaml.load(path.read_text()) if path.exists() else None
-    if data is None:
-        data = {}
-    data["auth_password_hash"] = password_hash
-    tmp_path = path.with_suffix(".yaml.tmp")
-    try:
-        with tmp_path.open("w") as f:
-            yaml.dump(data, f)
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    persist_config(config, {"auth_password_hash": password_hash})
     config.auth_password_hash = password_hash
 
 
