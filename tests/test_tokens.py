@@ -1,6 +1,13 @@
 """API token lifecycle: helpers, routes, auth gating."""
 
+import argparse
+
 from tiro import auth
+from tiro.config import load_config
+
+
+def _token_args(cfg_path, command, **kw):
+    return argparse.Namespace(config=str(cfg_path), token_command=command, **kw)
 
 
 def test_list_and_revoke_helpers(configured_library):
@@ -51,3 +58,28 @@ def test_created_token_works_as_bearer(authenticated_client, configured_library)
     with TestClient(create_app(configured_library)) as c:
         r = c.get("/api/articles", headers={"Authorization": f"Bearer {raw}"})
         assert r.status_code == 200
+
+
+def test_token_cli_lifecycle(tmp_path, capsys):
+    from tiro.cli import cmd_token
+    from tiro.database import init_db
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(f"library_path: {tmp_path / 'lib'}\n")
+    init_db(load_config(cfg_file).db_path)
+
+    cmd_token(_token_args(cfg_file, "create", name="phone"))
+    out = capsys.readouterr().out
+    assert "phone" in out
+    raw = [line for line in out.splitlines() if line.strip().startswith("Token:")][0].split()[-1]
+    assert len(raw) > 30
+
+    cmd_token(_token_args(cfg_file, "list"))
+    out = capsys.readouterr().out
+    assert "phone" in out
+    assert raw not in out  # raw token never shown again
+
+    db = load_config(cfg_file).db_path
+    tid = auth.list_api_tokens(db)[0]["id"]
+    cmd_token(_token_args(cfg_file, "revoke", id=tid))
+    assert auth.list_api_tokens(db) == []

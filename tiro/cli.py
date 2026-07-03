@@ -388,6 +388,35 @@ def cmd_set_password(args):
     print(f"Password saved to {config_path}. Existing sessions stay valid until they expire.")
 
 
+def cmd_token(args):
+    """Manage API tokens for non-browser clients (extension, MCP, scripts)."""
+    from tiro import auth
+    from tiro.config import load_config
+    from tiro.database import init_db
+
+    config = load_config(args.config)
+    init_db(config.db_path)
+
+    if args.token_command == "create":
+        raw = auth.create_api_token(config.db_path, args.name)
+        print(f"Created token '{args.name}'. Shown once — store it now.")
+        print(f"Token: {raw}")
+    elif args.token_command == "list":
+        tokens = auth.list_api_tokens(config.db_path)
+        if not tokens:
+            print("No API tokens. Create one with: tiro token create <name>")
+            return
+        for t in tokens:
+            last = t["last_used_at"] or "never"
+            print(f"  [{t['id']}] {t['name']}  created {t['created_at']}  last used {last}")
+    elif args.token_command == "revoke":
+        if auth.revoke_api_token(config.db_path, args.id):
+            print(f"Token {args.id} revoked.")
+        else:
+            print(f"No token with id {args.id}.")
+            sys.exit(1)
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -418,6 +447,14 @@ def main():
     subparsers.add_parser("check-email", help="Check IMAP inbox for new newsletters")
     subparsers.add_parser("set-password", help="Set or reset the Tiro password")
 
+    token_parser = subparsers.add_parser("token", help="Manage API tokens")
+    token_sub = token_parser.add_subparsers(dest="token_command", required=True)
+    token_create = token_sub.add_parser("create", help="Create a token (shown once)")
+    token_create.add_argument("name", help="Token name, e.g. 'chrome-extension'")
+    token_sub.add_parser("list", help="List tokens")
+    token_revoke = token_sub.add_parser("revoke", help="Revoke a token")
+    token_revoke.add_argument("id", type=int, help="Token id from 'tiro token list'")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -434,6 +471,8 @@ def main():
         cmd_check_email(args)
     elif args.command == "set-password":
         cmd_set_password(args)
+    elif args.command == "token":
+        cmd_token(args)
     else:
         parser.print_help()
         sys.exit(1)
