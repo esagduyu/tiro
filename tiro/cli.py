@@ -461,6 +461,46 @@ def cmd_doctor(args):
     sys.exit(0 if report["clean"] else 1)
 
 
+def cmd_audit(args):
+    """Show the external-API audit log (calls, tokens, cost estimates)."""
+    import json as _json
+    from datetime import date as _date
+
+    from tiro.audit import read_audit_entries, summarize
+    from tiro.config import load_config
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    day = args.date
+    if not day and not args.month:
+        day = _date.today().isoformat()
+    entries = read_audit_entries(config, date=day, month=args.month, service=args.service)
+
+    if args.month:
+        rollup = summarize(entries)
+        if args.json:
+            print(_json.dumps(rollup, indent=2))
+            return
+        print(f"Audit summary for {args.month}:")
+        for service, s in sorted(rollup.items()):
+            cost = f"${s['cost_estimate']:.4f}" if s["cost_estimate"] else "-"
+            print(f"  {service:12} {s['calls']:5} calls ({s['failures']} failed)  "
+                  f"tokens {s['tokens_in']}/{s['tokens_out']}  chars {s['chars']}  est {cost}")
+        if not rollup:
+            print("  (no entries)")
+        return
+
+    if args.json:
+        print(_json.dumps(entries, indent=2))
+        return
+    for e in entries:
+        status = "ok" if e.get("success", True) else "FAIL"
+        cost = f" ${e['cost_estimate']:.4f}" if e.get("cost_estimate") else ""
+        detail = e.get("model") or e.get("count") or ""
+        print(f"{e['timestamp']}  {e['service']:10} {e['endpoint']:16} {status}{cost}  {detail}")
+    if not entries:
+        print(f"No audit entries for {day or args.month}.")
+
+
 def cmd_set_password(args):
     """Set or reset the Tiro password."""
     import getpass
@@ -560,6 +600,12 @@ def main():
     doctor_parser.add_argument("--json", action="store_true",
                                help="Machine-readable report")
 
+    audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
+    audit_parser.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
+    audit_parser.add_argument("--month", help="Month summary (YYYY-MM)")
+    audit_parser.add_argument("--service", help="Filter by service (anthropic/openai_tts/imap/smtp)")
+    audit_parser.add_argument("--json", action="store_true")
+
     token_parser = subparsers.add_parser("token", help="Manage API tokens")
     token_sub = token_parser.add_subparsers(dest="token_command", required=True)
     token_create = token_sub.add_parser("create", help="Create a token (shown once)")
@@ -590,6 +636,8 @@ def main():
         cmd_doctor(args)
     elif args.command == "token":
         cmd_token(args)
+    elif args.command == "audit":
+        cmd_audit(args)
     else:
         parser.print_help()
         sys.exit(1)

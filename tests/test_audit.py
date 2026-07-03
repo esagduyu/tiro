@@ -207,3 +207,18 @@ def test_smtp_send_is_audited(initialized_library, monkeypatch):
     entries = read_audit_entries(initialized_library, service="smtp")
     assert entries and entries[-1]["success"] is True
     assert entries[-1]["bytes_out"] > 0
+
+
+def test_cli_audit_json(initialized_library, capsys):
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    log_api_call(initialized_library, "anthropic", endpoint="digest",
+                 model="claude-opus-4-6", tokens_in=100, tokens_out=50)
+    month = date.today().isoformat()[:7]
+    cli.cmd_audit(SimpleNamespace(config="unused", date=None, month=month,
+                                  service=None, json=True,
+                                  _config_override=initialized_library))
+    out = json.loads(capsys.readouterr().out)
+    assert out["anthropic"]["calls"] == 1
