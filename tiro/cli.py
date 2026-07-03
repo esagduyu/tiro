@@ -121,14 +121,19 @@ def cmd_run(args):
 
     config = load_config(args.config)
 
-    if args.lan and not config.auth_password_hash:
+    # Compute the effective host FIRST — a bare `host: "0.0.0.0"` in
+    # config.yaml (without --lan) is just as exposed as --lan, and must be
+    # refused the same way. Checking args.lan alone let config.yaml bypass
+    # the refusal entirely.
+    effective_host = "0.0.0.0" if args.lan else config.host
+    if effective_host not in ("127.0.0.1", "localhost") and not config.auth_password_hash:
         if getattr(args, "insecure_no_auth", False):
             print("=" * 60)
             print("WARNING: --lan with NO AUTHENTICATION (--insecure-no-auth).")
             print("Anyone on your network can read and modify your library.")
             print("=" * 60)
         else:
-            print("LAN mode requires a password so other devices can't read your library.")
+            print(f"Binding to {effective_host} requires a password so other devices can't read your library.")
             print("Set one with:  uv run tiro set-password")
             print("Or (NOT recommended):  tiro run --lan --insecure-no-auth")
             sys.exit(1)
@@ -139,27 +144,43 @@ def cmd_run(args):
 
     app = create_app(config)
 
-    host = "0.0.0.0" if args.lan else config.host
+    host = effective_host
     url = f"http://localhost:{config.port}"
 
     lan_ip = None
+    candidate_ips: set[str] = set()
     if args.lan:
         import socket
+
+        # Gather ALL candidate local IPs, not just the UDP-trick one — a
+        # single detected IP breaks on offline or multi-homed machines
+        # (e.g. both Wi-Fi and Ethernet active, or no internet route at all).
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
-            lan_ip = s.getsockname()[0]
+            candidate_ips.add(s.getsockname()[0])
             s.close()
         except Exception:
-            lan_ip = None
-        if lan_ip:
-            print(f"LAN mode: accessible at http://{lan_ip}:{config.port}")
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None):
+                addr = info[4][0]
+                if "." in addr and not addr.startswith("127."):
+                    candidate_ips.add(addr)
+        except Exception:
+            pass
+
+        lan_ip = sorted(candidate_ips)[0] if candidate_ips else None
+        if candidate_ips:
+            for ip in sorted(candidate_ips):
+                print(f"LAN mode: accessible at http://{ip}:{config.port}")
         else:
             print("LAN mode: binding to 0.0.0.0 (could not detect LAN IP)")
 
     # Store LAN info on app state for the settings page
     app.state.lan_mode = args.lan
     app.state.lan_ip = lan_ip
+    app.state.lan_ips = candidate_ips
 
     if not args.no_browser:
         def open_browser():

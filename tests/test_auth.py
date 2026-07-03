@@ -348,9 +348,10 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         probe = path.replace("{article_id}", "1").replace("{token_id}", "1")
         probe = probe.replace("{digest_type}", "ranked").replace("{target_date}", "2026-01-01")
         probe = probe.replace("{source_id}", "1").replace("{node_type}", "tag").replace("{node_id}", "1")
+        assert "{" not in probe, f"unsubstituted placeholder in {probe}"
         for method in methods - {"HEAD", "OPTIONS"}:
             r = auth_client.request(method, probe)
-            if r.status_code not in (401, 302, 404):
+            if r.status_code not in (401, 302):
                 failures.append(f"{method} {probe} -> {r.status_code}")
     assert not failures, f"Unprotected routes: {failures}"
 
@@ -406,3 +407,38 @@ def test_mcp_gate_open_when_unconfigured(initialized_library, monkeypatch):
 
     monkeypatch.delenv("TIRO_API_TOKEN", raising=False)
     _require_token_gate(initialized_library)  # no password set -> no gate
+
+
+def test_config_host_lan_refused_without_auth(tmp_path, monkeypatch):
+    import argparse
+
+    from tiro.cli import cmd_run
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(f"library_path: {tmp_path / 'lib'}\nhost: \"0.0.0.0\"\n")
+    args = argparse.Namespace(
+        config=str(cfg_file), lan=False, no_browser=True, insecure_no_auth=False
+    )
+    with pytest.raises(SystemExit) as exc:
+        cmd_run(args)
+    assert exc.value.code == 1
+
+
+def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeypatch):
+    import tiro.mcp.server as mcp_server
+
+    raw = auth.create_api_token(configured_library.db_path, "mcp")
+    monkeypatch.setenv("TIRO_API_TOKEN", raw)
+    monkeypatch.setattr(mcp_server, "_config", None)
+    # _get_config() calls the module's own load_config() when _config is
+    # None; point it at configured_library so the gate checks the same DB
+    # the token was created/revoked against (otherwise it'd load a bare
+    # default config with no password and the gate would be a no-op).
+    monkeypatch.setattr(mcp_server, "load_config", lambda: configured_library)
+    monkeypatch.setattr(mcp_server, "init_vectorstore", lambda *a, **k: None)
+    mcp_server._get_config()  # passes
+
+    tid = auth.list_api_tokens(configured_library.db_path)[0]["id"]
+    auth.revoke_api_token(configured_library.db_path, tid)
+    with pytest.raises(RuntimeError):
+        mcp_server._get_config()  # revocation now bites on next call

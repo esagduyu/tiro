@@ -171,7 +171,11 @@ class NotAuthenticated(Exception):
 def _check_csrf(request: Request) -> None:
     # Cross-site navigations/fetches must never reach the API with ambient
     # cookie auth — even GETs (digest ?refresh=true, analysis, export are
-    # side-effectful/expensive). Browsers set Sec-Fetch-Site; curl/tests don't.
+    # side-effectful/expensive).
+    # Modern browsers (Chrome 76+, Firefox 90+, Safari 16.4+) send
+    # Sec-Fetch-Site; older browsers fail open here — residual risk is
+    # cross-site GET cost-burning only (accepted; real fix is GET->POST
+    # conversion of side-effectful routes, planned for M4).
     if request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(status_code=403, detail="Cross-site request rejected")
     if request.method not in MUTATING_METHODS:
@@ -199,6 +203,10 @@ async def require_auth(request: Request) -> None:
     if auth_header.startswith("Bearer "):
         if validate_api_token(config.db_path, auth_header[7:]):
             return
+        logger.warning(
+            "Invalid API token presented from %s",
+            request.client.host if request.client else "?",
+        )
         raise HTTPException(status_code=401, detail="Invalid API token")
     if _cookie_authenticated(request):
         _check_csrf(request)

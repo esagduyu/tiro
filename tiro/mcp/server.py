@@ -24,7 +24,13 @@ _config: TiroConfig | None = None
 def _require_token_gate(config: TiroConfig) -> None:
     """Single-user gating for the MCP server. When the Tiro instance has a
     password configured, the MCP process must present a valid API token via
-    the TIRO_API_TOKEN env var (set it in the MCP client's "env" block)."""
+    the TIRO_API_TOKEN env var (set it in the MCP client's "env" block).
+
+    Called on EVERY _get_config() lookup (i.e. on every tool invocation),
+    not just at process startup — this is one indexed DB lookup, and it's
+    what lets revoking the token (tiro token revoke) actually cut off a
+    long-running MCP server process on its next call, instead of only
+    affecting future server restarts."""
     import os
 
     if not config.auth_password_hash:
@@ -44,9 +50,11 @@ def _get_config() -> TiroConfig:
     global _config
     if _config is None:
         _config = load_config()
-        _require_token_gate(_config)
         # Initialize ChromaDB so get_collection() works
         init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
+    # Enforced on every call (not just first init) so token revocation takes
+    # effect on the next tool invocation, not only on server restart.
+    _require_token_gate(_config)
     return _config
 
 

@@ -214,9 +214,12 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.middleware("http")
     async def _validate_host(request: Request, call_next):
         host = request.headers.get("host", "")
-        lan_ip = getattr(app.state, "lan_ip", None)
-        if host not in allowed_hosts and not (
-            lan_ip and host == f"{lan_ip}:{config.port}"
+        # A single detected LAN IP breaks on offline or multi-homed
+        # machines — check against the full candidate set gathered at
+        # startup (tiro/cli.py cmd_run), not just the first one found.
+        lan_ips = getattr(app.state, "lan_ips", None) or set()
+        if host not in allowed_hosts and not any(
+            host == f"{ip}:{config.port}" for ip in lan_ips
         ):
             from fastapi.responses import JSONResponse
             return JSONResponse(
