@@ -85,9 +85,11 @@ lsof -ti :8000 | xargs kill -9
 | PATCH | /api/articles/{id}/read | Mark read, increment open count |
 | GET | /api/sources | List sources with article counts |
 | PATCH | /api/sources/{id}/vip | Toggle VIP status |
-| GET | /api/articles/{id}/analysis | On-demand ingenuity/trust analysis |
-| GET | /api/digest/today | Get/generate daily digest (all 3 variants) |
-| GET | /api/digest/today/{type} | Get specific variant |
+| GET | /api/articles/{id}/analysis | Read cached analysis (data null if none) |
+| POST | /api/articles/{id}/analysis | Run/re-run ingenuity/trust analysis (Opus) |
+| GET | /api/digest/today | Get today's cached digest, 404 if none (all 3 variants) |
+| POST | /api/digest/today | Generate fresh digest (body: {unread_only}) |
+| GET | /api/digest/today/{type} | Get specific cached variant (404 if none) |
 | GET | /api/search?q=... | Semantic search across articles |
 | GET | /api/articles/{id}/related | Get related articles with connection notes |
 | POST | /api/recompute-relations | Retroactively compute relations for all articles |
@@ -123,7 +125,8 @@ lsof -ti :8000 | xargs kill -9
 **Load-bearing conventions introduced on the Phase 0 branch** (a session working on this branch must know these; the hackathon docs above predate them):
 - **Auth is now required.** All `/api/*` routes except `POST /api/auth/login`, `POST /api/auth/setup` (while unconfigured), `GET /api/auth/status`, `POST /api/auth/logout`, `GET /healthz` return 401 unauthenticated; HTML pages 302 → `/login`; FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`) are disabled. Auth backend in `tiro/auth.py` (bcrypt password in `config.yaml` `auth_password_hash`, SQLite `sessions` + `api_tokens` tables, `require_auth`/`require_page_auth` deps, Host-header validation + `Sec-Fetch-Site` CSRF). Tests use the `authenticated_client`/`auth_client`/`configured_library` conftest fixtures. `tiro set-password` / `tiro token create|list|revoke` CLIs. MCP server gated on `TIRO_API_TOKEN` when a password is set.
 - **Sanitize invariant:** `tiro/sanitize.py` (`sanitize_html` via nh3) runs in the EXTRACTION functions (`web.py`/`email.py`) before markdownify — NOT in `processor.py`. Content reaching `process_article()` is already sanitized. Client renders markdown through `renderMarkdown` (marked → DOMPurify) and escapes every server string at `innerHTML` sinks via `esc()`/`num()`. Never route the already-clean settings token UI through a sanitize+innerHTML path.
-- **Frontend deps vendored** in `tiro/frontend/static/vendor/` (marked 15.0.12, DOMPurify 3.4.11, Chart.js 4.4.7, d3 7.9.0) — no CDN at runtime (test-enforced). **Cache-bust is at `v=52`** and is a single shared counter — bump ALL `?v=` occurrences across every template together when changing static JS/CSS (grep first).
+- **Frontend deps vendored** in `tiro/frontend/static/vendor/` (marked 15.0.12, DOMPurify 3.4.11, Chart.js 4.4.7, d3 7.9.0) — no CDN at runtime (test-enforced). **Cache-bust is at `v=53`** and is a single shared counter — bump ALL `?v=` occurrences across every template together when changing static JS/CSS (grep first).
+- **No side-effectful GETs:** digest generation is `POST /api/digest/today` (body `{unread_only}`), analysis runs are `POST /api/articles/{id}/analysis`; the GET twins are pure cache reads (digest: 404 on miss; analysis: data null). Frontend auto-generates on first digest visit by POSTing when the GET 404s. `GET /api/articles/{id}/audio` stays GET by design (`audio.src` issues GETs). Known cosmetic gap: cached digest markdown keeps dead `/articles/N` links after an article is deleted (accepted, M4b).
 - **Delete + atomic ingestion:** `tiro/lifecycle.py` `delete_article()` is the one coordinator cleaning all four stores (SQLite rows+junctions, ChromaDB, markdown, MP3), shared by `DELETE /api/articles/{id}`, `tiro delete`, and ingestion rollback. `process_article()` is a staged pipeline: failures after row+file exist roll back through `delete_article`; ChromaDB failure is non-fatal (`articles.vector_status='pending'`, background retry loop with idempotent `upsert`). Residual inconsistencies (file-without-row, row-without-file) are recoverable and are `tiro doctor`'s job (M5).
 - **Test harness:** `pytest` under `tests/`, isolated fixtures in `conftest.py` (temp library, offline, autouse CWD guard). Route-walk test (`test_auth.py`) enforces the auth allowlist as an invariant over `app.routes` — new routes are auto-covered.
 
@@ -191,7 +194,7 @@ Playwright MCP is configured at user scope. Use it to visually verify UI changes
 - **Browser cache busting**: Static files (CSS/JS) use `?v=N` query params in base.html (inherited by all templates). Increment the version when modifying static files.
 - **Opus JSON responses**: Opus may wrap JSON in ```json fences despite being told not to. Always strip markdown code fences before `json.loads()`. See `analysis.py` for the pattern.
 - **Opus call duration**: Analysis calls can take up to a minute (full article text). Digest calls take 10-30s. UI loading text must reflect actual wait times.
-- **Ingenuity analysis**: On-demand only (not precomputed). Cached in `articles.ingenuity_analysis` (JSON blob with `analyzed_at` timestamp). `?refresh=true` to re-analyze, `?cache_only=true` to check cache without triggering Opus. Panel shows intro page first, user clicks "Run" to start. Results have collapsible dimension sections and aggregate-score-colored summary.
+- **Ingenuity analysis**: On-demand only (not precomputed). Cached in `articles.ingenuity_analysis` (JSON blob with `analyzed_at` timestamp). As of M4b: `POST /api/articles/{id}/analysis` runs/re-runs analysis; the GET only reads cache (data null if none). Panel shows intro page first, user clicks "Run" to start. Results have collapsible dimension sections and aggregate-score-colored summary.
 - **Semantic search**: `tiro/search/semantic.py` queries ChromaDB with `.query()`. ChromaDB returns cosine distances (0=identical, 2=opposite); convert to similarity with `1 - (distance / 2)`.
 - **Related articles**: Auto-computed on ingest after ChromaDB add. Top 5 similar stored in `article_relations`. Haiku generates connection notes for top 3. `POST /api/recompute-relations` handles retroactive computation.
 - **Search UI**: Debounced search bar in inbox, results display in same card format with similarity badge. Clear button reloads full inbox.

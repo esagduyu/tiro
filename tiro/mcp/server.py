@@ -416,7 +416,7 @@ def get_digest(digest_type: str = "ranked") -> str:
         if not row:
             return (
                 "No digest found. Generate one first by visiting the Tiro web UI "
-                "and clicking the Digest tab, or calling GET /api/digest/today on the running server."
+                "and clicking the Digest tab, or calling POST /api/digest/today on the running server."
             )
 
         digest_date = row["date"]
