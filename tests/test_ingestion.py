@@ -77,3 +77,29 @@ def _count_articles(config):
         return conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
     finally:
         conn.close()
+
+
+def test_retry_pending_vectors_indexes_them(initialized_library, monkeypatch):
+    from tiro.database import get_connection
+    from tiro.ingestion import processor
+
+    class BoomOnce:
+        def add(self, *a, **k):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(processor, "get_collection", lambda: BoomOnce())
+    ex = _extracted()
+    result = processor.process_article(**ex, config=initialized_library, ingestion_method="email")
+    # It's pending now
+    from tiro.vectorstore import retry_pending_vectors, get_collection
+
+    n = retry_pending_vectors(initialized_library)
+    assert n == 1
+    conn = get_connection(initialized_library.db_path)
+    try:
+        vs = conn.execute("SELECT vector_status FROM articles WHERE id = ?",
+                          (result["id"],)).fetchone()["vector_status"]
+    finally:
+        conn.close()
+    assert vs == "indexed"
+    assert get_collection().get(ids=[f"article_{result['id']}"])["ids"]

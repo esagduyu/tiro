@@ -42,3 +42,43 @@ def get_collection() -> chromadb.Collection:
     if _collection is None:
         raise RuntimeError("Vectorstore not initialized. Call init_vectorstore first.")
     return _collection
+
+
+def retry_pending_vectors(config) -> int:
+    """Re-index articles whose ChromaDB add previously failed. Returns count indexed."""
+    import frontmatter
+
+    from tiro.database import get_connection
+
+    conn = get_connection(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, title, markdown_path FROM articles WHERE vector_status = 'pending'"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return 0
+    collection = get_collection()
+    indexed = 0
+    for row in rows:
+        md = config.articles_dir / row["markdown_path"]
+        if not md.exists():
+            continue
+        try:
+            post = frontmatter.load(str(md))
+            collection.add(
+                ids=[f"article_{row['id']}"],
+                documents=[post.content],
+                metadatas=[{"title": row["title"], "article_id": row["id"]}],
+            )
+            conn2 = get_connection(config.db_path)
+            try:
+                conn2.execute("UPDATE articles SET vector_status = 'indexed' WHERE id = ?", (row["id"],))
+                conn2.commit()
+            finally:
+                conn2.close()
+            indexed += 1
+        except Exception as e:
+            logger.error("Vector retry failed for %d: %s", row["id"], e)
+    return indexed

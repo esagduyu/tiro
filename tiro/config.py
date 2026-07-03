@@ -35,6 +35,7 @@ class TiroConfig:
     decay_rate_disliked: float = DEFAULTS["decay_rate_disliked"]
     decay_rate_vip: float = DEFAULTS["decay_rate_vip"]
     decay_threshold: float = DEFAULTS["decay_threshold"]
+    vector_retry_interval: int = 5  # minutes, 0 = disabled
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"

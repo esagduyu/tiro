@@ -51,6 +51,23 @@ async def _imap_sync_loop(config: TiroConfig):
             logger.error("IMAP sync failed: %s", e)
 
 
+async def _vector_retry_loop(config: TiroConfig):
+    """Background task that retries pending ChromaDB vector adds on a schedule."""
+    from tiro.vectorstore import retry_pending_vectors
+
+    while True:
+        interval = config.vector_retry_interval
+        if interval <= 0:
+            return
+        await asyncio.sleep(interval * 60)
+        try:
+            n = await asyncio.to_thread(retry_pending_vectors, config)
+            if n:
+                logger.info("Vector retry: indexed %d pending article(s)", n)
+        except Exception as e:
+            logger.error("Vector retry loop error: %s", e)
+
+
 def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     """Compute seconds until next occurrence of HH:MM in user's timezone.
 
@@ -152,11 +169,17 @@ async def lifespan(app: FastAPI):
         logger.info("Digest schedule started: daily at %s", config.digest_schedule_time)
     app.state.digest_task = digest_task
 
+    # Start vector retry background task if configured
+    vector_retry_task = None
+    if config.vector_retry_interval > 0:
+        vector_retry_task = asyncio.create_task(_vector_retry_loop(config))
+        logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
+
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
     # Cancel background tasks on shutdown
-    for task in [sync_task, digest_task]:
+    for task in [sync_task, digest_task, vector_retry_task]:
         if task and not task.done():
             task.cancel()
             try:
