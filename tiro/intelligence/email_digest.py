@@ -2,11 +2,12 @@
 
 import logging
 import smtplib
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from tiro.audit import log_api_call
 from tiro.config import TiroConfig
 from tiro.intelligence.digest import generate_digest, get_cached_digest
 
@@ -33,7 +34,7 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
         cached = get_cached_digest(config, today)
         if cached and "ranked" in cached:
             created_at = next(iter(cached.values()))["created_at"]
-            age_hours = (datetime.utcnow() - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+            age_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
             if age_hours < 24:
                 all_data = cached
                 logger.info("Using cached digest (%.1fh old) for email", age_hours)
@@ -62,7 +63,7 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
         cached = get_cached_digest(config, today, "ranked")
         if cached and "ranked" in cached:
             created_at = cached["ranked"]["created_at"]
-            age_hours = (datetime.utcnow() - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+            age_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
             if age_hours < 24:
                 digest_content = cached["ranked"]["content"]
                 logger.info("Using cached ranked digest (%.1fh old) for email", age_hours)
@@ -107,6 +108,7 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
         msg.attach(logo_img)
 
     # Send via SMTP
+    payload = msg.as_string()
     try:
         if config.smtp_user and config.smtp_password:
             # Authenticated SMTP (e.g. Gmail with app password)
@@ -114,28 +116,32 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
                 with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
                     server.starttls()
                     server.login(config.smtp_user, config.smtp_password)
-                    server.sendmail(from_addr, [config.digest_email], msg.as_string())
+                    server.sendmail(from_addr, [config.digest_email], payload)
             else:
                 with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port) as server:
                     server.login(config.smtp_user, config.smtp_password)
-                    server.sendmail(from_addr, [config.digest_email], msg.as_string())
+                    server.sendmail(from_addr, [config.digest_email], payload)
         else:
             # Plain SMTP (e.g. local mailhog)
             with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
-                server.sendmail(from_addr, [config.digest_email], msg.as_string())
+                server.sendmail(from_addr, [config.digest_email], payload)
         logger.info("Digest email sent to %s via %s:%d", config.digest_email, config.smtp_host, config.smtp_port)
     except (ConnectionRefusedError, OSError) as e:
+        log_api_call(config, "smtp", endpoint="send_digest", success=False, error=str(e))
         raise RuntimeError(
             f"Could not connect to SMTP server at {config.smtp_host}:{config.smtp_port}. "
             f"For Gmail, use smtp.gmail.com:587 with an app password. "
             f"For local testing, run: docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog"
         ) from e
     except smtplib.SMTPAuthenticationError as e:
+        log_api_call(config, "smtp", endpoint="send_digest", success=False, error=str(e))
         raise RuntimeError(
             f"SMTP authentication failed for {config.smtp_user}. "
             f"For Gmail, use an App Password (not your regular password): "
             f"https://myaccount.google.com/apppasswords"
         ) from e
+
+    log_api_call(config, "smtp", endpoint="send_digest", bytes_out=len(payload))
 
     return {
         "sent_to": config.digest_email,

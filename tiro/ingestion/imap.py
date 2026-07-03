@@ -3,6 +3,7 @@
 import imaplib
 import logging
 
+from tiro.audit import log_api_call
 from tiro.config import TiroConfig
 from tiro.ingestion.email import parse_eml
 from tiro.ingestion.processor import process_article
@@ -36,6 +37,7 @@ def check_imap_inbox(config: TiroConfig) -> dict:
     try:
         imap = imaplib.IMAP4_SSL(config.imap_host, config.imap_port)
     except (ConnectionRefusedError, OSError) as e:
+        log_api_call(config, "imap", endpoint="check", success=False, error=str(e))
         raise RuntimeError(
             f"Could not connect to IMAP server at {config.imap_host}:{config.imap_port}: {e}"
         ) from e
@@ -44,6 +46,7 @@ def check_imap_inbox(config: TiroConfig) -> dict:
         imap.login(config.imap_user, config.imap_password)
     except imaplib.IMAP4.error as e:
         imap.logout()
+        log_api_call(config, "imap", endpoint="check", success=False, error=str(e))
         raise RuntimeError(
             f"IMAP login failed for {config.imap_user}. "
             f"For Gmail, use an App Password: https://myaccount.google.com/apppasswords"
@@ -53,15 +56,18 @@ def check_imap_inbox(config: TiroConfig) -> dict:
         # Select the label/folder
         status, data = imap.select(config.imap_label, readonly=False)
         if status != "OK":
-            raise RuntimeError(
+            error_msg = (
                 f"Could not select IMAP label '{config.imap_label}'. "
                 f"Create this label in Gmail and forward newsletters to it."
             )
+            log_api_call(config, "imap", endpoint="check", success=False, error=error_msg)
+            raise RuntimeError(error_msg)
 
         # Search for unseen messages
         status, msg_ids = imap.search(None, "UNSEEN")
         if status != "OK" or not msg_ids[0]:
             logger.info("No unseen messages in '%s'", config.imap_label)
+            log_api_call(config, "imap", endpoint="check", count=result["fetched"])
             return result
 
         id_list = msg_ids[0].split()
@@ -83,6 +89,7 @@ def check_imap_inbox(config: TiroConfig) -> dict:
             pass
         imap.logout()
 
+    log_api_call(config, "imap", endpoint="check", count=result["fetched"])
     return result
 
 

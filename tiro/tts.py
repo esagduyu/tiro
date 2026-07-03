@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 import frontmatter
 import httpx
 
+from tiro.audit import log_api_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 
@@ -143,9 +144,10 @@ async def stream_article_audio(
     if not chunks:
         raise ValueError(f"Article {article_id} produced no text chunks")
 
+    total_chars = sum(len(c) for c in chunks)
     logger.info(
         "Streaming TTS for article %d: %d chunks, %d chars",
-        article_id, len(chunks), sum(len(c) for c in chunks),
+        article_id, len(chunks), total_chars,
     )
 
     all_bytes = bytearray()
@@ -170,6 +172,10 @@ async def stream_article_audio(
                 if response.status_code != 200:
                     body = await response.aread()
                     logger.error("OpenAI TTS error %d: %s", response.status_code, body[:500])
+                    log_api_call(
+                        config, "openai_tts", endpoint="speech", model=config.tts_model,
+                        success=False, error=f"HTTP {response.status_code}",
+                    )
                     raise RuntimeError(f"OpenAI TTS API returned {response.status_code}")
 
                 async for data in response.aiter_bytes(chunk_size=8192):
@@ -204,6 +210,11 @@ async def stream_article_audio(
         conn.commit()
     finally:
         conn.close()
+
+    log_api_call(
+        config, "openai_tts", endpoint="speech", model=config.tts_model,
+        chars=total_chars, bytes_out=len(all_bytes),
+    )
 
     logger.info(
         "Audio cached for article %d: %.1fs, %.1f KB",

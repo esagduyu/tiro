@@ -169,3 +169,41 @@ def test_extract_metadata_is_audited(initialized_library, monkeypatch):
     ex.extract_metadata("T", "body", initialized_library)
     entries = read_audit_entries(initialized_library, service="anthropic")
     assert entries and entries[-1]["endpoint"] == "extract_metadata"
+
+
+def test_imap_failure_is_audited(initialized_library, monkeypatch):
+    import tiro.ingestion.imap as imap_mod
+
+    initialized_library.imap_user = "u@example.com"
+    initialized_library.imap_password = "pw"
+
+    class BoomIMAP:
+        def __init__(self, *a, **k):
+            raise ConnectionRefusedError("nope")
+
+    monkeypatch.setattr(imap_mod.imaplib, "IMAP4_SSL", BoomIMAP)
+    with pytest.raises(RuntimeError):
+        imap_mod.check_imap_inbox(initialized_library)
+    entries = read_audit_entries(initialized_library, service="imap")
+    assert entries and entries[-1]["success"] is False
+
+
+def test_smtp_send_is_audited(initialized_library, monkeypatch):
+    import tiro.intelligence.email_digest as ed
+
+    initialized_library.digest_email = "u@example.com"
+
+    class FakeSMTP:
+        def __init__(self, *a, **k): ...
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def sendmail(self, *a, **k): ...
+
+    monkeypatch.setattr(ed.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(ed, "get_cached_digest", lambda *a, **k: {
+        "ranked": {"content": "# d", "article_ids": [], "created_at": "2026-07-03 10:00:00"}
+    })
+    ed.send_digest_email(initialized_library)
+    entries = read_audit_entries(initialized_library, service="smtp")
+    assert entries and entries[-1]["success"] is True
+    assert entries[-1]["bytes_out"] > 0
