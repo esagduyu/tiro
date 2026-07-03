@@ -354,6 +354,18 @@ async def mark_read(article_id: int, request: Request):
         conn.close()
 
 
+@router.delete("/{article_id}")
+async def delete_article_route(article_id: int, request: Request):
+    """Permanently delete an article from all stores."""
+    from tiro.lifecycle import delete_article
+
+    config = request.app.state.config
+    deleted = await asyncio.to_thread(delete_article, config, article_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Article not found")
+    return {"success": True, "data": {"deleted": article_id}}
+
+
 @router.get("/{article_id}/analysis")
 async def get_analysis(
     article_id: int,

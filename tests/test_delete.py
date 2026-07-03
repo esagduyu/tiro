@@ -140,3 +140,22 @@ def test_delete_clears_inbound_relations(authenticated_client, configured_librar
         ).fetchone() is None
     finally:
         conn.close()
+
+
+def test_delete_endpoint(authenticated_client, configured_library):
+    from tiro.vectorstore import get_collection
+
+    article_id = _ingest_one(authenticated_client)
+    r = authenticated_client.delete(f"/api/articles/{article_id}")
+    assert r.status_code == 200
+    assert r.json()["data"]["deleted"] == article_id
+    assert authenticated_client.get(f"/api/articles/{article_id}").status_code == 404
+    assert not get_collection().get(ids=[f"article_{article_id}"])["ids"]
+
+
+def test_delete_endpoint_404(authenticated_client):
+    assert authenticated_client.delete("/api/articles/99999").status_code == 404
+
+
+def test_delete_endpoint_requires_auth(auth_client):
+    assert auth_client.delete("/api/articles/1").status_code == 401

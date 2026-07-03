@@ -395,6 +395,19 @@ def cmd_import_emails(args):
     print(f"\nDone! {processed} imported, {skipped} skipped, {failed} failed")
 
 
+def cmd_delete(args):
+    """Delete an article by id from all stores."""
+    from tiro.config import load_config
+    from tiro.lifecycle import delete_article
+
+    config = load_config(args.config)
+    if delete_article(config, args.id):
+        print(f"Deleted article {args.id}.")
+    else:
+        print(f"No article with id {args.id}.")
+        sys.exit(1)
+
+
 def cmd_set_password(args):
     """Set or reset the Tiro password."""
     import getpass
@@ -478,6 +491,9 @@ def main():
     import_parser = subparsers.add_parser("import-emails", help="Bulk import .eml files")
     import_parser.add_argument("directory", type=Path, help="Directory containing .eml files")
 
+    delete_parser = subparsers.add_parser("delete", help="Delete an article by id")
+    delete_parser.add_argument("id", type=int)
+
     subparsers.add_parser("setup-email", help="Configure Gmail email integration")
     subparsers.add_parser("check-email", help="Check IMAP inbox for new newsletters")
     subparsers.add_parser("set-password", help="Set or reset the Tiro password")
@@ -500,6 +516,8 @@ def main():
         cmd_export(args)
     elif args.command == "import-emails":
         cmd_import_emails(args)
+    elif args.command == "delete":
+        cmd_delete(args)
     elif args.command == "setup-email":
         cmd_setup_email(args)
     elif args.command == "check-email":
