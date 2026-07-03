@@ -22,7 +22,6 @@ ALLOWED_ATTRIBUTES = {
     "img": {"src", "alt", "title", "width", "height", "loading"},
     "td": {"colspan", "rowspan"},
     "th": {"colspan", "rowspan"},
-    "*": {"id"},
 }
 
 _MD_BLOCK_RE = re.compile(

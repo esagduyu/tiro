@@ -37,6 +37,9 @@ def test_chromadb_failure_is_nonfatal_marks_pending(initialized_library, monkeyp
         def add(self, *a, **k):
             raise RuntimeError("chroma down")
 
+        def upsert(self, *a, **k):
+            raise RuntimeError("chroma down")
+
     monkeypatch.setattr(processor, "get_collection", lambda: BoomCollection())
     ex = _extracted()
     result = processor.process_article(**ex, config=initialized_library, ingestion_method="email")
@@ -145,6 +148,9 @@ def test_retry_pending_vectors_indexes_them(initialized_library, monkeypatch):
 
     class BoomOnce:
         def add(self, *a, **k):
+            raise RuntimeError("down")
+
+        def upsert(self, *a, **k):
             raise RuntimeError("down")
 
     monkeypatch.setattr(processor, "get_collection", lambda: BoomOnce())

@@ -21,6 +21,14 @@ def test_javascript_urls_stripped():
     assert "javascript:" not in out
 
 
+def test_id_attribute_stripped():
+    from tiro.sanitize import sanitize_html
+
+    out = sanitize_html('<p id="clobber">hi</p><img src="x.png" id="y" alt="a">')
+    assert "id=" not in out
+    assert "hi" in out and 'alt="a"' in out
+
+
 def test_images_survive_with_attributes():
     html = '<figure><img src="https://cdn.example/i.jpg" alt="pic" width="640" height="480"><figcaption>cap</figcaption></figure>'
     out = sanitize_html(html)
