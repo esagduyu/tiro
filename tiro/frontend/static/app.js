@@ -30,7 +30,14 @@ function applyTheme(mode) {
     document.documentElement.setAttribute('data-theme', mode);
     const themeLink = document.getElementById('theme-css');
     const themeName = mode === 'dark' ? 'roman-night' : 'papyrus';
-    if (themeLink) themeLink.href = `/static/themes/${themeName}.css?v=39`;
+    if (themeLink) {
+        // Derive the cache-bust version from the link's current href instead
+        // of hardcoding it, so theme switches always match whatever version
+        // base.html is currently serving (avoids stale-cache drift).
+        const currentVersion = new URL(themeLink.href, window.location.origin).searchParams.get('v');
+        const versionSuffix = currentVersion ? `?v=${currentVersion}` : '';
+        themeLink.href = `/static/themes/${themeName}.css${versionSuffix}`;
+    }
     document.querySelectorAll('#theme-toggle, #mobile-theme-toggle').forEach(btn => {
         const icon = btn.querySelector('.sidebar-icon');
         if (icon) {

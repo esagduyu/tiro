@@ -1,6 +1,6 @@
 """Server-side sanitization: HTML at ingestion, markdown for AI output."""
 
-from tiro.intelligence.analysis import _coerce_score
+from tiro.intelligence.analysis import _coerce_analysis_scores, _coerce_score
 from tiro.sanitize import sanitize_html, sanitize_markdown
 
 
@@ -87,3 +87,19 @@ def test_coerce_score_non_numeric_falls_back():
 def test_coerce_score_out_of_range_is_clamped():
     assert _coerce_score(11) == 10.0
     assert _coerce_score(-3) == 0.0
+
+
+def test_coerce_analysis_scores_fixes_cached_blob():
+    """A blob cached before score coercion existed (e.g. a raw non-numeric
+    "score" string) must be coerced on read, not just on generation — this
+    is what get_cached_analysis() now applies before returning cached data."""
+    cached = {
+        "bias": {"score": "<script>alert(1)</script>", "notes": "n"},
+        "factual_confidence": {"score": 15, "notes": "n"},
+        "novelty": {"score": 6, "notes": "n"},
+        "analyzed_at": "2026-01-01T00:00:00+00:00",
+    }
+    coerced = _coerce_analysis_scores(cached)
+    assert coerced["bias"]["score"] == 5.0  # non-numeric falls back to neutral
+    assert coerced["factual_confidence"]["score"] == 10.0  # out-of-range clamped
+    assert coerced["novelty"]["score"] == 6.0  # well-formed value passes through unchanged

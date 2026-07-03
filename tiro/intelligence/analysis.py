@@ -33,6 +33,20 @@ def _coerce_score(value, fallback: float = 5.0) -> float:
     return max(0.0, min(10.0, n))
 
 
+def _coerce_analysis_scores(analysis: dict) -> dict:
+    """Coerce the bias/factual_confidence/novelty dimension scores in-place.
+
+    Shared by both the "freshly generated" and "loaded from cache" paths so
+    an analysis blob can never surface a non-numeric or out-of-range score
+    to the frontend, regardless of when it was produced (including blobs
+    cached before this coercion existed).
+    """
+    for dimension in ("bias", "factual_confidence", "novelty"):
+        if isinstance(analysis.get(dimension), dict) and "score" in analysis[dimension]:
+            analysis[dimension]["score"] = _coerce_score(analysis[dimension]["score"])
+    return analysis
+
+
 def get_cached_analysis(config: TiroConfig, article_id: int) -> dict | None:
     """Return cached ingenuity analysis for an article, or None."""
     conn = get_connection(config.db_path)
@@ -42,7 +56,7 @@ def get_cached_analysis(config: TiroConfig, article_id: int) -> dict | None:
             (article_id,),
         ).fetchone()
         if row and row["ingenuity_analysis"]:
-            return json.loads(row["ingenuity_analysis"])
+            return _coerce_analysis_scores(json.loads(row["ingenuity_analysis"]))
         return None
     finally:
         conn.close()
@@ -130,9 +144,7 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
     # Coerce dimension scores to safe numbers — Opus output has no schema
     # validation, and a non-numeric score would otherwise propagate straight
     # into the frontend's innerHTML rendering.
-    for dimension in ("bias", "factual_confidence", "novelty"):
-        if isinstance(analysis.get(dimension), dict) and "score" in analysis[dimension]:
-            analysis[dimension]["score"] = _coerce_score(analysis[dimension]["score"])
+    _coerce_analysis_scores(analysis)
 
     # Embed timestamp before caching
     analysis["analyzed_at"] = datetime.now(timezone.utc).isoformat()
