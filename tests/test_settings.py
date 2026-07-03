@@ -158,6 +158,17 @@ def test_no_cwd_relative_config_writes_left():
     assert out.stdout == "", f"CWD-relative config writes remain:\n{out.stdout}"
 
 
+def test_raw_secrets_never_in_settings_responses(authenticated_client, configured_library):
+    configured_library.smtp_password = "SUPER-secret-smtp"
+    configured_library.imap_password = "SUPER-secret-imap"
+    configured_library.openai_api_key = "sk-SUPER-secret-openai"
+
+    for path in ("/api/settings/email", "/api/settings/tts"):
+        r = authenticated_client.get(path)
+        assert r.status_code == 200
+        assert "SUPER-secret" not in r.text, f"raw secret leaked from {path}"
+
+
 def test_cli_init_key_writes_preserve_comments_and_0600(tmp_path, monkeypatch):
     """cmd_init's API-key save must go through persist_config (atomic, 0600,
     comment-preserving) — it writes secrets."""

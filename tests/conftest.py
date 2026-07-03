@@ -69,7 +69,9 @@ def client(initialized_library):
 
     app = create_app(initialized_library)
     # Context manager runs the lifespan (store init, background tasks, shutdown).
-    with TestClient(app) as c:
+    # base_url="http://localhost" so requests carry Host: localhost honestly
+    # (the production Host allowlist no longer exempts "testserver" — M-2).
+    with TestClient(app, base_url="http://localhost") as c:
         yield c
 
 
@@ -126,7 +128,7 @@ def auth_client(configured_library):
     from tiro.app import create_app
 
     app = create_app(configured_library)
-    with TestClient(app, follow_redirects=False) as c:
+    with TestClient(app, base_url="http://localhost", follow_redirects=False) as c:
         yield c
 
 

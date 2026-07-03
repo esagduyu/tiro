@@ -36,6 +36,7 @@ def _session_response(request: Request, payload: dict) -> JSONResponse:
 
 @router.post("/login")
 async def login(body: PasswordBody, request: Request):
+    auth._check_csrf(request)
     config = request.app.state.config
     if not config.auth_password_hash:
         raise HTTPException(status_code=403, detail="No password configured — complete setup first")
@@ -47,6 +48,7 @@ async def login(body: PasswordBody, request: Request):
 
 @router.post("/setup")
 async def setup(body: PasswordBody, request: Request):
+    auth._check_csrf(request)
     config = request.app.state.config
     if config.auth_password_hash:
         raise HTTPException(status_code=403, detail="Password already configured")
@@ -70,7 +72,11 @@ async def setup(body: PasswordBody, request: Request):
 async def logout(request: Request):
     """Log out. Open by design (no auth dependency): logging out with an
     expired/absent session is a harmless no-op, and gating it would strand
-    clients holding a dead cookie."""
+    clients holding a dead cookie. CSRF is still checked (M-12) — cross-site
+    Sec-Fetch-Site is rejected the same as any other route; a hostile page
+    forcing a same-window logout is low severity but there's no reason to
+    special-case it."""
+    auth._check_csrf(request)
     config = request.app.state.config
     token = request.cookies.get(auth.SESSION_COOKIE)
     if token:

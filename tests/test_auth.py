@@ -229,7 +229,7 @@ def test_authenticated_client_can_use_api(authenticated_client):
 def test_bearer_token_grants_api_access(configured_library):
     raw = auth.create_api_token(configured_library.db_path, "test-client")
     app = create_app(configured_library)
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://localhost") as c:
         r = c.get("/api/articles", headers={"Authorization": f"Bearer {raw}"})
         assert r.status_code == 200
         r = c.get("/api/articles", headers={"Authorization": "Bearer forged"})
@@ -247,18 +247,18 @@ def test_csrf_rejects_cross_origin_cookie_mutation(authenticated_client):
 def test_csrf_allows_same_origin_mutation(authenticated_client):
     r = authenticated_client.post(
         "/api/decay/recalculate",
-        headers={"Origin": "http://testserver"},
+        headers={"Origin": "http://localhost"},
     )
     assert r.status_code == 200
 
 
 def test_session_survives_app_restart(configured_library):
     app1 = create_app(configured_library)
-    with TestClient(app1) as c1:
+    with TestClient(app1, base_url="http://localhost") as c1:
         c1.post("/api/auth/login", json={"password": TEST_PASSWORD})
         token = c1.cookies.get("tiro_session")
     app2 = create_app(configured_library)
-    with TestClient(app2) as c2:
+    with TestClient(app2, base_url="http://localhost") as c2:
         c2.cookies.set("tiro_session", token)
         r = c2.get("/api/articles")
         assert r.status_code == 200
@@ -422,6 +422,56 @@ def test_config_host_lan_refused_without_auth(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmd_run(args)
     assert exc.value.code == 1
+
+
+def test_lan_binding_from_config_accepts_machine_ip(tmp_path, monkeypatch, _shared_embeddings):
+    from fastapi.testclient import TestClient
+
+    import tiro.app as app_mod
+    from tiro import auth as tiro_auth
+    from tiro.config import TiroConfig
+    from tiro.database import init_db, migrate_db
+    from tiro.vectorstore import init_vectorstore
+
+    config = TiroConfig(library_path=str(tmp_path / "lan-lib"), host="0.0.0.0")
+    config.articles_dir.mkdir(parents=True, exist_ok=True)
+    (config.library / "audio").mkdir(parents=True, exist_ok=True)
+    init_db(config.db_path)
+    migrate_db(config.db_path)
+    init_vectorstore(config.chroma_dir, config.default_embedding_model)
+    config.auth_password_hash = tiro_auth.hash_password("pw")
+
+    monkeypatch.setattr(app_mod, "_detect_lan_ips", lambda: ["192.168.1.50"])
+    app = app_mod.create_app(config)
+    with TestClient(app, base_url="http://localhost") as c:
+        assert c.get("/healthz", headers={"Host": "192.168.1.50:8000"}).status_code == 200
+        assert c.get("/healthz", headers={"Host": "evil.example:8000"}).status_code == 400
+
+
+def test_testserver_not_in_production_allowlist(auth_client):
+    assert auth_client.get("/healthz", headers={"Host": "testserver"}).status_code == 400
+
+
+def test_cross_site_login_rejected(auth_client):
+    r = auth_client.post("/api/auth/login", json={"password": "x"},
+                         headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+
+
+def test_mount_surface_is_pinned():
+    from starlette.routing import Mount
+
+    from tiro.app import create_app
+    from tiro.config import TiroConfig
+
+    # config never touched for route inspection — use a bare config object
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cfg = TiroConfig(library_path=d)
+        (cfg.library / "themes").mkdir(parents=True, exist_ok=True)
+        app = create_app(cfg)
+    mounts = {r.path for r in app.routes if isinstance(r, Mount)}
+    assert mounts == {"/static", "/library/themes"}
 
 
 def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeypatch):

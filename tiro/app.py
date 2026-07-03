@@ -39,6 +39,36 @@ def _cached_dir_bytes(path: Path) -> int:
     return size
 
 
+def _detect_lan_ips() -> list[str]:
+    """Detect all candidate LAN IPs for this machine.
+
+    Shared by `create_app` (config-file `host: "0.0.0.0"` or any non-loopback
+    host) and `cmd_run --lan` in tiro/cli.py — single implementation so both
+    paths populate the Host-validation allowlist identically (finding I-2).
+    A single detected IP breaks on offline or multi-homed machines (e.g. both
+    Wi-Fi and Ethernet active, or no internet route at all), so this gathers
+    via two independent methods and returns the union.
+    """
+    import socket
+
+    candidate_ips: set[str] = set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        candidate_ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            addr = info[4][0]
+            if "." in addr and not addr.startswith("127."):
+                candidate_ips.add(addr)
+    except Exception:
+        pass
+    return sorted(candidate_ips)
+
+
 async def _imap_sync_loop(config: TiroConfig):
     """Background task that checks IMAP inbox on a schedule."""
     from tiro.ingestion.imap import check_imap_inbox
@@ -230,6 +260,17 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     app.state.config = config
 
+    # LAN mode: populate app.state.lan_ips whenever the EFFECTIVE bind host
+    # is non-loopback — a config-file `host: "0.0.0.0"` (no --lan flag) is
+    # just as exposed as `tiro run --lan` and must be accepted by the Host
+    # allowlist the same way (finding I-2). cmd_run sets config.host to the
+    # effective host before calling create_app, so both paths converge here.
+    # Detection does a couple of socket calls, so skip it entirely for the
+    # (overwhelmingly common) loopback case — tests create dozens of apps.
+    app.state.lan_mode = config.host not in ("127.0.0.1", "localhost")
+    app.state.lan_ips = set(_detect_lan_ips()) if app.state.lan_mode else set()
+    app.state.lan_ip = sorted(app.state.lan_ips)[0] if app.state.lan_ips else None
+
     # CORS — restrict to the app's own origin (credentials require an exact match)
     app.add_middleware(
         CORSMiddleware,
@@ -245,11 +286,14 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     # Host-header validation: DNS rebinding sends a victim's browser to
     # 127.0.0.1 with Host: evil.example, bypassing CORS/CSRF origin checks
     # (which compare against the attacker-controlled Host). Reject unknown
-    # hosts outright. "testserver" is Starlette's TestClient default and is
-    # not publicly resolvable.
+    # hosts outright. "testserver" (Starlette's TestClient default) is
+    # deliberately NOT allowed here — a production allowlist must not carry
+    # a test-only exemption (finding M-2); tests instead construct
+    # TestClient(app, base_url="http://localhost") so Host: localhost is
+    # sent honestly.
     allowed_hosts = {
         f"localhost:{config.port}", f"127.0.0.1:{config.port}",
-        "localhost", "127.0.0.1", "testserver",
+        "localhost", "127.0.0.1",
     }
     if config.host not in ("127.0.0.1", "0.0.0.0", "localhost"):
         allowed_hosts.add(config.host)
@@ -264,7 +308,8 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         host = request.headers.get("host", "")
         # A single detected LAN IP breaks on offline or multi-homed
         # machines — check against the full candidate set gathered at
-        # startup (tiro/cli.py cmd_run), not just the first one found.
+        # app-creation time (`_detect_lan_ips`, above), not just the first
+        # one found.
         lan_ips = getattr(app.state, "lan_ips", None) or set()
         if host not in allowed_hosts and not any(
             host == f"{ip}:{config.port}" for ip in lan_ips

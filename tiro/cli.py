@@ -145,45 +145,27 @@ def cmd_run(args):
     # (ANTHROPIC_API_KEY, etc.) that router imports may depend on
     from tiro.app import create_app
 
+    # Persist the effective host onto the config object BEFORE create_app —
+    # create_app derives app.state.lan_ips (and the Host-validation
+    # allowlist) from config.host, so --lan must be visible there too, not
+    # just in the local `effective_host` variable used for uvicorn.run below.
+    config.host = effective_host
+
     app = create_app(config)
 
     host = effective_host
     url = f"http://localhost:{config.port}"
 
-    lan_ip = None
-    candidate_ips: set[str] = set()
     if args.lan:
-        import socket
-
-        # Gather ALL candidate local IPs, not just the UDP-trick one — a
-        # single detected IP breaks on offline or multi-homed machines
-        # (e.g. both Wi-Fi and Ethernet active, or no internet route at all).
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            candidate_ips.add(s.getsockname()[0])
-            s.close()
-        except Exception:
-            pass
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None):
-                addr = info[4][0]
-                if "." in addr and not addr.startswith("127."):
-                    candidate_ips.add(addr)
-        except Exception:
-            pass
-
-        lan_ip = sorted(candidate_ips)[0] if candidate_ips else None
+        # create_app() already ran _detect_lan_ips() and populated
+        # app.state.lan_ips (same helper) — reuse it here purely to print
+        # the reachable URLs, avoiding a second round of socket calls.
+        candidate_ips = sorted(app.state.lan_ips)
         if candidate_ips:
-            for ip in sorted(candidate_ips):
+            for ip in candidate_ips:
                 print(f"LAN mode: accessible at http://{ip}:{config.port}")
         else:
             print("LAN mode: binding to 0.0.0.0 (could not detect LAN IP)")
-
-    # Store LAN info on app state for the settings page
-    app.state.lan_mode = args.lan
-    app.state.lan_ip = lan_ip
-    app.state.lan_ips = candidate_ips
 
     if not args.no_browser:
         def open_browser():

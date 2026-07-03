@@ -55,7 +55,7 @@ def test_created_token_works_as_bearer(authenticated_client, configured_library)
     from fastapi.testclient import TestClient
     from tiro.app import create_app
 
-    with TestClient(create_app(configured_library)) as c:
+    with TestClient(create_app(configured_library), base_url="http://localhost") as c:
         r = c.get("/api/articles", headers={"Authorization": f"Bearer {raw}"})
         assert r.status_code == 200
 
