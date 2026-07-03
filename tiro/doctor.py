@@ -12,7 +12,7 @@ import logging
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.vectorstore import get_collection
+from tiro.vectorstore import get_collection, retry_pending_vectors
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +85,14 @@ def scan(config: TiroConfig) -> dict:
         "unreferenced_entities": unreferenced_entities,
         "expired_sessions": expired_sessions,
     }
-    report["clean"] = not any(
-        v for k, v in report.items()
-        if k not in ("unreferenced_tags", "unreferenced_entities", "expired_sessions")
-    ) and unreferenced_tags == 0 and unreferenced_entities == 0 and expired_sessions == 0
+    structural_keys = (
+        "orphaned_markdown", "missing_markdown", "orphaned_vectors",
+        "vector_missing", "vector_unmarked",
+        "audio_rows_missing_file", "audio_files_without_row",
+    )
+    report["structurally_consistent"] = not any(report[k] for k in structural_keys)
+    report["clean"] = report["structurally_consistent"] and \
+        unreferenced_tags == 0 and unreferenced_entities == 0 and expired_sessions == 0
     return report
 
 
@@ -96,7 +100,6 @@ def fix(config: TiroConfig) -> dict:
     """Repair every discrepancy scan() finds. Returns the pre-fix report
     plus an 'actions' list. Safe to re-run: every repair is idempotent."""
     from tiro.lifecycle import delete_article
-    from tiro.vectorstore import retry_pending_vectors
 
     report = scan(config)
     actions: list[str] = []
@@ -153,6 +156,20 @@ def fix(config: TiroConfig) -> dict:
     n = retry_pending_vectors(config)
     if n:
         actions.append(f"re-embedded {n} article(s)")
+
+    conn = get_connection(config.db_path)
+    try:
+        still_pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM articles WHERE vector_status = 'pending'"
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+    report["reembed_failures"] = still_pending
+    if still_pending:
+        actions.append(
+            f"WARNING: {still_pending} article(s) still pending re-embed "
+            "(retry failed — see logs; re-run tiro doctor --fix or check the embedding model)"
+        )
 
     # (e) audio mismatches
     conn = get_connection(config.db_path)

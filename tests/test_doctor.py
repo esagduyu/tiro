@@ -223,3 +223,33 @@ def test_fix_does_not_clobber_existing_orphaned_file(initialized_library):
     disambiguated = orphan_dir / "stray-orphan.1.md"
     assert disambiguated.exists()
     assert disambiguated.read_text() == new_content
+
+
+def test_expired_sessions_alone_are_housekeeping_not_failure(initialized_library):
+    from tiro.doctor import scan
+
+    _make_article(initialized_library, "Healthy")
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute("INSERT INTO sessions (token_hash, expires_at) "
+                     "VALUES ('old', datetime('now', '-1 day'))")
+        conn.commit()
+    finally:
+        conn.close()
+    report = scan(initialized_library)
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is False  # something exists to clean up
+    assert report["expired_sessions"] == 1
+
+
+def test_fix_surfaces_reembed_failures(initialized_library, monkeypatch):
+    from tiro import doctor as doctor_mod
+    from tiro.doctor import fix
+
+    aid, _ = _make_article(initialized_library, "Unembeddable")
+    get_collection().delete(ids=[f"article_{aid}"])  # indexed-but-missing drift
+
+    monkeypatch.setattr(doctor_mod, "retry_pending_vectors", lambda config: 0)
+    result = fix(initialized_library)
+    assert result["reembed_failures"] >= 1
+    assert any("still pending" in a for a in result["actions"])

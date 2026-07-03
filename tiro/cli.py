@@ -25,8 +25,11 @@ def cmd_init(args):
             shutil.copy(example, root_config)
             print(f"Created {root_config} from template")
         else:
-            # Fallback: write minimal config
-            root_config.write_text(yaml.dump({"library_path": "./tiro-library"}, default_flow_style=False))
+            # Fallback: write minimal config. No secrets are written here yet
+            # (those come later via persist_config), but the file may soon
+            # hold them, so create it with 0600 from the start.
+            root_config.write_text("library_path: ./tiro-library\n")
+            os.chmod(root_config, 0o600)
             print(f"Created {root_config}")
 
     config = load_config(args.config)
@@ -63,9 +66,9 @@ def cmd_init(args):
         api_key = input("Anthropic API key (or press Enter to skip): ").strip()
 
     if api_key:
-        config_data = yaml.safe_load(root_config.read_text()) or {}
-        config_data["anthropic_api_key"] = api_key
-        root_config.write_text(yaml.dump(config_data, default_flow_style=False))
+        from tiro.config import persist_config
+
+        persist_config(config, {"anthropic_api_key": api_key})
         print(f"API key saved to {root_config}")
     else:
         print("Skipped — set ANTHROPIC_API_KEY env var or add it to config.yaml later.")
@@ -98,9 +101,9 @@ def cmd_init(args):
         openai_key = input("OpenAI API key (or press Enter to skip): ").strip()
 
     if openai_key:
-        config_data = yaml.safe_load(root_config.read_text()) or {}
-        config_data["openai_api_key"] = openai_key
-        root_config.write_text(yaml.dump(config_data, default_flow_style=False))
+        from tiro.config import persist_config
+
+        persist_config(config, {"openai_api_key": openai_key})
         print(f"OpenAI key saved to {root_config}")
     else:
         print("Skipped — articles will use browser voice (free, lower quality).")
@@ -256,34 +259,38 @@ def _interactive_email_setup(config_path: Path):
         print("Skipped — no app password provided.")
         return
 
-    config_data = yaml.safe_load(config_path.read_text()) or {}
+    updates: dict = {}
+    label = "tiro"
 
     if want_send:
-        config_data["smtp_host"] = "smtp.gmail.com"
-        config_data["smtp_port"] = 587
-        config_data["smtp_user"] = gmail
-        config_data["smtp_password"] = app_password
-        config_data["smtp_use_tls"] = True
-        config_data["digest_email"] = gmail
+        updates["smtp_host"] = "smtp.gmail.com"
+        updates["smtp_port"] = 587
+        updates["smtp_user"] = gmail
+        updates["smtp_password"] = app_password
+        updates["smtp_use_tls"] = True
+        updates["digest_email"] = gmail
         print(f"  SMTP configured: smtp.gmail.com:587 (TLS)")
 
     if want_receive:
         label = input(f"Gmail label to monitor [tiro]: ").strip() or "tiro"
-        config_data["imap_host"] = "imap.gmail.com"
-        config_data["imap_port"] = 993
-        config_data["imap_user"] = gmail
-        config_data["imap_password"] = app_password
-        config_data["imap_label"] = label
-        config_data["imap_enabled"] = True
-        config_data["imap_sync_interval"] = 15
+        updates["imap_host"] = "imap.gmail.com"
+        updates["imap_port"] = 993
+        updates["imap_user"] = gmail
+        updates["imap_password"] = app_password
+        updates["imap_label"] = label
+        updates["imap_enabled"] = True
+        updates["imap_sync_interval"] = 15
         print(f"  IMAP configured: imap.gmail.com:993, label='{label}', sync every 15 min")
 
-    config_path.write_text(yaml.dump(config_data, default_flow_style=False))
+    from tiro.config import load_config, persist_config
+
+    cfg = load_config(config_path)
+    persist_config(cfg, updates)
     print(f"\nEmail settings saved to {config_path}")
 
     if want_receive:
         print(f"\nTo receive newsletters:")
-        print(f"  1. Create a Gmail label called '{config_data.get('imap_label', 'tiro')}'")
+        print(f"  1. Create a Gmail label called '{label}'")
         print(f"  2. Set up a Gmail filter to auto-label forwarded newsletters")
         print(f"  3. Run: uv run tiro check-email")
 
@@ -430,7 +437,8 @@ def cmd_doctor(args):
     if args.fix:
         fix_report = fix(config)
         post = scan(config)
-        report = {**post, "actions": fix_report["actions"]}
+        report = {**post, "actions": fix_report["actions"],
+                  "reembed_failures": fix_report["reembed_failures"]}
     else:
         report = scan(config)
 
@@ -448,9 +456,15 @@ def cmd_doctor(args):
                 print(f"{key}: {len(items)}")
                 for item in items:
                     print(f"  - {item}")
+        housekeeping_found = False
         for key in ("unreferenced_tags", "unreferenced_entities", "expired_sessions"):
             if report[key]:
+                housekeeping_found = True
                 print(f"{key}: {report[key]}")
+        if report.get("reembed_failures"):
+            print(f"reembed_failures: {report['reembed_failures']}")
+        if housekeeping_found:
+            print("(housekeeping findings above are cleaned by --fix but do not fail this check)")
         if report["clean"]:
             print("All stores consistent. ✓")
         elif args.fix:
@@ -458,7 +472,11 @@ def cmd_doctor(args):
         else:
             print("Issues found. Run `tiro doctor --fix` (stop the server first).")
 
-    sys.exit(0 if report["clean"] else 1)
+    if args.fix:
+        failed = (not report["structurally_consistent"]) or report.get("reembed_failures", 0) > 0
+    else:
+        failed = not report["structurally_consistent"]
+    sys.exit(1 if failed else 0)
 
 
 def cmd_audit(args):

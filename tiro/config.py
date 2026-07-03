@@ -117,6 +117,10 @@ def persist_config(config: TiroConfig, updates: dict) -> None:
     writes atomically (temp file + os.replace) with 0600 permissions —
     the same pattern as auth.save_password_hash, which delegates here.
     Creates the file if it does not exist yet.
+
+    Cross-process note: last-writer-wins whole-file semantics (no locking);
+    os.replace on a symlinked config.yaml replaces the symlink itself; no
+    fsync before replace (same durability window as save_password_hash).
     """
     from ruamel.yaml import YAML
 

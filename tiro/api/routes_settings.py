@@ -143,6 +143,8 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     if existing_task and not existing_task.done():
         existing_task.cancel()
         try:
+            # NOTE: awaiting cancellation can block on an in-flight IMAP check
+            # (asyncio.to_thread isn't interruptible) for up to its network timeout.
             await existing_task
         except asyncio.CancelledError:
             pass
@@ -386,20 +388,25 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
 
     if body.theme_light is not None:
         updates["theme_light"] = body.theme_light
-        config.theme_light = body.theme_light
     if body.theme_dark is not None:
         updates["theme_dark"] = body.theme_dark
-        config.theme_dark = body.theme_dark
     if body.inbox_page_size is not None:
         if body.inbox_page_size not in (25, 50, 100, 0):
             raise HTTPException(status_code=400, detail="Page size must be 25, 50, or 100 (0 for all)")
         updates["inbox_page_size"] = body.inbox_page_size
-        config.inbox_page_size = body.inbox_page_size
 
     try:
         persist_config(config, updates)
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # Mutate live config only after the write succeeds.
+    if body.theme_light is not None:
+        config.theme_light = body.theme_light
+    if body.theme_dark is not None:
+        config.theme_dark = body.theme_dark
+    if body.inbox_page_size is not None:
+        config.inbox_page_size = body.inbox_page_size
 
     logger.info(
         "Appearance updated: light=%s, dark=%s, page_size=%s",

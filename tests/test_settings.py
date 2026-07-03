@@ -156,3 +156,30 @@ def test_no_cwd_relative_config_writes_left():
         capture_output=True, text=True, cwd=repo_root,
     )
     assert out.stdout == "", f"CWD-relative config writes remain:\n{out.stdout}"
+
+
+def test_cli_init_key_writes_preserve_comments_and_0600(tmp_path, monkeypatch):
+    """cmd_init's API-key save must go through persist_config (atomic, 0600,
+    comment-preserving) — it writes secrets."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("# my precious comments\nlibrary_path: ./lib\n")
+
+    from tiro.config import load_config, persist_config
+
+    cfg = load_config(cfg_file)
+    persist_config(cfg, {"anthropic_api_key": "sk-ant-test"})
+    text = cfg_file.read_text()
+    assert "# my precious comments" in text
+    assert "sk-ant-test" in text
+    assert (cfg_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_no_naive_yaml_config_writes_left():
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["grep", "-rn", "write_text(yaml.dump", "tiro/"],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    assert out.stdout == "", f"naive YAML config writes remain:\n{out.stdout}"
