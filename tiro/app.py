@@ -23,10 +23,9 @@ logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
-# Cache-bust version for the theme link hrefs. Shared with the literal `?v=`
-# counter on every other static include across all templates — bump this
-# constant AND every `?v=` occurrence together when changing static JS/CSS.
-STATIC_VERSION = "56"
+# Single source of truth for static cache busting. Templates use
+# `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
+STATIC_VERSION = "57"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -390,6 +389,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     # Listed in the Phase 0 allowlist; route-walk test enforces the rest.
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
+    templates.env.globals["static_v"] = STATIC_VERSION
 
     @app.get("/healthz")
     async def healthz(request: Request):
