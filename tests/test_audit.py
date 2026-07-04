@@ -1,12 +1,11 @@
-"""M6: external-API audit log — writer, cost estimates, readers, wrapper."""
+"""M6: external-API audit log — writer, cost estimates, readers."""
 
 import json
-from datetime import date
+from datetime import UTC, date
 
 import pytest
 
 from tiro.audit import (
-    audited_anthropic_call,
     estimate_cost,
     log_api_call,
     read_audit_entries,
@@ -72,46 +71,6 @@ def test_read_and_summarize(initialized_library):
     assert rollup["imap"]["calls"] == 1
 
 
-class _FakeUsage:
-    input_tokens = 111
-    output_tokens = 22
-
-
-class _FakeResponse:
-    usage = _FakeUsage()
-
-
-class _FakeClient:
-    class messages:  # noqa: N801 — mimics anthropic client shape
-        @staticmethod
-        def create(**kwargs):
-            if kwargs.get("model") == "explode":
-                raise RuntimeError("api down")
-            return _FakeResponse()
-
-
-def test_audited_anthropic_call_logs_usage(initialized_library):
-    resp = audited_anthropic_call(
-        initialized_library, _FakeClient(), endpoint="extract_metadata",
-        model="claude-haiku-4-5-20251001", max_tokens=10,
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    assert resp.usage.input_tokens == 111
-    entry = json.loads(_today_file(initialized_library).read_text().splitlines()[-1])
-    assert entry["tokens_in"] == 111 and entry["tokens_out"] == 22
-    assert entry["endpoint"] == "extract_metadata"
-    assert entry["cost_estimate"] is not None
-
-
-def test_audited_anthropic_call_logs_failure_and_reraises(initialized_library):
-    with pytest.raises(RuntimeError):
-        audited_anthropic_call(initialized_library, _FakeClient(), endpoint="digest",
-                               model="explode", messages=[])
-    entry = json.loads(_today_file(initialized_library).read_text().splitlines()[-1])
-    assert entry["success"] is False
-    assert "api down" in entry["error"]
-
-
 def test_read_audit_entries_date_exact_match(initialized_library):
     # A real entry logged "today", plus a second file for an unrelated date
     # written directly (no log_api_call involved) to prove date= is an exact
@@ -152,32 +111,51 @@ def test_read_audit_entries_skips_corrupt_lines(initialized_library, caplog):
 
 
 def test_extract_metadata_is_audited(initialized_library, monkeypatch):
-    """The real call site routes through the wrapper (proven by a fake client)."""
+    """The real call site routes through llm_call -> the audit wrapper
+    (proven by a fake client). extractors.py no longer imports anthropic
+    directly (Task 9 migration) — the seam is now the anthropic package
+    itself, which tiro.llm._call_anthropic imports lazily but which
+    resolves to the same cached module object either way."""
+    from types import SimpleNamespace
+
+    import anthropic
+
     import tiro.ingestion.extractors as ex
 
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(text='{"tags": ["ai"], "entities": [], "summary": "s"}')],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+
+    class _FakeSuccessClient:
+        class messages:  # noqa: N801 — mimics anthropic client shape
+            @staticmethod
+            def create(**kwargs):
+                return fake_response
+
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
-    class FakeAnthropicModule:
-        @staticmethod
-        def Anthropic():
-            return _FakeClient()
-
-    monkeypatch.setattr(ex, "anthropic", FakeAnthropicModule)
-    # _FakeClient returns _FakeResponse which lacks .content — extract_metadata's
-    # broad except catches the AttributeError and returns defaults; the audit
-    # entry must still exist because the API call itself succeeded.
-    ex.extract_metadata("T", "body", initialized_library)
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: _FakeSuccessClient())
+    # With a realistic response shape, the call succeeds end-to-end:
+    # extract_metadata parses real tags/entities/summary from it, and the
+    # audit line records a genuine success (not a failure entry that an
+    # endpoint-only assertion can't distinguish from success).
+    result = ex.extract_metadata("T", "body", initialized_library)
+    assert result == {"tags": ["ai"], "entities": [], "summary": "s"}
     entries = read_audit_entries(initialized_library, service="anthropic")
-    assert entries and entries[-1]["endpoint"] == "extract_metadata"
+    assert entries[-1]["endpoint"] == "extract_metadata"
+    assert entries[-1]["success"] is True
+    assert entries[-1]["tokens_in"] == 10
+    assert entries[-1]["tokens_out"] == 5
+    assert entries[-1]["cost_estimate"] is not None
 
 
 def _fresh_created_at() -> str:
     """UTC-now in the digest cache's naive format — keeps the canned digest
     younger than send_digest_email's 24h staleness cutoff on any run date
     (a hardcoded date here broke the suite the day after it was written)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def test_imap_failure_is_audited(initialized_library, monkeypatch):

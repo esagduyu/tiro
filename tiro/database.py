@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS sources (
 -- Articles (core content metadata)
 CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     source_id INTEGER REFERENCES sources(id),
     title TEXT NOT NULL,
     author TEXT,
@@ -39,12 +40,14 @@ CREATE TABLE IF NOT EXISTS articles (
     relevance_weight REAL DEFAULT 1.0,
     ingenuity_analysis TEXT,
     ingestion_method TEXT DEFAULT 'manual',
-    vector_status TEXT DEFAULT 'pending'
+    vector_status TEXT DEFAULT 'pending',
+    display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
 );
 
 -- Tags (extracted topics)
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT UNIQUE NOT NULL
 );
 
@@ -57,8 +60,10 @@ CREATE TABLE IF NOT EXISTS article_tags (
 -- Named entities (people, companies, orgs)
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL,
+    canonical_key TEXT,
     UNIQUE(name, entity_type)
 );
 
@@ -125,6 +130,20 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical ON entities(entity_type, canonical_key);
+
+CREATE INDEX IF NOT EXISTS idx_articles_display_date ON articles(display_date DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id);
+CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles(is_read);
+CREATE INDEX IF NOT EXISTS idx_articles_vector_status ON articles(vector_status);
+CREATE INDEX IF NOT EXISTS idx_article_tags_tag ON article_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_article_entities_entity ON article_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_article_relations_related ON article_relations(related_article_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 """
 
 
@@ -143,36 +162,28 @@ def dir_bytes(path: Path) -> int:
 
 
 def init_db(db_path: Path) -> None:
-    """Initialize the database with the full schema."""
+    """Create the full schema for fresh databases; existing databases are
+    evolved exclusively by migrate_db(). Detected via presence of the
+    `articles` table (not file existence, so a stray empty/corrupt-touched
+    file still gets the fresh-install schema)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
     try:
-        conn.executescript(SCHEMA)
-        conn.commit()
-        logger.info("Database initialized at %s", db_path)
+        has_schema = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+        ).fetchone() is not None
+        if not has_schema:
+            conn.executescript(SCHEMA)
+            from tiro.migrations import LATEST_VERSION
+            conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
+            conn.commit()
+            logger.info("Database initialized at %s", db_path)
     finally:
         conn.close()
 
 
 def migrate_db(db_path: Path) -> None:
-    """Run schema migrations for backwards compatibility."""
-    conn = get_connection(db_path)
-    try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
-        if "ingestion_method" not in cols:
-            conn.execute("ALTER TABLE articles ADD COLUMN ingestion_method TEXT DEFAULT 'manual'")
-            conn.execute("""
-                UPDATE articles SET ingestion_method = 'email'
-                WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
-                AND ingestion_method = 'manual'
-            """)
-            conn.commit()
-            logger.info("Migrated: added ingestion_method column")
-        if "vector_status" not in cols:
-            conn.execute("ALTER TABLE articles ADD COLUMN vector_status TEXT DEFAULT 'pending'")
-            # Existing rows already have their vectors — mark them indexed, not pending
-            conn.execute("UPDATE articles SET vector_status = 'indexed' WHERE vector_status = 'pending'")
-            conn.commit()
-            logger.info("Migrated: added vector_status column")
-    finally:
-        conn.close()
+    """Run schema migrations (delegates to the versioned framework)."""
+    from tiro.migrations import run_migrations
+
+    run_migrations(db_path)

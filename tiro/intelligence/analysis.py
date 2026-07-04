@@ -2,17 +2,15 @@
 
 import json
 import logging
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-import anthropic
 import frontmatter
 
-from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import ingenuity_analysis_prompt
+from tiro.llm import llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
 
@@ -113,34 +111,25 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
     """Run ingenuity/trust analysis on an article using Opus 4.6.
 
     Returns the structured analysis dict.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot run analysis")
 
+    Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
+    """
     full_text, source_name = _load_article_for_analysis(config, article_id)
 
     prompt = ingenuity_analysis_prompt(full_text, source_name)
 
     logger.info("Running ingenuity analysis for article %d (%s)", article_id, source_name)
 
-    client = anthropic.Anthropic()
-    response = audited_anthropic_call(
-        config, client,
-        endpoint="analysis",
-        model=config.opus_model,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
+    result = llm_call(
+        config, "heavy", prompt,
+        purpose="analysis", max_tokens=2048,
     )
 
-    raw = response.content[0].text
+    raw = result.text
     logger.info("Opus analysis response: %d chars", len(raw))
 
     # Parse JSON — strip markdown fences if Opus wraps them
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        # Remove ```json ... ``` wrapper
-        lines = cleaned.split("\n")
-        cleaned = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    cleaned = strip_json_fences(raw)
 
     analysis = json.loads(cleaned)
 
@@ -150,7 +139,7 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
     _coerce_analysis_scores(analysis)
 
     # Embed timestamp before caching
-    analysis["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+    analysis["analyzed_at"] = datetime.now(UTC).isoformat()
 
     # Cache the result
     _cache_analysis(config, article_id, analysis)

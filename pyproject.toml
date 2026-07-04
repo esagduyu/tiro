@@ -38,6 +38,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "nh3>=0.3.6",
     "ruamel-yaml>=0.19.1",
+    "python-ulid>=3.1.0",
 ]
 
 [project.urls]
@@ -59,8 +60,23 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.20",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines: existing code has many; revisit later
+    "B008",  # FastAPI Depends() in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B017"]  # broad pytest.raises acceptable in tests

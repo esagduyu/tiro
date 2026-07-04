@@ -63,7 +63,6 @@ def test_ingested_email_is_sanitized(authenticated_client, configured_library):
         files={"file": ("hostile.eml", eml.read_bytes(), "message/rfc822")},
     )
     assert r.status_code == 200, r.text
-    md_path = None
     from tiro.database import get_connection
 
     conn = get_connection(configured_library.db_path)

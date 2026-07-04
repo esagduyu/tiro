@@ -77,6 +77,13 @@ def export_library(
                 arcname = f"articles/{md_path.name}"
                 zf.write(md_path, arcname)
 
+        # Wiki pages (Phase 1b): LLM-maintained synthesis pages are part of
+        # the user's library — include them when present.
+        wiki_dir = config.wiki_dir
+        if wiki_dir.exists():
+            for page in sorted(wiki_dir.glob("*.md")):
+                zf.write(page, f"wiki/{page.name}")
+
         # Add metadata.json
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))
 

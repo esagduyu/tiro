@@ -12,6 +12,7 @@ import frontmatter
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.ingestion.extractors import extract_metadata
+from tiro.migrations import canonical_key, new_ulid
 from tiro.search.semantic import find_related_articles, generate_connection_notes, store_relations
 from tiro.stats import update_stat
 from tiro.vectorstore import get_collection
@@ -147,11 +148,12 @@ def process_article(
         try:
             cursor = conn.execute(
                 """INSERT INTO articles
-                   (source_id, title, author, url, slug, markdown_path,
+                   (uid, source_id, title, author, url, slug, markdown_path,
                     word_count, reading_time_min, published_at, ingested_at,
                     ingestion_method)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    new_ulid(),
                     source_id,
                     title,
                     author,
@@ -195,7 +197,10 @@ def process_article(
                 )
 
             for tag_name in tag_names:
-                conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
+                conn.execute(
+                    "INSERT OR IGNORE INTO tags (uid, name) VALUES (?, ?)",
+                    (new_ulid(), tag_name),
+                )
                 tag_row = conn.execute(
                     "SELECT id FROM tags WHERE name = ?", (tag_name,)
                 ).fetchone()
@@ -205,17 +210,23 @@ def process_article(
                 )
 
             for entity in entity_list:
-                conn.execute(
-                    "INSERT OR IGNORE INTO entities (name, entity_type) VALUES (?, ?)",
-                    (entity["name"], entity["type"]),
-                )
+                key = canonical_key(entity["name"])
                 ent_row = conn.execute(
-                    "SELECT id FROM entities WHERE name = ? AND entity_type = ?",
-                    (entity["name"], entity["type"]),
+                    "SELECT id FROM entities WHERE entity_type = ? AND canonical_key = ?",
+                    (entity["type"], key),
                 ).fetchone()
+                if ent_row:
+                    entity_id = ent_row["id"]
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO entities (uid, name, entity_type, canonical_key)"
+                        " VALUES (?, ?, ?, ?)",
+                        (new_ulid(), entity["name"], entity["type"], key),
+                    )
+                    entity_id = cursor.lastrowid
                 conn.execute(
                     "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
-                    (article_id, ent_row["id"]),
+                    (article_id, entity_id),
                 )
 
             conn.commit()

@@ -21,7 +21,6 @@ tokenizer enforces pre-3.12 grammar natively — no flag needed.
 
 import json
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 

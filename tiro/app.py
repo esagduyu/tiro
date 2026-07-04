@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
@@ -17,16 +17,16 @@ from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
+from tiro.scheduler import Scheduler
 from tiro.vectorstore import init_vectorstore
 
 logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
-# Cache-bust version for the theme link hrefs. Shared with the literal `?v=`
-# counter on every other static include across all templates — bump this
-# constant AND every `?v=` occurrence together when changing static JS/CSS.
-STATIC_VERSION = "56"
+# Single source of truth for static cache busting. Templates use
+# `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
+STATIC_VERSION = "57"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -156,7 +156,7 @@ def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     from datetime import timedelta
 
     hour, minute = int(time_str[:2]), int(time_str[3:5])
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
 
     # Convert user's local target time to UTC
     # JS getTimezoneOffset() returns minutes: UTC - local (e.g. EST = 300, CET = -60)
@@ -171,7 +171,7 @@ def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     if target_local <= user_now:
         target_local += timedelta(days=1)
 
-    target_utc = target_local.astimezone(timezone.utc)
+    target_utc = target_local.astimezone(UTC)
     delta = (target_utc - now_utc).total_seconds()
     return max(delta, 60)  # At least 60 seconds to avoid tight loops
 
@@ -195,7 +195,7 @@ async def _digest_schedule_loop(config: TiroConfig):
         if not config.digest_schedule_enabled:
             return
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         try:
             result = await asyncio.to_thread(
                 generate_digest, config, unread_only=config.digest_unread_only
@@ -224,6 +224,7 @@ async def lifespan(app: FastAPI):
     # Ensure library directories exist
     config.articles_dir.mkdir(parents=True, exist_ok=True)
     (config.library / "audio").mkdir(parents=True, exist_ok=True)
+    config.wiki_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize SQLite + run migrations
     init_db(config.db_path)
@@ -235,44 +236,34 @@ async def lifespan(app: FastAPI):
     # Recalculate content decay weights
     recalculate_decay(config)
 
-    # Start IMAP sync background task if configured
+    # Named background-task registry. start/stop mirror each task to
+    # app.state.{name}_task so healthz, `tiro status`, and existing tests
+    # keep reading the attributes they read today (see tiro/scheduler.py).
+    scheduler = Scheduler(app.state)
+    app.state.scheduler = scheduler
     app.state.imap_task = None
+    app.state.digest_task = None
+    app.state.vector_retry_task = None
+
+    # Start IMAP sync background task if configured
     if config.imap_enabled and config.imap_sync_interval > 0:
-        app.state.imap_task = asyncio.create_task(_imap_sync_loop(config))
+        scheduler.start("imap", _imap_sync_loop(config))
         logger.info("IMAP sync started: every %d minutes", config.imap_sync_interval)
 
     # Start digest schedule background task if configured
-    digest_task = None
     if config.digest_schedule_enabled:
-        digest_task = asyncio.create_task(_digest_schedule_loop(config))
+        scheduler.start("digest", _digest_schedule_loop(config))
         logger.info("Digest schedule started: daily at %s", config.digest_schedule_time)
-    app.state.digest_task = digest_task
 
     # Start vector retry background task if configured
-    app.state.vector_retry_task = None
     if config.vector_retry_interval > 0:
-        app.state.vector_retry_task = asyncio.create_task(_vector_retry_loop(config))
+        scheduler.start("vector_retry", _vector_retry_loop(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
-    # Cancel background tasks on shutdown. Read digest_task/imap_task off
-    # app.state (not the local variables from startup) — POST
-    # /api/settings/digest-schedule and /api/settings/email can replace
-    # app.state.{digest,imap}_task at runtime; using the stale local would
-    # cancel a dead task object and leak the live one.
-    for task in [
-        getattr(app.state, "imap_task", None),
-        getattr(app.state, "digest_task", None),
-        getattr(app.state, "vector_retry_task", None),
-    ]:
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    await scheduler.shutdown()
 
 
 def create_app(config: TiroConfig | None = None) -> FastAPI:
@@ -354,21 +345,21 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         return await call_next(request)
 
     # API routers
-    from tiro.api.routes_auth import router as auth_router
     from tiro.api.routes_articles import router as articles_router
-    from tiro.api.routes_digest import router as digest_router
-    from tiro.api.routes_ingest import router as ingest_router
-    from tiro.api.routes_search import router as search_router
+    from tiro.api.routes_audio import router as audio_router
+    from tiro.api.routes_auth import router as auth_router
     from tiro.api.routes_classify import router as classify_router
     from tiro.api.routes_decay import router as decay_router
+    from tiro.api.routes_digest import router as digest_router
+    from tiro.api.routes_digest_email import router as digest_email_router
+    from tiro.api.routes_export import router as export_router
+    from tiro.api.routes_filters import router as filters_router
+    from tiro.api.routes_graph import router as graph_router
+    from tiro.api.routes_ingest import router as ingest_router
+    from tiro.api.routes_search import router as search_router
+    from tiro.api.routes_settings import router as settings_router
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
-    from tiro.api.routes_export import router as export_router
-    from tiro.api.routes_digest_email import router as digest_email_router
-    from tiro.api.routes_settings import router as settings_router
-    from tiro.api.routes_audio import router as audio_router
-    from tiro.api.routes_graph import router as graph_router
-    from tiro.api.routes_filters import router as filters_router
     from tiro.api.routes_tokens import router as tokens_router
 
     app.include_router(auth_router)
@@ -390,6 +381,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     # Listed in the Phase 0 allowlist; route-walk test enforces the rest.
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
+    templates.env.globals["static_v"] = STATIC_VERSION
 
     @app.get("/healthz")
     async def healthz(request: Request):

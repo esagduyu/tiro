@@ -1,6 +1,5 @@
 """Settings API routes."""
 
-import asyncio
 import logging
 import os
 import re
@@ -121,7 +120,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     if body.enable_send:
@@ -145,24 +144,17 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
 
     logger.info("Email settings updated: send=%s, receive=%s", body.enable_send, body.enable_receive)
 
-    # Dynamically restart the IMAP sync task to reflect the new config
-    existing_task = getattr(request.app.state, "imap_task", None)
-    if existing_task and not existing_task.done():
-        existing_task.cancel()
-        try:
-            # NOTE: awaiting cancellation can block on an in-flight IMAP check
-            # (asyncio.to_thread isn't interruptible) for up to its network timeout.
-            await existing_task
-        except asyncio.CancelledError:
-            pass
+    # Dynamically restart the IMAP sync task to reflect the new config, via
+    # the scheduler registry (mirrors to app.state.imap_task for back-compat).
+    scheduler = request.app.state.scheduler
+    await scheduler.stop_and_wait("imap")
 
     if config.imap_enabled and config.imap_sync_interval > 0:
         from tiro.app import _imap_sync_loop
 
-        request.app.state.imap_task = asyncio.create_task(_imap_sync_loop(config))
+        scheduler.start("imap", _imap_sync_loop(config))
         logger.info("IMAP sync restarted: every %d min", config.imap_sync_interval)
     else:
-        request.app.state.imap_task = None
         logger.info("IMAP sync disabled")
 
     return {
@@ -213,7 +205,7 @@ async def update_tts_settings(body: TTSSettingsUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     config.openai_api_key = body.openai_api_key
@@ -278,7 +270,7 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     config.digest_schedule_enabled = body.enabled
@@ -286,21 +278,16 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
     config.digest_unread_only = body.unread_only
     config.digest_timezone_offset = body.timezone_offset
 
-    # Dynamically start/stop scheduler task
-    existing_task = getattr(request.app.state, "digest_task", None)
-    if existing_task and not existing_task.done():
-        existing_task.cancel()
-        try:
-            await existing_task
-        except asyncio.CancelledError:
-            pass
+    # Dynamically start/stop scheduler task via the scheduler registry
+    # (mirrors to app.state.digest_task for back-compat).
+    scheduler = request.app.state.scheduler
+    await scheduler.stop_and_wait("digest")
 
     if body.enabled:
         from tiro.app import _digest_schedule_loop
-        request.app.state.digest_task = asyncio.create_task(_digest_schedule_loop(config))
+        scheduler.start("digest", _digest_schedule_loop(config))
         logger.info("Digest schedule started: %s daily", body.time)
     else:
-        request.app.state.digest_task = None
         logger.info("Digest schedule disabled")
 
     return {
@@ -395,7 +382,7 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
 
     if body.theme_light is not None or body.theme_dark is not None:
         available_names = {t["name"] for t in _list_available_themes(config)}
-        for field_name, value in (("theme_light", body.theme_light), ("theme_dark", body.theme_dark)):
+        for _field_name, value in (("theme_light", body.theme_light), ("theme_dark", body.theme_dark)):
             if value is not None and value not in available_names:
                 raise HTTPException(status_code=400, detail=f"Unknown theme: {value}")
 
@@ -411,7 +398,7 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Mutate live config only after the write succeeds.
     if body.theme_light is not None:

@@ -3,8 +3,13 @@
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from tests.conftest import TEST_PASSWORD
+from tiro import auth
+from tiro.app import create_app
 from tiro.config import TiroConfig, load_config
+from tiro.database import get_connection, init_db
 
 
 def test_config_has_auth_fields_default_none(test_config):
@@ -22,10 +27,6 @@ def test_load_config_records_its_path(tmp_path):
 def test_load_config_records_path_even_when_missing(tmp_path):
     cfg = load_config(tmp_path / "nonexistent.yaml")
     assert Path(cfg.config_path) == tmp_path / "nonexistent.yaml"
-
-
-from tiro import auth
-from tiro.database import get_connection, init_db
 
 
 def test_password_hash_roundtrip():
@@ -136,12 +137,6 @@ def test_save_password_hash_failure_leaves_config_intact(tmp_path, monkeypatch):
         auth.save_password_hash(cfg, "hash")
     assert cfg_file.read_text() == original  # untouched
     assert not cfg_file.with_suffix(".yaml.tmp").exists()  # no litter
-
-
-from tiro.app import create_app
-from fastapi.testclient import TestClient
-
-from tests.conftest import TEST_PASSWORD
 
 
 def test_healthz_open(auth_client):
@@ -429,7 +424,6 @@ def test_lan_binding_from_config_accepts_machine_ip(tmp_path, monkeypatch, _shar
 
     import tiro.app as app_mod
     from tiro import auth as tiro_auth
-    from tiro.config import TiroConfig
     from tiro.database import init_db, migrate_db
     from tiro.vectorstore import init_vectorstore
 
@@ -459,13 +453,12 @@ def test_cross_site_login_rejected(auth_client):
 
 
 def test_mount_surface_is_pinned():
+    # config never touched for route inspection — use a bare config object
+    import tempfile
+
     from starlette.routing import Mount
 
     from tiro.app import create_app
-    from tiro.config import TiroConfig
-
-    # config never touched for route inspection — use a bare config object
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
         cfg = TiroConfig(library_path=d)
         (cfg.library / "themes").mkdir(parents=True, exist_ok=True)
@@ -492,6 +485,53 @@ def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeyp
     auth.revoke_api_token(configured_library.db_path, tid)
     with pytest.raises(RuntimeError):
         mcp_server._get_config()  # revocation now bites on next call
+
+
+def test_mcp_get_config_migrates_legacy_db(tmp_path, monkeypatch):
+    """_get_config() must bring a hackathon-era DB (predates the auth tables
+    entirely) up to the latest schema on first init, the same way app.py's
+    lifespan does — otherwise MCP queries relying on post-hackathon columns
+    (display_date/uid) 500, and tools that touch auth (token gating) hit
+    'no such table: sessions'."""
+    import sqlite3
+
+    import tiro.mcp.server as mcp_server
+
+    db = tmp_path / "tiro.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "domain TEXT, email_sender TEXT, source_type TEXT NOT NULL, "
+        "is_vip BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute(
+        "CREATE TABLE articles (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "title TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, markdown_path TEXT NOT NULL)"
+    )
+    conn.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+    conn.execute(
+        "CREATE TABLE entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "entity_type TEXT NOT NULL, UNIQUE(name, entity_type))"
+    )
+    conn.commit()
+    conn.close()
+
+    legacy_config = TiroConfig(library_path=str(tmp_path))
+    monkeypatch.setattr(mcp_server, "_config", None)
+    monkeypatch.setattr(mcp_server, "load_config", lambda *a, **k: legacy_config)
+    monkeypatch.setattr(mcp_server, "init_vectorstore", lambda *a, **k: None)
+
+    mcp_server._get_config()  # must not raise
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+    ).fetchone()
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_tokens'"
+    ).fetchone()
+    conn.close()
 
 
 def test_cross_site_setup_rejected(auth_client, client):

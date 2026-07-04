@@ -30,6 +30,28 @@ default_embedding_model: "all-MiniLM-L6-v2"
 opus_model: "claude-opus-4-6"
 haiku_model: "claude-haiku-4-5-20251001"
 
+# AI backend routing (optional). Tiers map to providers+models; defaults use
+# Anthropic with opus_model/haiku_model above.
+# Providers: anthropic | openai-compatible | claude-cli | codex-cli
+# When changing a provider, set the matching ai_*_model too — the defaults are Anthropic model names.
+# ai_heavy_provider: "anthropic"
+# ai_light_provider: "anthropic"
+# ai_heavy_model: null            # defaults to opus_model
+# ai_light_model: null            # defaults to haiku_model
+# openai-compatible: works with OpenAI, Ollama, LM Studio, Gemini-compat:
+# ai_openai_base_url: "http://localhost:11434/v1"   # Ollama example
+# ai_openai_api_key: "sk-..."                        # not needed for Ollama
+
+# EXPERIMENTAL — agent-CLI backends (local-only): route AI tiers through your
+# own locally-installed, locally-authenticated Claude Code or Codex CLI, using
+# the subscription you already pay for. Opt-in, never a default. Heads-up:
+# Anthropic's Claude Code terms direct third-party products to API keys; you
+# are choosing to run your own CLI on your own machine. Slow for batch work —
+# recommended for the heavy tier only (digests/analysis).
+# set ai_heavy_provider above to "claude-cli" to enable
+# ai_claude_cli_path: "claude"
+# ai_codex_cli_path: "codex"
+
 # Content decay
 decay_rate_default: 0.95
 decay_rate_disliked: 0.90

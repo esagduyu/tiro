@@ -91,7 +91,7 @@ async def get_graph(request: Request, min_articles: int = 2):
 
         # Build edges: count co-occurrences between valid node pairs
         edge_counts = defaultdict(int)
-        for article_id, node_set in article_nodes.items():
+        for _article_id, node_set in article_nodes.items():
             # Only consider nodes that pass the filter
             filtered = sorted(node_set & valid_nodes)
             for i in range(len(filtered)):
@@ -125,7 +125,7 @@ async def get_node_articles(node_type: str, node_id: int, request: Request):
                 JOIN article_entities ae ON a.id = ae.article_id
                 LEFT JOIN sources s ON a.source_id = s.id
                 WHERE ae.entity_id = ?
-                ORDER BY COALESCE(a.published_at, a.ingested_at) DESC
+                ORDER BY a.display_date DESC
             """, (node_id,)).fetchall()
         elif node_type == "tag":
             rows = conn.execute("""
@@ -134,7 +134,7 @@ async def get_node_articles(node_type: str, node_id: int, request: Request):
                 JOIN article_tags at_ ON a.id = at_.article_id
                 LEFT JOIN sources s ON a.source_id = s.id
                 WHERE at_.tag_id = ?
-                ORDER BY COALESCE(a.published_at, a.ingested_at) DESC
+                ORDER BY a.display_date DESC
             """, (node_id,)).fetchall()
         else:
             return {

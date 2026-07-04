@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from tiro.database import get_connection
 from tiro.intelligence.analysis import analyze_article, get_cached_analysis
+from tiro.queries import ARTICLE_COLUMNS, ARTICLE_FROM, SORT_SQL, build_article_filters
 from tiro.stats import update_stat
 
 logger = logging.getLogger(__name__)
@@ -95,133 +96,38 @@ async def list_articles(
     config = request.app.state.config
     conn = get_connection(config.db_path)
     try:
-        where_clauses = []
-        params: list = []
-
-        if not include_decayed:
-            where_clauses.append("a.relevance_weight >= ?")
-            params.append(config.decay_threshold)
-
-        if is_read is not None:
-            where_clauses.append("a.is_read = ?")
-            params.append(1 if is_read else 0)
-
-        if is_vip is not None:
-            where_clauses.append("s.is_vip = ?")
-            params.append(1 if is_vip else 0)
-
-        if ai_tier:
-            tiers = [t.strip() for t in ai_tier.split(",") if t.strip()]
-            if tiers:
-                placeholders = ",".join("?" * len(tiers))
-                # Handle 'unclassified' as NULL
-                if "unclassified" in tiers:
-                    tiers_filtered = [t for t in tiers if t != "unclassified"]
-                    if tiers_filtered:
-                        where_clauses.append(f"(a.ai_tier IN ({','.join('?' * len(tiers_filtered))}) OR a.ai_tier IS NULL)")
-                        params.extend(tiers_filtered)
-                    else:
-                        where_clauses.append("a.ai_tier IS NULL")
-                else:
-                    where_clauses.append(f"a.ai_tier IN ({placeholders})")
-                    params.extend(tiers)
-
-        if author:
-            where_clauses.append("a.author = ?")
-            params.append(author)
-
-        if source_id is not None:
-            where_clauses.append("a.source_id = ?")
-            params.append(source_id)
-
-        if tag:
-            where_clauses.append("""a.id IN (
-                SELECT at2.article_id FROM article_tags at2
-                JOIN tags t2 ON t2.id = at2.tag_id
-                WHERE t2.name = ?
-            )""")
-            params.append(tag)
-
-        if rating:
-            ratings = [r.strip() for r in rating.split(",") if r.strip()]
-            if ratings:
-                # Map named ratings to values
-                rating_map = {"loved": "2", "liked": "1", "disliked": "-1", "unrated": "NULL"}
-                rating_vals = []
-                has_unrated = False
-                for r in ratings:
-                    mapped = rating_map.get(r, r)
-                    if mapped == "NULL":
-                        has_unrated = True
-                    else:
-                        rating_vals.append(mapped)
-
-                parts = []
-                if rating_vals:
-                    parts.append(f"a.rating IN ({','.join('?' * len(rating_vals))})")
-                    params.extend(int(v) for v in rating_vals)
-                if has_unrated:
-                    parts.append("a.rating IS NULL")
-                if parts:
-                    where_clauses.append(f"({' OR '.join(parts)})")
-
-        if ingestion_method:
-            methods = [m.strip() for m in ingestion_method.split(",") if m.strip()]
-            if methods:
-                placeholders = ",".join("?" * len(methods))
-                where_clauses.append(f"COALESCE(a.ingestion_method, 'manual') IN ({placeholders})")
-                params.extend(methods)
-
-        if min_reading_time is not None:
-            where_clauses.append("a.reading_time_min >= ?")
-            params.append(min_reading_time)
-
-        if max_reading_time is not None:
-            where_clauses.append("a.reading_time_min <= ?")
-            params.append(max_reading_time)
-
-        if has_audio is not None:
-            if has_audio:
-                where_clauses.append("a.id IN (SELECT article_id FROM audio)")
-            else:
-                where_clauses.append("a.id NOT IN (SELECT article_id FROM audio)")
-
-        if date_from:
-            where_clauses.append("COALESCE(a.published_at, a.ingested_at) >= ?")
-            params.append(date_from)
-
-        if date_to:
-            where_clauses.append("COALESCE(a.published_at, a.ingested_at) <= ?")
-            params.append(date_to + " 23:59:59")
-
-        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        where_sql, params = build_article_filters(
+            include_decayed=include_decayed,
+            decay_threshold=config.decay_threshold,
+            is_read=is_read,
+            is_vip=is_vip,
+            ai_tier=ai_tier,
+            author=author,
+            source_id=source_id,
+            tag=tag,
+            rating=rating,
+            ingestion_method=ingestion_method,
+            min_reading_time=min_reading_time,
+            max_reading_time=max_reading_time,
+            has_audio=has_audio,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
         # Count only mode (for unread badge etc.)
         if count_only:
             count = conn.execute(
-                f"SELECT COUNT(*) FROM articles a LEFT JOIN sources s ON a.source_id = s.id{where_sql}",
+                f"SELECT COUNT(*) {ARTICLE_FROM}{where_sql}",
                 params,
             ).fetchone()[0]
             return {"success": True, "data": {"count": count}}
 
         # Sort — VIP is always second-order priority within each sort mode
-        sort_sql = {
-            "unread": "a.is_read ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC",
-            "newest": "COALESCE(a.published_at, a.ingested_at) DESC, s.is_vip DESC",
-            "oldest": "COALESCE(a.published_at, a.ingested_at) ASC, s.is_vip DESC",
-            "importance": """
-                CASE a.ai_tier
-                    WHEN 'must-read' THEN 0
-                    WHEN 'summary-enough' THEN 1
-                    WHEN 'discard' THEN 2
-                    ELSE 3
-                END ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC
-            """,
-        }.get(sort, "a.is_read ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC")
+        sort_sql = SORT_SQL.get(sort, SORT_SQL["unread"])
 
         # Total count for pagination
         total = conn.execute(
-            f"SELECT COUNT(*) FROM articles a LEFT JOIN sources s ON a.source_id = s.id{where_sql}",
+            f"SELECT COUNT(*) {ARTICLE_FROM}{where_sql}",
             params,
         ).fetchone()[0]
 
@@ -233,14 +139,8 @@ async def list_articles(
 
         query = f"""
             SELECT
-                a.id, a.title, a.author, a.url, a.slug, a.summary,
-                a.word_count, a.reading_time_min, a.published_at, a.ingested_at,
-                a.is_read, a.rating, a.opened_count, a.ai_tier,
-                a.relevance_weight, a.ingestion_method,
-                s.name AS source_name, s.domain, s.is_vip, s.id AS source_id,
-                s.source_type
-            FROM articles a
-            LEFT JOIN sources s ON a.source_id = s.id
+                {ARTICLE_COLUMNS}
+            {ARTICLE_FROM}
             {where_sql}
             ORDER BY {sort_sql}
             {limit_sql}
@@ -392,9 +292,9 @@ async def run_analysis(article_id: int, request: Request):
         analysis = await asyncio.to_thread(analyze_article, config, article_id)
         return {"success": True, "data": analysis}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         logger.error("Analysis failed for article %d: %s", article_id, e)
-        raise HTTPException(status_code=500, detail="Analysis failed")
+        raise HTTPException(status_code=500, detail="Analysis failed") from e

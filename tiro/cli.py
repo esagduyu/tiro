@@ -109,7 +109,7 @@ def cmd_init(args):
         print("Skipped — articles will use browser voice (free, lower quality).")
 
     print(f"\nTiro library initialized at {config.library}")
-    print(f"Start the server with: uv run tiro run")
+    print("Start the server with: uv run tiro run")
 
 
 def cmd_run(args):
@@ -252,10 +252,10 @@ def _interactive_email_setup(config_path: Path):
         updates["smtp_password"] = app_password
         updates["smtp_use_tls"] = True
         updates["digest_email"] = gmail
-        print(f"  SMTP configured: smtp.gmail.com:587 (TLS)")
+        print("  SMTP configured: smtp.gmail.com:587 (TLS)")
 
     if want_receive:
-        label = input(f"Gmail label to monitor [tiro]: ").strip() or "tiro"
+        label = input("Gmail label to monitor [tiro]: ").strip() or "tiro"
         updates["imap_host"] = "imap.gmail.com"
         updates["imap_port"] = 993
         updates["imap_user"] = gmail
@@ -272,10 +272,10 @@ def _interactive_email_setup(config_path: Path):
     print(f"\nEmail settings saved to {config_path}")
 
     if want_receive:
-        print(f"\nTo receive newsletters:")
+        print("\nTo receive newsletters:")
         print(f"  1. Create a Gmail label called '{label}'")
-        print(f"  2. Set up a Gmail filter to auto-label forwarded newsletters")
-        print(f"  3. Run: uv run tiro check-email")
+        print("  2. Set up a Gmail filter to auto-label forwarded newsletters")
+        print("  3. Run: uv run tiro check-email")
 
 
 def cmd_setup_email(args):
@@ -462,12 +462,30 @@ def cmd_doctor(args):
     sys.exit(1 if failed else 0)
 
 
+def cmd_migrate(args):
+    """Apply pending database migrations."""
+    from tiro.config import load_config
+    from tiro.migrations import run_migrations
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+
+    applied = run_migrations(config.db_path)
+    if applied:
+        for line in applied:
+            print(f"applied: {line}")
+    else:
+        print("No pending migrations.")
+    sys.exit(0)
+
+
 def cmd_audit(args):
     """Show the external-API audit log (calls, tokens, cost estimates)."""
     import json as _json
-    from datetime import date as _date
-
     import re
+    from datetime import date as _date
 
     from tiro.audit import read_audit_entries, summarize
     from tiro.config import load_config
@@ -543,6 +561,17 @@ def cmd_status(args):
     print(f"Password: {'set' if config.auth_password_hash else 'NOT SET'} | "
           f"IMAP sync: {'on' if config.imap_enabled else 'off'} | "
           f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
+
+    from tiro.llm import resolve_tier
+    from tiro.llm_cli import check_cli_backend
+
+    heavy_p, _ = resolve_tier(config, "heavy")
+    light_p, _ = resolve_tier(config, "light")
+    parts = [f"heavy: {heavy_p}", f"light: {light_p}"]
+    for p in {heavy_p, light_p}:
+        if p in ("claude-cli", "codex-cli"):
+            parts.append(f"{p}: {check_cli_backend(config, p)}")
+    print("AI backends: " + " | ".join(parts))
 
 
 def cmd_set_password(args):
@@ -646,11 +675,16 @@ def main():
 
     subparsers.add_parser("status", help="Show library status and store sizes")
 
+    subparsers.add_parser("migrate", help="Apply pending database migrations")
+
     audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
     audit_group = audit_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
     audit_group.add_argument("--month", help="Month summary (YYYY-MM)")
-    audit_parser.add_argument("--service", help="Filter by service (anthropic/openai_tts/imap/smtp)")
+    audit_parser.add_argument(
+        "--service",
+        help="Filter by service (anthropic/openai_tts/imap/smtp/openai-compatible/claude-cli/codex-cli)",
+    )
     audit_parser.add_argument("--json", action="store_true")
 
     token_parser = subparsers.add_parser("token", help="Manage API tokens")
@@ -687,6 +721,8 @@ def main():
         cmd_audit(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "migrate":
+        cmd_migrate(args)
     else:
         parser.print_help()
         sys.exit(1)

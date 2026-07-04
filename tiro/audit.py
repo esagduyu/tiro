@@ -7,8 +7,7 @@ unwritable audit dir must never break the API call being observed.
 
 import json
 import logging
-import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from tiro.config import TiroConfig
 
@@ -16,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 # Per 1M tokens (input, output). Prefix-matched against the model string so
 # dated ids like claude-haiku-4-5-20251001 resolve. Update when models change.
+#
+# The "openai-compatible" provider (tiro/llm.py) has no pricing table here on
+# purpose: it fronts OpenAI, Ollama, LM Studio, and Gemini's OpenAI-compat
+# endpoint alike, whose costs range from real-money to free-local. A single
+# table would be wrong for most of them, so cost_estimate stays None for that
+# provider — an honest unknown beats a confidently wrong number.
 ANTHROPIC_PRICING = {
     "claude-opus-4-6": (5.00, 25.00),
     "claude-haiku-4-5": (1.00, 5.00),
@@ -67,11 +72,12 @@ def log_api_call(
     duration_ms: int | None = None,
     success: bool = True,
     error: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     """Append one audit entry. Swallows its own failures by design."""
     try:
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "service": service,
             "endpoint": endpoint,
             "model": model,
@@ -81,7 +87,8 @@ def log_api_call(
             "bytes_out": bytes_out,
             "count": count,
             "duration_ms": duration_ms,
-            "cost_estimate": estimate_cost(service, model, tokens_in, tokens_out, chars),
+            "cost_estimate": cost_usd if cost_usd is not None
+                             else estimate_cost(service, model, tokens_in, tokens_out, chars),
             "success": success,
             "error": error,
         }
@@ -146,27 +153,3 @@ def summarize(entries: list[dict]) -> dict:
         s["chars"] += e.get("chars") or 0
         s["cost_estimate"] += e.get("cost_estimate") or 0.0
     return rollup
-
-
-def audited_anthropic_call(config: TiroConfig, client, *, endpoint: str, **kwargs):
-    """client.messages.create with timing + usage + cost audit logging.
-    Re-raises API errors after logging the failure."""
-    start = time.monotonic()
-    model = kwargs.get("model")
-    try:
-        response = client.messages.create(**kwargs)
-    except Exception as e:
-        log_api_call(
-            config, "anthropic", endpoint=endpoint, model=model,
-            duration_ms=int((time.monotonic() - start) * 1000),
-            success=False, error=str(e),
-        )
-        raise
-    usage = getattr(response, "usage", None)
-    log_api_call(
-        config, "anthropic", endpoint=endpoint, model=model,
-        tokens_in=getattr(usage, "input_tokens", None),
-        tokens_out=getattr(usage, "output_tokens", None),
-        duration_ms=int((time.monotonic() - start) * 1000),
-    )
-    return response

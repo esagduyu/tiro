@@ -53,7 +53,12 @@ def retry_pending_vectors(config) -> int:
     conn = get_connection(config.db_path)
     try:
         rows = conn.execute(
-            "SELECT id, title, markdown_path FROM articles WHERE vector_status = 'pending'"
+            """
+            SELECT a.id, a.title, a.markdown_path, a.published_at, a.ingested_at,
+                   s.name AS source_name, s.is_vip
+            FROM articles a LEFT JOIN sources s ON a.source_id = s.id
+            WHERE a.vector_status = 'pending'
+            """
         ).fetchall()
     finally:
         conn.close()
@@ -82,13 +87,37 @@ def retry_pending_vectors(config) -> int:
             continue
         try:
             post = frontmatter.load(str(md))
+            # Full metadata parity with the initial-ingest upsert in
+            # processor.py — re-embeds must not regress to a thinner
+            # {title, article_id}-only shape (Phase-0 final-review deferral).
+            conn_tags = get_connection(config.db_path)
+            try:
+                tag_names = [
+                    r["name"]
+                    for r in conn_tags.execute(
+                        "SELECT t.name FROM tags t"
+                        " JOIN article_tags at ON t.id = at.tag_id"
+                        " WHERE at.article_id = ? ORDER BY t.name",
+                        (row["id"],),
+                    ).fetchall()
+                ]
+            finally:
+                conn_tags.close()
+            pub = (row["published_at"] or row["ingested_at"] or "")[:10]
             # upsert (not add): idempotent if a prior attempt already wrote
             # the vector but crashed before the status UPDATE committed —
             # add() would error on a re-add of an existing id.
             collection.upsert(
                 ids=[f"article_{row['id']}"],
                 documents=[post.content],
-                metadatas=[{"title": row["title"], "article_id": row["id"]}],
+                metadatas=[{
+                    "title": row["title"],
+                    "source": row["source_name"] or "",
+                    "is_vip": bool(row["is_vip"]),
+                    "tags": ",".join(tag_names),
+                    "published_at": pub,
+                    "article_id": row["id"],
+                }],
             )
             conn2 = get_connection(config.db_path)
             try:

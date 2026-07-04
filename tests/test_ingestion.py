@@ -54,7 +54,6 @@ def test_chromadb_failure_is_nonfatal_marks_pending(initialized_library, monkeyp
 
 
 def test_failure_after_insert_rolls_back_no_orphan(initialized_library, monkeypatch):
-    from tiro.database import get_connection
     from tiro.ingestion import processor
 
     # Fail at the metadata/frontmatter update stage (after row + file exist)
@@ -157,7 +156,7 @@ def test_retry_pending_vectors_indexes_them(initialized_library, monkeypatch):
     ex = _extracted()
     result = processor.process_article(**ex, config=initialized_library, ingestion_method="email")
     # It's pending now
-    from tiro.vectorstore import retry_pending_vectors, get_collection
+    from tiro.vectorstore import get_collection, retry_pending_vectors
 
     n = retry_pending_vectors(initialized_library)
     assert n == 1

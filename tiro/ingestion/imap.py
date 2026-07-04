@@ -5,9 +5,9 @@ import logging
 
 from tiro.audit import log_api_call
 from tiro.config import TiroConfig
+from tiro.database import get_connection
 from tiro.ingestion.email import parse_eml
 from tiro.ingestion.processor import process_article
-from tiro.database import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,14 @@ def check_imap_inbox(config: TiroConfig) -> dict:
             raise RuntimeError(error_msg)
 
         # Search for unseen messages
-        status, msg_ids = imap.search(None, "UNSEEN")
+        try:
+            status, msg_ids = imap.search(None, "UNSEEN")
+        except Exception as e:
+            log_api_call(config, "imap", endpoint="check", success=False, error=str(e))
+            raise
+        if status != "OK":
+            log_api_call(config, "imap", endpoint="check", success=False,
+                         error=f"search returned {status}")
         if status != "OK" or not msg_ids[0]:
             logger.info("No unseen messages in '%s'", config.imap_label)
             log_api_call(config, "imap", endpoint="check", count=result["fetched"])

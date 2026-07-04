@@ -10,8 +10,9 @@ import frontmatter
 from mcp.server.fastmcp import FastMCP
 
 from tiro.config import TiroConfig, load_config
-from tiro.database import get_connection
-from tiro.vectorstore import init_vectorstore, get_collection
+from tiro.database import get_connection, init_db, migrate_db
+from tiro.queries import build_article_filters
+from tiro.vectorstore import get_collection, init_vectorstore
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,13 @@ def _get_config() -> TiroConfig:
     global _config
     if _config is None:
         _config = load_config(_config_path())
+        # Mirror the app.py lifespan order: bring SQLite up to the latest
+        # schema (both idempotent/user_version-gated) before any query runs,
+        # since MCP SQL relies on columns added after the hackathon schema
+        # (display_date, uid) and, on legacy DBs, the Phase-0 auth tables
+        # that _require_token_gate() below queries via tiro.auth.
+        init_db(_config.db_path)
+        migrate_db(_config.db_path)
         # Initialize ChromaDB so get_collection() works
         init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     # Enforced on every call (not just first init) so token revocation takes
@@ -135,42 +143,41 @@ def _build_filter_sql(
     ingestion_method: str = "",
     article_ids: list[int] | None = None,
 ) -> tuple[str, list]:
-    """Build WHERE clause and params from filter arguments."""
+    """Build WHERE clause and params from filter arguments.
+
+    Delegates the facets shared with the API/inbox (read status, tier, tag,
+    ingestion method, VIP, date range) to the single shared
+    ``build_article_filters()``. Facets this MCP tool supports that the
+    shared builder doesn't cover — fuzzy author/source matching, the
+    rating_min threshold, and the semantic-search candidate-id restriction —
+    are appended as MCP-specific clauses after the builder returns.
+
+    Note: ``is_unread`` is the MCP tool's naming for the inverse of the
+    builder's ``is_read`` (is_unread=True -> is_read=False)."""
+    is_read = (not is_unread) if is_unread is not None else None
+
+    where_sql, params = build_article_filters(
+        is_read=is_read,
+        is_vip=is_vip,
+        ai_tier=ai_tier or None,
+        tag=tag.lower().strip() if tag else None,
+        ingestion_method=ingestion_method or None,
+        date_from=date_from or None,
+        date_to=date_to or None,
+    )
+
     conditions = []
-    params: list = []
+    if where_sql:
+        conditions.append(where_sql.removeprefix(" WHERE "))
 
     if article_ids is not None:
         placeholders = ",".join("?" * len(article_ids))
         conditions.append(f"a.id IN ({placeholders})")
         params.extend(article_ids)
 
-    if is_unread is not None:
-        conditions.append("a.is_read = ?")
-        params.append(0 if is_unread else 1)
-
-    if ai_tier:
-        conditions.append("a.ai_tier = ?")
-        params.append(ai_tier)
-
     if rating_min is not None:
         conditions.append("a.rating >= ?")
         params.append(rating_min)
-
-    if ingestion_method:
-        conditions.append("a.ingestion_method = ?")
-        params.append(ingestion_method)
-
-    if date_from:
-        conditions.append("COALESCE(a.published_at, a.ingested_at) >= ?")
-        params.append(date_from)
-
-    if date_to:
-        conditions.append("COALESCE(a.published_at, a.ingested_at) <= ?")
-        params.append(date_to + " 23:59:59")
-
-    if is_vip is not None:
-        conditions.append("s.is_vip = ?")
-        params.append(1 if is_vip else 0)
 
     if source:
         conditions.append("(s.name LIKE ? OR s.domain LIKE ?)")
@@ -181,15 +188,7 @@ def _build_filter_sql(
         params.append(f"%{author}%")
 
     where = " AND ".join(conditions) if conditions else "1=1"
-
-    # Tag filter requires a JOIN
-    tag_join = ""
-    if tag:
-        tag_join = " JOIN article_tags at_f ON a.id = at_f.article_id JOIN tags t_f ON at_f.tag_id = t_f.id"
-        where += " AND t_f.name = ?"
-        params.append(tag.lower().strip())
-
-    return where, params, tag_join
+    return where, params
 
 
 @mcp.tool()
@@ -229,13 +228,13 @@ def search_articles(
             return "No matching articles found."
 
         candidate_ids = []
-        for chroma_id, distance in zip(results["ids"][0], results["distances"][0]):
+        for chroma_id, distance in zip(results["ids"][0], results["distances"][0], strict=False):
             article_id = int(chroma_id.replace("article_", ""))
             similarity = round(1 - (distance / 2), 4)
             candidate_ids.append(article_id)
             score_map[article_id] = similarity
 
-    where, params, tag_join = _build_filter_sql(
+    where, params = _build_filter_sql(
         author=author, source=source, tag=tag, ai_tier=ai_tier,
         is_unread=is_unread, is_vip=is_vip, rating_min=rating_min,
         date_from=date_from, date_to=date_to, ingestion_method=ingestion_method,
@@ -249,9 +248,8 @@ def search_articles(
                          s.name AS source_name, s.is_vip, s.source_type
                   FROM articles a
                   LEFT JOIN sources s ON a.source_id = s.id
-                  {tag_join}
                   WHERE {where}
-                  ORDER BY s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC
+                  ORDER BY s.is_vip DESC, a.display_date DESC
                   LIMIT ?"""
         params.append(max_results)
         rows = conn.execute(sql, params).fetchall()
@@ -475,8 +473,8 @@ async def save_url(url: str) -> str:
     """Save a web page to the Tiro reading library by URL. Fetches the page, extracts content, generates tags/summary with AI, and stores it."""
     config = _get_config()
 
-    from tiro.ingestion.web import fetch_and_extract
     from tiro.ingestion.processor import process_article
+    from tiro.ingestion.web import fetch_and_extract
 
     try:
         extracted = await fetch_and_extract(url)

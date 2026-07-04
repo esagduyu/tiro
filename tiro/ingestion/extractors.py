@@ -2,14 +2,17 @@
 
 import json
 import logging
-import os
 
-import anthropic
-
-from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
+from tiro.intelligence.prompts import extract_metadata_prompt
+from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
+
+# Haiku 4.5 handles this easily; 12k chars ≈ 3k tokens ≈ tenths of a cent.
+# The old 2,000-char cap silently degraded summaries — and everything
+# downstream (digest ranking, classification, the future wiki) consumes them.
+EXTRACT_CONTENT_CHARS = 12000
 
 
 def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
@@ -17,48 +20,19 @@ def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
 
     Returns dict with keys: tags (list[str]), entities (list[dict]), summary (str).
     Returns empty defaults if extraction fails or no API key is configured.
-    The Anthropic SDK reads ANTHROPIC_API_KEY from the environment automatically.
     """
     empty = {"tags": [], "entities": [], "summary": ""}
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        logger.warning("ANTHROPIC_API_KEY not set — skipping AI extraction")
-        return empty
+    content_truncated = content_md[:EXTRACT_CONTENT_CHARS]
 
-    content_truncated = content_md[:2000]
-
-    prompt = (
-        "You are analyzing a saved article for a personal reading library. "
-        "Extract structured metadata.\n\n"
-        f"Article title: {title}\n"
-        f"Article content: {content_truncated}\n\n"
-        "Respond with JSON only, no other text:\n"
-        "{\n"
-        '  "tags": ["tag1", "tag2", ...],\n'
-        '  "entities": [\n'
-        '    {"name": "Entity Name", "type": "person|company|organization|product"}\n'
-        "  ],\n"
-        '  "summary": "2-3 sentence summary of the article\'s key points."\n'
-        "}"
-    )
+    prompt = extract_metadata_prompt(title, content_truncated)
 
     try:
-        client = anthropic.Anthropic()
-        response = audited_anthropic_call(
-            config, client,
-            endpoint="extract_metadata",
-            model=config.haiku_model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+        result = llm_call(
+            config, "light", prompt,
+            purpose="extract_metadata", max_tokens=1024,
         )
-
-        text = response.content[0].text.strip()
-
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-
-        data = json.loads(text)
+        data = json.loads(strip_json_fences(result.text))
 
         tags = data.get("tags", [])
         entities = data.get("entities", [])
@@ -89,6 +63,9 @@ def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
         )
         return {"tags": tags, "entities": valid_entities, "summary": summary}
 
+    except LLMNotConfigured as e:
+        logger.warning("AI extraction skipped: %s", e)
+        return empty
     except Exception as e:
         logger.error("AI extraction failed for '%s': %s", title, e)
         return empty

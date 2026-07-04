@@ -32,7 +32,7 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
     # ChromaDB cosine distance: 0 = identical, 2 = opposite
     # Convert to similarity: 1 - (distance / 2) → range [0, 1]
     ids_and_scores = []
-    for chroma_id, distance in zip(results["ids"][0], results["distances"][0]):
+    for chroma_id, distance in zip(results["ids"][0], results["distances"][0], strict=False):
         article_id = int(chroma_id.replace("article_", ""))
         similarity = round(1 - (distance / 2), 4)
         ids_and_scores.append((article_id, similarity))
@@ -41,7 +41,6 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
         return []
 
     article_ids = [aid for aid, _ in ids_and_scores]
-    score_map = {aid: score for aid, score in ids_and_scores}
 
     conn = get_connection(config.db_path)
     try:
@@ -125,7 +124,7 @@ def find_related_articles(
 
     related = []
     candidate_ids = []
-    for cid, distance in zip(results["ids"][0], results["distances"][0]):
+    for cid, distance in zip(results["ids"][0], results["distances"][0], strict=False):
         rid = int(cid.replace("article_", ""))
         if rid == article_id:
             continue
@@ -208,14 +207,9 @@ def generate_connection_notes(
     Only processes top 3 to save API costs.
     """
     import json
-    import os
 
-    import anthropic
-
-    from tiro.audit import audited_anthropic_call
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return related_articles
+    from tiro.intelligence.prompts import connection_notes_prompt
+    from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
     if not related_articles:
         return related_articles
@@ -239,32 +233,15 @@ def generate_connection_notes(
         for r in to_annotate
     )
 
-    prompt = (
-        "You are a reading assistant. Given a source article and related articles, "
-        "write a brief connection note (1 sentence, max 20 words) for each related article "
-        "explaining HOW it relates to the source. Use phrases like "
-        '"Contradicts...", "Builds on...", "Different perspective on...", '
-        '"Earlier coverage of...", "Same topic from...".\n\n'
-        f'Source article: "{article_title}"\n'
-        f"Summary: {article_summary}\n\n"
-        f"Related articles:\n{related_context}\n\n"
-        "Respond with JSON only:\n"
-        '{"notes": [{"article_id": 123, "note": "connection note"}, ...]}'
-    )
+    prompt = connection_notes_prompt(article_title, article_summary, related_context)
 
     try:
-        client = anthropic.Anthropic()
-        response = audited_anthropic_call(
-            config, client,
-            endpoint="connection_notes",
-            model=config.haiku_model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+        result = llm_call(
+            config, "light", prompt,
+            purpose="connection_notes", max_tokens=512,
         )
 
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        text = strip_json_fences(result.text)
 
         data = json.loads(text)
         note_map = {n["article_id"]: n["note"] for n in data.get("notes", [])}
@@ -273,6 +250,8 @@ def generate_connection_notes(
             if r["related_article_id"] in note_map:
                 r["connection_note"] = note_map[r["related_article_id"]]
 
+    except LLMNotConfigured:
+        pass
     except Exception as e:
         logger.error("Connection note generation failed: %s", e)
 

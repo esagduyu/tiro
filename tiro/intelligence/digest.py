@@ -2,16 +2,13 @@
 
 import json
 import logging
-import os
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
-import anthropic
-
-from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import daily_digest_prompt
+from tiro.llm import llm_call
 from tiro.sanitize import sanitize_markdown
 
 logger = logging.getLogger(__name__)
@@ -131,7 +128,7 @@ def _split_digest(content: str) -> dict[str, str]:
     positions.sort(key=lambda x: x[0])
 
     result = {}
-    for i, (start, header_end, dtype) in enumerate(positions):
+    for i, (_start, header_end, dtype) in enumerate(positions):
         # Content runs from after the header to the start of the next section (or end)
         if i + 1 < len(positions):
             section_content = content[header_end : positions[i + 1][0]]
@@ -229,10 +226,9 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     """Generate today's digest using Opus 4.6.
 
     Returns dict mapping digest_type -> {"content": str, "article_ids": list[int], "created_at": str}.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot generate digest")
 
+    Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
+    """
     articles, vip_sources, recent_ratings = _gather_articles(config, unread_only=unread_only)
 
     if not articles:
@@ -250,16 +246,11 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     )
 
     # Call Opus 4.6
-    client = anthropic.Anthropic()
-    response = audited_anthropic_call(
-        config, client,
-        endpoint="digest",
-        model=config.opus_model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+    result = llm_call(
+        config, "heavy", prompt,
+        purpose="digest", max_tokens=4096,
     )
-
-    raw_content = response.content[0].text
+    raw_content = result.text
     logger.info("Opus digest response: %d chars", len(raw_content))
 
     # Split into sections
@@ -279,7 +270,7 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     today = date.today().isoformat()
     _cache_digest(config, today, sections, article_ids)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     return {
         dtype: {
             "content": content,
