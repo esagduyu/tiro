@@ -39,3 +39,42 @@ def test_failed_call_writes_failure_audit_line(test_config):
     lines = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
     entry = [e for e in lines if e["endpoint"] == "audit_test"][-1]
     assert entry["success"] is False and entry["service"] == "anthropic"
+
+
+def test_anthropic_backend_success_path(test_config, monkeypatch):
+    """Happy-path coverage for _call_anthropic itself (not just the
+    error path): a realistic fake response shape must round-trip through
+    llm_call into an LLMResult and a success audit line."""
+    from types import SimpleNamespace
+
+    import anthropic
+
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(text="hello back")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+
+    class _FakeSuccessClient:
+        class messages:  # noqa: N801 — mimics anthropic client shape
+            @staticmethod
+            def create(**kwargs):
+                return fake_response
+
+    # autouse _no_external_apis fixture deletes ANTHROPIC_API_KEY; setenv
+    # after that (within this test) wins.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: _FakeSuccessClient())
+
+    result = llm_call(test_config, "light", "hi", purpose="happy")
+
+    assert result.text == "hello back"
+    assert result.provider == "anthropic"
+    assert result.tokens_in == 10
+    assert result.tokens_out == 5
+
+    audit_files = list((test_config.library / "audit").glob("*.jsonl"))
+    assert audit_files
+    lines = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
+    entry = [e for e in lines if e["endpoint"] == "happy"][-1]
+    assert entry["success"] is True
+    assert entry["service"] == "anthropic"

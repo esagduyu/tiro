@@ -157,20 +157,37 @@ def test_extract_metadata_is_audited(initialized_library, monkeypatch):
     directly (Task 9 migration) — the seam is now the anthropic package
     itself, which tiro.llm._call_anthropic imports lazily but which
     resolves to the same cached module object either way."""
+    from types import SimpleNamespace
+
     import anthropic
 
     import tiro.ingestion.extractors as ex
 
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(text='{"tags": ["ai"], "entities": [], "summary": "s"}')],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+
+    class _FakeSuccessClient:
+        class messages:  # noqa: N801 — mimics anthropic client shape
+            @staticmethod
+            def create(**kwargs):
+                return fake_response
+
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(anthropic, "Anthropic", lambda: _FakeClient())
-    # _FakeClient returns _FakeResponse which lacks .content — llm.py's
-    # _call_anthropic raises AttributeError accessing it, which llm_call
-    # logs as a failed audit entry and re-raises; extract_metadata's broad
-    # except catches it and returns defaults. The audit entry must still
-    # exist because the API call itself reached the client.
-    ex.extract_metadata("T", "body", initialized_library)
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: _FakeSuccessClient())
+    # With a realistic response shape, the call succeeds end-to-end:
+    # extract_metadata parses real tags/entities/summary from it, and the
+    # audit line records a genuine success (not a failure entry that an
+    # endpoint-only assertion can't distinguish from success).
+    result = ex.extract_metadata("T", "body", initialized_library)
+    assert result == {"tags": ["ai"], "entities": [], "summary": "s"}
     entries = read_audit_entries(initialized_library, service="anthropic")
-    assert entries and entries[-1]["endpoint"] == "extract_metadata"
+    assert entries[-1]["endpoint"] == "extract_metadata"
+    assert entries[-1]["success"] is True
+    assert entries[-1]["tokens_in"] == 10
+    assert entries[-1]["tokens_out"] == 5
+    assert entries[-1]["cost_estimate"] is not None
 
 
 def _fresh_created_at() -> str:

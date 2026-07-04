@@ -57,6 +57,11 @@ def _call_anthropic(config: TiroConfig, model: str, prompt: str, *,
         raise LLMNotConfigured("ANTHROPIC_API_KEY not set and no anthropic_api_key in config")
     import anthropic
 
+    # anthropic.Anthropic() only reads the env var, not config — load_config
+    # normally syncs config.anthropic_api_key into the env, but this is
+    # defense-in-depth for callers that only set config.
+    if config.anthropic_api_key:
+        os.environ.setdefault("ANTHROPIC_API_KEY", config.anthropic_api_key)
     client = anthropic.Anthropic()
     kwargs: dict = {
         "model": model,
