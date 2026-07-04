@@ -78,3 +78,25 @@ def test_anthropic_backend_success_path(test_config, monkeypatch):
     entry = [e for e in lines if e["endpoint"] == "happy"][-1]
     assert entry["success"] is True
     assert entry["service"] == "anthropic"
+
+
+def test_fake_backend_round_trip(test_config, fake_llm):
+    fake_llm('{"tags": ["ai"], "entities": [], "summary": "s"}')
+    result = llm_call(test_config, "light", "whatever", purpose="test")
+    assert json.loads(result.text)["tags"] == ["ai"]
+    assert result.provider == "fake"
+
+
+def test_fake_backend_empty_queue_raises(test_config, fake_llm):
+    with pytest.raises(RuntimeError, match="queue empty"):
+        llm_call(test_config, "light", "x", purpose="test")
+
+
+def test_extract_metadata_through_fake(test_config, fake_llm):
+    from tiro.ingestion.extractors import extract_metadata
+
+    fake_llm('{"tags": ["AI ", "ml"], "entities": [{"name": "OpenAI", "type": "Company"}], "summary": "sum"}')
+    data = extract_metadata("Title", "Body text", test_config)
+    assert data["tags"] == ["ai", "ml"]
+    assert data["entities"] == [{"name": "OpenAI", "type": "company"}]
+    assert data["summary"] == "sum"

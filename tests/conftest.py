@@ -138,3 +138,16 @@ def authenticated_client(auth_client):
     r = auth_client.post("/api/auth/login", json={"password": TEST_PASSWORD})
     assert r.status_code == 200
     return auth_client
+
+
+@pytest.fixture
+def fake_llm(test_config):
+    """Route both AI tiers to the in-process fake backend. Yields the
+    queue function: fake_llm('{"json": "response"}', "second response")."""
+    from tiro import llm
+
+    test_config.ai_heavy_provider = "fake"
+    test_config.ai_light_provider = "fake"
+    llm._fake_responses.clear()
+    yield llm.queue_fake_responses
+    llm._fake_responses.clear()

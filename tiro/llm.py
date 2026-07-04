@@ -81,8 +81,25 @@ def _call_anthropic(config: TiroConfig, model: str, prompt: str, *,
     )
 
 
+_fake_responses: list[str] = []
+
+
+def queue_fake_responses(*texts: str) -> None:
+    """Test seam: texts are returned FIFO by the 'fake' provider."""
+    _fake_responses.extend(texts)
+
+
+def _call_fake(config: TiroConfig, model: str, prompt: str, *,
+               system: str | None, max_tokens: int) -> LLMResult:
+    if not _fake_responses:
+        raise RuntimeError("fake LLM queue empty — call queue_fake_responses() first")
+    return LLMResult(text=_fake_responses.pop(0), provider="fake", model=model,
+                     tokens_in=0, tokens_out=0)
+
+
 _BACKENDS: dict[str, Callable[..., LLMResult]] = {
     "anthropic": _call_anthropic,
+    "fake": _call_fake,
 }
 
 
