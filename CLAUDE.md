@@ -1,4 +1,4 @@
-# Project Tiro
+# Tiro
 
 ## What This Is
 
@@ -6,7 +6,7 @@ Tiro is a local-first, open-source, model-agnostic reading OS for the AI age. It
 
 Named after Cicero's freedman who preserved and organized his master's works for posterity. *"...without you the oracle was dumb." — Cicero to Tiro, 53 BC*
 
-**Context:** Built solo for the "Built with Opus 4.6: Claude Code Hackathon" (Feb 10–16, 2026). Must be fully open source, built from scratch. See PROJECT_TIRO_SPEC.md for the full build plan and PRODUCT_ROADMAP.md for the post-hackathon roadmap.
+**Context:** Born at the "Built with Opus 4.6: Claude Code Hackathon" (Feb 10–16, 2026); the frozen MIT-licensed hackathon build lives at github.com/esagduyu/project-tiro — THIS repo (github.com/esagduyu/tiro, public, branch `main`) is the continuation. PROJECT_TIRO_SPEC.md is the historical hackathon spec; PRODUCT_ROADMAP.md is the forward-looking source of truth.
 
 **License:** AGPL-3.0-or-later (relicensed from MIT on 2026-05-28). See "License & dependency policy" in Decisions & Notes for implications.
 
@@ -121,11 +121,11 @@ lsof -ti :8000 | xargs kill -9
 
 ## Current Status
 
-**Hackathon build (on `master`):** 17 spec checkpoints + 6 beyond-spec (Gmail IMAP/SMTP, TTS, IMAP scheduler, knowledge graph, UX redesign, digest scheduling & history). Seed script updated with full demo library (22 URLs + ratings/VIP).
+**Hackathon foundation** (Feb 2026, preserved at github.com/esagduyu/project-tiro): 17 spec checkpoints + 6 beyond-spec (Gmail IMAP/SMTP, TTS, IMAP scheduler, knowledge graph, UX redesign, digest scheduling & history). Its full history is contained in this repo's `main`.
 
-**Phase 0 — Security & Integrity Release (branch `phase-0-security-integrity`):** transitioning from demo to public alpha. M0–M7 complete; Phase 0 code-complete at 0.2.0, pending user review → merge → tag. Local-only source of truth for status + next action + gotchas: `docs/plans/phase-0-progress.md` (docs/ is gitignored). Full spec: `docs/plans/2026-07-02-phase-0-security-integrity-design.md`.
+**Phase 0 — Security & Integrity Release: COMPLETE at 0.2.0** (M0–M7, 169 tests, final-reviewed "ready to tag"). `main` IS the release state — no merge step remains; tagging `v0.2.0` is the owner's call after their review (guide: `docs/plans/2026-07-03-phase-0-review-guide.md`). Next by roadmap: Phase 1 (Local Library Integrity, 0.3) — see the 2026-07-03 strategy inputs note in PRODUCT_ROADMAP.md for resequencing recommendations before planning it. Local-only status/gotchas: `docs/plans/phase-0-progress.md` (docs/ is gitignored). Phase 0 spec: `docs/plans/2026-07-02-phase-0-security-integrity-design.md`.
 
-**Load-bearing conventions introduced on the Phase 0 branch** (a session working on this branch must know these; the hackathon docs above predate them):
+**Load-bearing conventions introduced in Phase 0** (every session in this repo must know these; hackathon-era notes below predate them):
 - **Auth is now required.** All `/api/*` routes except `POST /api/auth/login`, `POST /api/auth/setup` (while unconfigured), `GET /api/auth/status`, `POST /api/auth/logout`, `GET /healthz` return 401 unauthenticated; HTML pages 302 → `/login`; FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`) are disabled. Auth backend in `tiro/auth.py` (bcrypt password in `config.yaml` `auth_password_hash`, SQLite `sessions` + `api_tokens` tables, `require_auth`/`require_page_auth` deps, Host-header validation + `Sec-Fetch-Site` CSRF). Tests use the `authenticated_client`/`auth_client`/`configured_library` conftest fixtures. `tiro set-password` / `tiro token create|list|revoke` CLIs. MCP server gated on `TIRO_API_TOKEN` when a password is set.
 - **Sanitize invariant:** `tiro/sanitize.py` (`sanitize_html` via nh3) runs in the EXTRACTION functions (`web.py`/`email.py`) before markdownify — NOT in `processor.py`. Content reaching `process_article()` is already sanitized. Client renders markdown through `renderMarkdown` (marked → DOMPurify) and escapes every server string at `innerHTML` sinks via `esc()`/`num()`. Never route the already-clean settings token UI through a sanitize+innerHTML path.
 - **Frontend deps vendored** in `tiro/frontend/static/vendor/` (marked 15.0.12, DOMPurify 3.4.11, Chart.js 4.4.7, d3 7.9.0) — no CDN at runtime (test-enforced). **Cache-bust is at `v=56`** and is a single shared counter — bump ALL `?v=` occurrences across every template together when changing static JS/CSS (grep first).
