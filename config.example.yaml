@@ -30,6 +30,17 @@ default_embedding_model: "all-MiniLM-L6-v2"
 opus_model: "claude-opus-4-6"
 haiku_model: "claude-haiku-4-5-20251001"
 
+# AI backend routing (optional). Tiers map to providers+models; defaults use
+# Anthropic with opus_model/haiku_model above.
+# Providers: anthropic | openai-compatible | claude-cli | codex-cli
+# ai_heavy_provider: "anthropic"
+# ai_light_provider: "anthropic"
+# ai_heavy_model: null            # defaults to opus_model
+# ai_light_model: null            # defaults to haiku_model
+# openai-compatible: works with OpenAI, Ollama, LM Studio, Gemini-compat:
+# ai_openai_base_url: "http://localhost:11434/v1"   # Ollama example
+# ai_openai_api_key: "sk-..."                        # not needed for Ollama
+
 # Content decay
 decay_rate_default: 0.95
 decay_rate_disliked: 0.90

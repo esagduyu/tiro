@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 # Per 1M tokens (input, output). Prefix-matched against the model string so
 # dated ids like claude-haiku-4-5-20251001 resolve. Update when models change.
+#
+# The "openai-compatible" provider (tiro/llm.py) has no pricing table here on
+# purpose: it fronts OpenAI, Ollama, LM Studio, and Gemini's OpenAI-compat
+# endpoint alike, whose costs range from real-money to free-local. A single
+# table would be wrong for most of them, so cost_estimate stays None for that
+# provider — an honest unknown beats a confidently wrong number.
 ANTHROPIC_PRICING = {
     "claude-opus-4-6": (5.00, 25.00),
     "claude-haiku-4-5": (1.00, 5.00),

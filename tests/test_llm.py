@@ -272,6 +272,34 @@ def test_generate_connection_notes_through_fake(initialized_library, fake_llm):
     assert result[0]["connection_note"] == "Builds on the source article."
 
 
+def test_openai_compatible_backend(test_config, monkeypatch):
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/chat/completions")
+        body = json.loads(request.content)
+        assert body["model"] == "llama3"
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "hello from ollama"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+        })
+
+    from tiro import llm as llm_mod
+    monkeypatch.setattr(
+        llm_mod, "_openai_client_factory",
+        lambda base_url, api_key: httpx.Client(
+            transport=httpx.MockTransport(handler), base_url=base_url
+        ),
+    )
+    test_config.ai_light_provider = "openai-compatible"
+    test_config.ai_light_model = "llama3"
+    test_config.ai_openai_api_key = "unused-by-ollama"
+    result = llm_call(test_config, "light", "hi", purpose="test")
+    assert result.text == "hello from ollama"
+    assert result.tokens_in == 5 and result.tokens_out == 3
+    assert result.provider == "openai-compatible"
+
+
 def test_generate_connection_notes_graceful_when_not_configured(initialized_library):
     """LLMNotConfigured must be swallowed and related_articles returned
     unchanged — no exception, no connection_note annotation."""

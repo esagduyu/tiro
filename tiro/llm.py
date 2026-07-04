@@ -81,6 +81,42 @@ def _call_anthropic(config: TiroConfig, model: str, prompt: str, *,
     )
 
 
+def _openai_client_factory(base_url: str, api_key: str | None):
+    """Separated for test injection (MockTransport)."""
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return httpx.Client(base_url=base_url, headers=headers, timeout=120.0)
+
+
+def _call_openai_compatible(config: TiroConfig, model: str, prompt: str, *,
+                            system: str | None, max_tokens: int) -> LLMResult:
+    api_key = config.ai_openai_api_key or os.environ.get("OPENAI_API_KEY")
+    base_url = config.ai_openai_base_url.rstrip("/")
+    if "api.openai.com" in base_url and not api_key:
+        raise LLMNotConfigured("openai-compatible provider selected but no API key set")
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    with _openai_client_factory(base_url, api_key) as client:
+        resp = client.post("/chat/completions", json={
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        })
+        resp.raise_for_status()
+        data = resp.json()
+    usage = data.get("usage") or {}
+    return LLMResult(
+        text=data["choices"][0]["message"]["content"],
+        provider="openai-compatible",
+        model=model,
+        tokens_in=usage.get("prompt_tokens"),
+        tokens_out=usage.get("completion_tokens"),
+    )
+
+
 _fake_responses: list[str] = []
 
 
@@ -99,6 +135,7 @@ def _call_fake(config: TiroConfig, model: str, prompt: str, *,
 
 _BACKENDS: dict[str, Callable[..., LLMResult]] = {
     "anthropic": _call_anthropic,
+    "openai-compatible": _call_openai_compatible,
     "fake": _call_fake,
 }
 
