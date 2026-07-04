@@ -4,6 +4,8 @@
 
 <h1 align="center">Tiro</h1>
 
+![CI](https://github.com/esagduyu/tiro/actions/workflows/ci.yml/badge.svg)
+
 <p align="center"><strong>A local-first reading OS for the AI age.</strong></p>
 
 <p align="center"><em>"...without you the oracle was dumb."</em><br><small>— Cicero to Tiro, 53 BC</small></p>
