@@ -7,7 +7,6 @@ unwritable audit dir must never break the API call being observed.
 
 import json
 import logging
-import time
 from datetime import UTC, date, datetime
 
 from tiro.config import TiroConfig
@@ -148,27 +147,3 @@ def summarize(entries: list[dict]) -> dict:
         s["chars"] += e.get("chars") or 0
         s["cost_estimate"] += e.get("cost_estimate") or 0.0
     return rollup
-
-
-def audited_anthropic_call(config: TiroConfig, client, *, endpoint: str, **kwargs):
-    """client.messages.create with timing + usage + cost audit logging.
-    Re-raises API errors after logging the failure."""
-    start = time.monotonic()
-    model = kwargs.get("model")
-    try:
-        response = client.messages.create(**kwargs)
-    except Exception as e:
-        log_api_call(
-            config, "anthropic", endpoint=endpoint, model=model,
-            duration_ms=int((time.monotonic() - start) * 1000),
-            success=False, error=str(e),
-        )
-        raise
-    usage = getattr(response, "usage", None)
-    log_api_call(
-        config, "anthropic", endpoint=endpoint, model=model,
-        tokens_in=getattr(usage, "input_tokens", None),
-        tokens_out=getattr(usage, "output_tokens", None),
-        duration_ms=int((time.monotonic() - start) * 1000),
-    )
-    return response

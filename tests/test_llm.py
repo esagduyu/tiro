@@ -100,3 +100,127 @@ def test_extract_metadata_through_fake(test_config, fake_llm):
     assert data["tags"] == ["ai", "ml"]
     assert data["entities"] == [{"name": "OpenAI", "type": "company"}]
     assert data["summary"] == "sum"
+
+
+def test_llm_chokepoint_is_the_only_anthropic_caller():
+    """No module besides tiro/llm.py may construct an Anthropic client or
+    import audited_anthropic_call — the chokepoint owns provider access."""
+    from pathlib import Path
+
+    tiro_dir = Path(__file__).parent.parent / "tiro"
+    offenders = []
+    for py in tiro_dir.rglob("*.py"):
+        if py.name == "llm.py":
+            continue
+        text = py.read_text()
+        if "anthropic.Anthropic(" in text or "audited_anthropic_call" in text:
+            offenders.append(str(py))
+    assert not offenders, offenders
+
+
+def test_digest_generation_through_fake(initialized_library, fake_llm):
+    from tiro.database import get_connection
+    from tiro.intelligence.digest import generate_digest
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path, summary)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 'T', 'sl', 'f.md', 'a summary')"
+    )
+    conn.commit()
+    conn.close()
+
+    fake_llm(
+        "## 1. Ranked by Importance\n1. T\n\n"
+        "## 2. Grouped by Topic\n- T\n\n"
+        "## 3. Grouped by Entity\n- T"
+    )
+    result = generate_digest(config)
+    assert set(result.keys()) == {"ranked", "by_topic", "by_entity"}
+    assert "T" in result["ranked"]["content"]
+
+
+def test_analyze_article_through_fake(initialized_library, fake_llm):
+    from tiro.database import get_connection
+    from tiro.intelligence.analysis import analyze_article
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 'T', 'sl', 'a.md')"
+    )
+    conn.commit()
+    conn.close()
+    (config.articles_dir / "a.md").write_text("---\ntitle: T\n---\nBody text")
+
+    fake_llm(json.dumps({
+        "bias": {"score": 5, "notes": "x"},
+        "factual_confidence": {"score": 7, "notes": "y"},
+        "novelty": {"score": 3, "notes": "z"},
+    }))
+    result = analyze_article(config, 1)
+    assert result["bias"]["score"] == 5.0
+    assert result["factual_confidence"]["score"] == 7.0
+    assert "analyzed_at" in result
+
+
+def test_classify_articles_through_fake(initialized_library, fake_llm):
+    from tiro.database import get_connection
+    from tiro.intelligence.preferences import classify_articles
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    for i in range(5):
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, rating)"
+            " VALUES (?, 1, ?, ?, ?, 1)",
+            (f"01AAAAAAAAAAAAAAAAAAAAAA{i:02d}", f"T{i}", f"sl{i}", f"f{i}.md"),
+        )
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES ('01BBBBBBBBBBBBBBBBBBBBBB', 1, 'U', 'slu', 'fu.md')"
+    )
+    conn.commit()
+    conn.close()
+
+    fake_llm(json.dumps(
+        {"classifications": [{"article_id": 6, "tier": "must-read", "reason": "r"}]}
+    ))
+    result = classify_articles(config)
+    assert result == [{"article_id": 6, "tier": "must-read", "reason": "r"}]
+
+
+def test_generate_connection_notes_through_fake(initialized_library, fake_llm):
+    from tiro.database import get_connection
+    from tiro.search.semantic import generate_connection_notes
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path, summary)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 'Related', 'sl', 'f.md', 'sum')"
+    )
+    conn.commit()
+    conn.close()
+
+    fake_llm('{"notes": [{"article_id": 1, "note": "Builds on the source article."}]}')
+    related = [{"related_article_id": 1, "similarity_score": 0.9}]
+    result = generate_connection_notes("summary", "Title", related, config)
+    assert result[0]["connection_note"] == "Builds on the source article."
+
+
+def test_generate_connection_notes_graceful_when_not_configured(initialized_library):
+    """LLMNotConfigured must be swallowed and related_articles returned
+    unchanged — no exception, no connection_note annotation."""
+    from tiro.search.semantic import generate_connection_notes
+
+    related = [{"related_article_id": 1, "similarity_score": 0.9}]
+    result = generate_connection_notes("summary", "Title", related, initialized_library)
+    assert result == related
+    assert "connection_note" not in result[0]

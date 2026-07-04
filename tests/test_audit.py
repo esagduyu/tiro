@@ -1,4 +1,4 @@
-"""M6: external-API audit log — writer, cost estimates, readers, wrapper."""
+"""M6: external-API audit log — writer, cost estimates, readers."""
 
 import json
 from datetime import UTC, date
@@ -6,7 +6,6 @@ from datetime import UTC, date
 import pytest
 
 from tiro.audit import (
-    audited_anthropic_call,
     estimate_cost,
     log_api_call,
     read_audit_entries,
@@ -70,46 +69,6 @@ def test_read_and_summarize(initialized_library):
     assert rollup["anthropic"]["failures"] == 1
     assert rollup["anthropic"]["tokens_in"] == 300
     assert rollup["imap"]["calls"] == 1
-
-
-class _FakeUsage:
-    input_tokens = 111
-    output_tokens = 22
-
-
-class _FakeResponse:
-    usage = _FakeUsage()
-
-
-class _FakeClient:
-    class messages:  # noqa: N801 — mimics anthropic client shape
-        @staticmethod
-        def create(**kwargs):
-            if kwargs.get("model") == "explode":
-                raise RuntimeError("api down")
-            return _FakeResponse()
-
-
-def test_audited_anthropic_call_logs_usage(initialized_library):
-    resp = audited_anthropic_call(
-        initialized_library, _FakeClient(), endpoint="extract_metadata",
-        model="claude-haiku-4-5-20251001", max_tokens=10,
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    assert resp.usage.input_tokens == 111
-    entry = json.loads(_today_file(initialized_library).read_text().splitlines()[-1])
-    assert entry["tokens_in"] == 111 and entry["tokens_out"] == 22
-    assert entry["endpoint"] == "extract_metadata"
-    assert entry["cost_estimate"] is not None
-
-
-def test_audited_anthropic_call_logs_failure_and_reraises(initialized_library):
-    with pytest.raises(RuntimeError):
-        audited_anthropic_call(initialized_library, _FakeClient(), endpoint="digest",
-                               model="explode", messages=[])
-    entry = json.loads(_today_file(initialized_library).read_text().splitlines()[-1])
-    assert entry["success"] is False
-    assert "api down" in entry["error"]
 
 
 def test_read_audit_entries_date_exact_match(initialized_library):

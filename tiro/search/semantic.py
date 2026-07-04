@@ -207,14 +207,8 @@ def generate_connection_notes(
     Only processes top 3 to save API costs.
     """
     import json
-    import os
 
-    import anthropic
-
-    from tiro.audit import audited_anthropic_call
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return related_articles
+    from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
     if not related_articles:
         return related_articles
@@ -252,18 +246,12 @@ def generate_connection_notes(
     )
 
     try:
-        client = anthropic.Anthropic()
-        response = audited_anthropic_call(
-            config, client,
-            endpoint="connection_notes",
-            model=config.haiku_model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+        result = llm_call(
+            config, "light", prompt,
+            purpose="connection_notes", max_tokens=512,
         )
 
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        text = strip_json_fences(result.text)
 
         data = json.loads(text)
         note_map = {n["article_id"]: n["note"] for n in data.get("notes", [])}
@@ -272,6 +260,8 @@ def generate_connection_notes(
             if r["related_article_id"] in note_map:
                 r["connection_note"] = note_map[r["related_article_id"]]
 
+    except LLMNotConfigured:
+        pass
     except Exception as e:
         logger.error("Connection note generation failed: %s", e)
 

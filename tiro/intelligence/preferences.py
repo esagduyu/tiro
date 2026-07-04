@@ -2,14 +2,11 @@
 
 import json
 import logging
-import os
 
-import anthropic
-
-from tiro.audit import audited_anthropic_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.intelligence.prompts import learned_preferences_prompt
+from tiro.llm import llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +129,8 @@ def classify_articles(config: TiroConfig) -> list[dict]:
 
     Returns list of classification dicts: [{"article_id": int, "tier": str, "reason": str}, ...]
     Raises ValueError if not enough rated articles or no unrated articles.
-    Raises RuntimeError if ANTHROPIC_API_KEY is not set.
+    Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
     """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot classify articles")
-
     # Gather data
     loved, liked, disliked = _gather_rated_articles(config)
     total_rated = len(loved) + len(liked) + len(disliked)
@@ -169,28 +163,19 @@ def classify_articles(config: TiroConfig) -> list[dict]:
     )
 
     # Call Opus 4.6
-    client = anthropic.Anthropic()
-    response = audited_anthropic_call(
-        config, client,
-        endpoint="classify",
-        model=config.opus_model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+    llm_result = llm_call(
+        config, "heavy", prompt,
+        purpose="classify", max_tokens=4096,
     )
 
-    raw = response.content[0].text
+    raw = llm_result.text
     logger.info("Opus classification response: %d chars", len(raw))
 
     # Parse JSON — strip markdown fences if Opus wraps them
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        cleaned = "\n".join(
-            lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
-        )
+    cleaned = strip_json_fences(raw)
 
-    result = json.loads(cleaned)
-    classifications = result.get("classifications", [])
+    parsed = json.loads(cleaned)
+    classifications = parsed.get("classifications", [])
 
     # Update database
     _update_article_tiers(config, classifications)
