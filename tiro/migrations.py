@@ -118,11 +118,58 @@ def _m004_indexes(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
 
 
+def canonical_key(name: str) -> str:
+    """Whitespace-collapsed casefolded key for entity dedup ("OpenAI" == "openai").
+    Deliberately conservative: exact-after-normalization only, no fuzzy matching."""
+    return " ".join(name.split()).casefold()
+
+
+def _m005_entity_canonical(conn: sqlite3.Connection) -> None:
+    if not _has_table(conn, "entities") or not _has_table(conn, "article_entities"):
+        return
+    if not _has_column(conn, "entities", "canonical_key"):
+        conn.execute("ALTER TABLE entities ADD COLUMN canonical_key TEXT")
+    # database.py SCHEMA already carries this index for fresh installs, so on
+    # a DB whose entities predate the merge (canonical_key NULL/stale) the
+    # index may already exist and would block the row-by-row backfill below
+    # from ever assigning two rows the same key. Drop and recreate after
+    # merging — harmless no-op when the index isn't there yet.
+    conn.execute("DROP INDEX IF EXISTS idx_entities_canonical")
+    for row in conn.execute("SELECT id, name FROM entities WHERE canonical_key IS NULL").fetchall():
+        conn.execute(
+            "UPDATE entities SET canonical_key = ? WHERE id = ?",
+            (canonical_key(row["name"]), row["id"]),
+        )
+    # Merge duplicates within each (entity_type, canonical_key): keep lowest id.
+    dupes = conn.execute("""
+        SELECT entity_type, canonical_key, MIN(id) AS keep_id
+        FROM entities GROUP BY entity_type, canonical_key HAVING COUNT(*) > 1
+    """).fetchall()
+    for d in dupes:
+        losers = [r["id"] for r in conn.execute(
+            "SELECT id FROM entities WHERE entity_type = ? AND canonical_key = ? AND id != ?",
+            (d["entity_type"], d["canonical_key"], d["keep_id"]),
+        ).fetchall()]
+        for loser in losers:
+            conn.execute(
+                "INSERT OR IGNORE INTO article_entities (article_id, entity_id) "
+                "SELECT article_id, ? FROM article_entities WHERE entity_id = ?",
+                (d["keep_id"], loser),
+            )
+            conn.execute("DELETE FROM article_entities WHERE entity_id = ?", (loser,))
+            conn.execute("DELETE FROM entities WHERE id = ?", (loser,))
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical "
+        "ON entities(entity_type, canonical_key)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
     (3, "uid ULID columns on articles/entities/tags", _m003_uid_columns),
     (4, "display_date + hot-path indexes", _m004_indexes),
+    (5, "entity canonical_key + duplicate merge", _m005_entity_canonical),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

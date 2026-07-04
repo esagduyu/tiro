@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from tiro.database import get_connection, init_db
-from tiro.migrations import LATEST_VERSION, run_migrations, schema_version
+from tiro.migrations import LATEST_VERSION, canonical_key, run_migrations, schema_version
 
 
 def _version(db_path: Path) -> int:
@@ -128,4 +128,39 @@ def test_display_date_and_indexes(tmp_path):
     index_names = {r[1] for r in conn.execute("PRAGMA index_list(articles)").fetchall()}
     assert "idx_articles_display_date" in index_names
     assert "idx_articles_source_id" in index_names
+    conn.close()
+
+
+def test_canonical_key_normalizes():
+    assert canonical_key("  Open AI ") == "open ai"
+    assert canonical_key("OpenAI") == "openai"
+    assert canonical_key("Sam Altman") == "sam altman"  # nbsp collapses
+
+
+def test_entity_merge_migration(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 't', 'sl', 'f.md')"
+    )
+    # Two spellings of the same company, each linked to the article
+    conn.execute("INSERT INTO entities (uid, name, entity_type) VALUES ('01B1', 'OpenAI', 'company')")
+    conn.execute("INSERT INTO entities (uid, name, entity_type) VALUES ('01B2', 'openai', 'company')")
+    conn.execute("INSERT INTO article_entities (article_id, entity_id) VALUES (1, 1)")
+    conn.execute("INSERT INTO article_entities (article_id, entity_id) VALUES (1, 2)")
+    conn.execute("UPDATE entities SET canonical_key = NULL")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+
+    conn = get_connection(db)
+    rows = conn.execute("SELECT id, name FROM entities WHERE entity_type='company'").fetchall()
+    assert len(rows) == 1  # merged; survivor is the lowest id ("OpenAI")
+    links = conn.execute("SELECT COUNT(*) FROM article_entities").fetchone()[0]
+    assert links == 1
     conn.close()

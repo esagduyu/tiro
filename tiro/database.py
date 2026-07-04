@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS entities (
     uid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL,
+    canonical_key TEXT,
     UNIQUE(name, entity_type)
 );
 
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical ON entities(entity_type, canonical_key);
 
 CREATE INDEX IF NOT EXISTS idx_articles_display_date ON articles(display_date DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id);

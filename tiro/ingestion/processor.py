@@ -12,7 +12,7 @@ import frontmatter
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.ingestion.extractors import extract_metadata
-from tiro.migrations import new_ulid
+from tiro.migrations import canonical_key, new_ulid
 from tiro.search.semantic import find_related_articles, generate_connection_notes, store_relations
 from tiro.stats import update_stat
 from tiro.vectorstore import get_collection
@@ -210,17 +210,23 @@ def process_article(
                 )
 
             for entity in entity_list:
-                conn.execute(
-                    "INSERT OR IGNORE INTO entities (uid, name, entity_type) VALUES (?, ?, ?)",
-                    (new_ulid(), entity["name"], entity["type"]),
-                )
+                key = canonical_key(entity["name"])
                 ent_row = conn.execute(
-                    "SELECT id FROM entities WHERE name = ? AND entity_type = ?",
-                    (entity["name"], entity["type"]),
+                    "SELECT id FROM entities WHERE entity_type = ? AND canonical_key = ?",
+                    (entity["type"], key),
                 ).fetchone()
+                if ent_row:
+                    entity_id = ent_row["id"]
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO entities (uid, name, entity_type, canonical_key)"
+                        " VALUES (?, ?, ?, ?)",
+                        (new_ulid(), entity["name"], entity["type"], key),
+                    )
+                    entity_id = cursor.lastrowid
                 conn.execute(
                     "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
-                    (article_id, ent_row["id"]),
+                    (article_id, entity_id),
                 )
 
             conn.commit()
