@@ -147,7 +147,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     # Dynamically restart the IMAP sync task to reflect the new config, via
     # the scheduler registry (mirrors to app.state.imap_task for back-compat).
     scheduler = request.app.state.scheduler
-    scheduler.stop("imap")
+    await scheduler.stop_and_wait("imap")
 
     if config.imap_enabled and config.imap_sync_interval > 0:
         from tiro.app import _imap_sync_loop
@@ -281,7 +281,7 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
     # Dynamically start/stop scheduler task via the scheduler registry
     # (mirrors to app.state.digest_task for back-compat).
     scheduler = request.app.state.scheduler
-    scheduler.stop("digest")
+    await scheduler.stop_and_wait("digest")
 
     if body.enabled:
         from tiro.app import _digest_schedule_loop

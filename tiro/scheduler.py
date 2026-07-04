@@ -35,6 +35,25 @@ class Scheduler:
             task.cancel()
         self._mirror(name, None)
 
+    async def stop_and_wait(self, name: str) -> None:
+        """Cancel AND await the named task's teardown before returning.
+
+        Use this before start() when replacing a loop whose body does
+        non-interruptible work (asyncio.to_thread) — cancel() alone lets the
+        old body finish in the background and briefly overlap its successor
+        (e.g. two concurrent IMAP sessions racing the SELECT-before-INSERT
+        email dedup). Lifespan shutdown doesn't need it (shutdown() already
+        awaits); fire-and-forget stop() remains for non-replacement stops.
+        """
+        task = self._tasks.pop(name, None)
+        self._mirror(name, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     def get(self, name: str) -> "asyncio.Task | None":
         return self._tasks.get(name)
 

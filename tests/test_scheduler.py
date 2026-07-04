@@ -33,3 +33,24 @@ async def test_start_replaces_existing():
     assert sched.get("digest") is t2
     await sched.shutdown()
     assert sched.get("digest") is None
+
+
+async def test_stop_and_wait_awaits_teardown():
+    state = FakeState()
+    sched = Scheduler(state)
+    finished = []
+
+    async def slow_teardown():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)  # simulate teardown work
+            finished.append(True)
+            raise
+
+    sched.start("imap", slow_teardown())
+    await asyncio.sleep(0)  # let the task start running its body first
+    await sched.stop_and_wait("imap")
+    assert finished == [True]          # teardown completed BEFORE return
+    assert state.imap_task is None
+    assert sched.get("imap") is None
