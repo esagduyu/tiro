@@ -12,8 +12,19 @@ library_path: "./tiro-library"
 host: "127.0.0.1"   # Use "0.0.0.0" for LAN access, or run with: tiro run --lan
 port: 8000
 
+# Authentication
+# Set your password with `tiro set-password` or via the first-run /login
+# screen — both store a bcrypt hash here. Do NOT hand-edit this value.
+# LAN mode (--lan or host 0.0.0.0) refuses to start until a password is set.
+# auth_password_hash: "$2b$12$..."
+
 # Ingestion defaults
 default_embedding_model: "all-MiniLM-L6-v2"
+
+# Vector indexing retry — if ChromaDB is unavailable during ingestion, the
+# article is still saved (vector_status = pending) and re-indexed by a
+# background loop on this interval.
+# vector_retry_interval: 5   # minutes (0 = disable the background retry)
 
 # Intelligence
 opus_model: "claude-opus-4-6"

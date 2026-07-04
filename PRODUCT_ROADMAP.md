@@ -1,8 +1,8 @@
 # Project Tiro — Product Roadmap
 
 Review date: 2026-05-25
-Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector)
-Status: Hackathon top-30 (out of ~500); invited to SF. Transitioning from demo to public alpha.
+Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03)
+Status: Phase 0 (Security & Integrity) is **complete — shipped as the 0.2.0 public alpha** on `main`. Next up: Phase 1 (read "Decisions Made" #0 before planning it). Origin: hackathon top-30 (out of ~500).
 
 ## How To Use This Document
 
@@ -43,6 +43,8 @@ Tiro is positioned as a personal reading OS with four deploy modes:
 
 The product promise: original source files remain clean and portable; user-created memory (highlights, notes, ratings, digests, AI outputs) lives in adjacent local files and transparent databases; anything paid makes the system easier to run across devices, not worse to own locally. **A user who never pays Tiro a cent should be able to use every feature.**
 
+The product itself decomposes into three components the phases advance: (1) the **Reader** — the context layer a user thinks in (highlights, notes, sidecar files that compound over time; Phases 2/2b); (2) the **Agentic layer** — the intelligence that works the library (digests, knowledge graph, learned preferences today; the inspectable Phase 6 runtime tomorrow); (3) the **Management layer** — the inbox-zero control surface that suggests what to read and makes catching up fast, on phone too (Phases 3/4). Phases 0, 1, 5, 7a, and 7b are foundation and delivery for all three.
+
 **North-star metric: daily-use adoption.** Every phase and feature is justified against one question: does this get more people using Tiro daily? Measured via opt-in telemetry (see Telemetry & Observability cross-cutting track — always opt-in, never default-on) plus public proxies (downloads, GitHub stars, community activity).
 
 ## Product Principles
@@ -63,6 +65,8 @@ The product promise: original source files remain clean and portable; user-creat
 - **MCP remains strategically important** because it lets external assistants use Tiro as a knowledge tool. See the [Claude Code SDK MCP docs](https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-mcp).
 
 ## Codebase Health Summary
+
+> **2026-07-04 note:** this section is the pre-Phase-0 snapshot (2026-05-25) that motivated the plan. Everything under "Severe issues" and "Quality issues" was resolved by Phase 0 (0.2.0), and "Test coverage" is now a 169-test pytest suite plus a Playwright E2E spec. Kept for historical context — do not re-fix these.
 
 Verified during this review:
 
@@ -94,6 +98,8 @@ Verified during this review:
 ---
 
 ## Phase 0 — Security & Integrity Release
+
+**Status: ✅ COMPLETE — shipped as 0.2.0 (2026-07-03).** The section below is preserved as the executed plan of record; see README "From hackathon to 0.2.0" for what landed, and CLAUDE.md for the load-bearing conventions it introduced. Where details below drifted during execution (route shapes, exact mechanisms), CLAUDE.md and the code are current.
 
 **Release target:** `0.2 alpha`
 **Relative complexity:** XL
@@ -251,6 +257,8 @@ None. This is the foundation phase.
 **Release target:** `0.3 local-beta`
 **Relative complexity:** L
 **Goal:** Make the local-first data promise credible end-to-end: rename, merge, restore, back up.
+
+> **Amended 2026-07-03 — see "Decisions Made" #0:** pull a Dockerfile/compose and a minimal second AI provider (Ollama or OpenAI) forward into this phase, plus the post-Phase-0 review deferrals for its first commit.
 
 ### Why this phase, why now
 
@@ -522,6 +530,8 @@ Sequencing rationale: this lands immediately after Phase 2 because (a) the on-di
 **Relative complexity:** M
 **Goal:** Let users run Tiro on a laptop or home machine and read it from their phone without giving up local ownership.
 
+> **Amended 2026-07-03 — see "Decisions Made" #0:** this phase's priority is elevated (mobile is the field's biggest gap vs Tiro), and a native SwiftUI iPhone client should be dispatched right after it ships — as a companion to, not a replacement for, the PWA here or Phase 5's desktop packaging.
+
 ### Why this phase, why now
 
 This is the product wedge. "Read on phone while the library stays on your machine" is the killer use case that distinguishes local-first from cloud-first readers. It is also the natural bridge to paid Tiro Cloud: users who don't want to manage Tailscale can pay for hosted access.
@@ -615,6 +625,8 @@ This is a Medium-complexity phase, not Large: most of it is a setup wizard plus 
 **Relative complexity:** M
 **Goal:** Make Tiro useful every morning without manual saving; bring users in via importable libraries from competing tools.
 
+> **Amended 2026-07-03 — see "Decisions Made" #0:** the Pocket importer below is stale (Pocket shut down in 2025); re-aim importers at Readwise/Instapaper/Omnivore-zip refugees and add forwarding-address email ingestion.
+
 ### Why this phase, why now
 
 Two unrelated reasons grouped because they share infrastructure:
@@ -700,6 +712,8 @@ Both build on Phase 1's import infrastructure.
 **Release target:** `0.7 desktop-beta`
 **Relative complexity:** L
 **Goal:** Make Tiro easy for non-technical users to install, run continuously, and update.
+
+> **Amended 2026-07-03 — see "Decisions Made" #0:** the native SwiftUI iPhone client dispatched after Phase 3 does not replace this phase — they are different products (this phase packages the Python server itself). The Docker deliverable below may partially land early via the Phase 1 pull-forward.
 
 ### Why this phase, why now
 
@@ -801,6 +815,8 @@ This phase deliberately follows highlights and RSS because both are daily-return
 **Release target:** `0.8 agent-runtime-beta`
 **Relative complexity:** XL
 **Goal:** Replace direct prompt calls with an extensible, inspectable library of local agents with replayable traces and a plugin API.
+
+> **Amended 2026-07-03 — see "Decisions Made" #0:** MCP servers are now table stakes across competitors; the local agent runtime over audit-logged files-on-disk is the durable differentiator. Treat this phase as strategic payload, not nice-to-have.
 
 ### Why this phase, why now
 
@@ -1161,7 +1177,7 @@ Strategic decisions that were Open Questions in earlier roadmap revisions but ha
 
 1. **Pricing model: single tier.** Tiro Cloud launches as a single "Tiro Supporter" subscription — flat monthly with an annual discount. No storage tiers, no AI tiers, no per-feature gating. Rationale: the model is "support the open product," and tiering would muddy that message. Add tiers only if usage patterns force the issue post-launch (e.g., a small minority of users consuming an order of magnitude more AI than the rest).
 
-2. **License: AGPL across the project.** Tiro moves from MIT to AGPL-3.0. Rationale: AGPL doesn't affect end-users running Tiro on their own laptop/server (they aren't redistributing a service), but it does discourage hosted clones from competing with Tiro Cloud without contributing back. The local-first user base is unaffected; the paid Cloud business is protected. Existing contributions remain MIT-licensed at their commit point; future contributions are AGPL. The license change applies to Tiro Local, Phase 7a (BYO sync), and Phase 7b (Tiro Cloud server) uniformly — keeping the licensing story simple. Action item for Phase 0 (or earlier): contributor sign-off / relicensing tracking, LICENSE file update, README update, package metadata update.
+2. **License: AGPL across the project.** Tiro moves from MIT to AGPL-3.0. Rationale: AGPL doesn't affect end-users running Tiro on their own laptop/server (they aren't redistributing a service), but it does discourage hosted clones from competing with Tiro Cloud without contributing back. The local-first user base is unaffected; the paid Cloud business is protected. Existing contributions remain MIT-licensed at their commit point; future contributions are AGPL. The license change applies to Tiro Local, Phase 7a (BYO sync), and Phase 7b (Tiro Cloud server) uniformly — keeping the licensing story simple. *(Action item completed 2026-05-28: LICENSE, README grandfather clause, and pyproject metadata all updated.)*
 
 3. **Obsidian bidirectional sync: shipping in Phase 2b.** Promoted from "open question" to a committed phase. See Phase 2b above. Rationale: Obsidian is the closest neighboring product, the user bases overlap, and treating Obsidian as a peer is a defensible differentiator that nobody else in the read-it-later space offers.
 

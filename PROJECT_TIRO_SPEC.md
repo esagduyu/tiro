@@ -1,5 +1,12 @@
 # Project Tiro — Claude Code Build Spec
 
+> **⚠️ Historical document.** This is the original hackathon build spec (Feb 2026), preserved
+> as-is for the record. It is **not** current: plan against [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md)
+> (the forward-looking source of truth), and treat [CLAUDE.md](CLAUDE.md) as authoritative for the
+> live API endpoint table, data model, and conventions. In particular, the endpoint and schema
+> sections below predate the 0.2.0 security release (everything is auth-gated now), and the
+> "Future Roadmap" section has been fully absorbed into PRODUCT_ROADMAP.md.
+
 ## Overview
 
 **Project Tiro** is a local-first, open-source, model-agnostic reading OS for the AI age. Named after Cicero's freedman who preserved and organized his master's works for posterity, Tiro helps users save, process, understand, and resurface web content and email newsletters — owned entirely on their machine, queryable by any AI model.

@@ -421,6 +421,8 @@ tiro/
 
 > **Tiro is the open-source reading OS that keeps everything you read as files on your machine — and puts a frontier-model research assistant, and your own agents, on top of them.**
 
+Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
+
 The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.2.0 alpha to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
@@ -434,6 +436,12 @@ The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-con
 - **Phase 7b — Tiro Cloud (1.0):** an optional paid convenience tier — hosted sync and always-on agents — patterned on Obsidian Sync: it funds the open product and gates nothing. A user who never pays can use every feature.
 
 The product promise underneath all of it: original articles stay clean, portable markdown; your memory (highlights, notes, ratings, digests) lives in adjacent local files and transparent databases; anything paid makes Tiro easier to run across devices, never worse to own locally.
+
+---
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the test bar, and the invariants that must not break. To report a security issue, see [SECURITY.md](SECURITY.md) (please don't open a public issue for vulnerabilities).
 
 ---
 
