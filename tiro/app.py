@@ -17,6 +17,7 @@ from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
+from tiro.scheduler import Scheduler
 from tiro.vectorstore import init_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -234,44 +235,34 @@ async def lifespan(app: FastAPI):
     # Recalculate content decay weights
     recalculate_decay(config)
 
-    # Start IMAP sync background task if configured
+    # Named background-task registry. start/stop mirror each task to
+    # app.state.{name}_task so healthz, `tiro status`, and existing tests
+    # keep reading the attributes they read today (see tiro/scheduler.py).
+    scheduler = Scheduler(app.state)
+    app.state.scheduler = scheduler
     app.state.imap_task = None
+    app.state.digest_task = None
+    app.state.vector_retry_task = None
+
+    # Start IMAP sync background task if configured
     if config.imap_enabled and config.imap_sync_interval > 0:
-        app.state.imap_task = asyncio.create_task(_imap_sync_loop(config))
+        scheduler.start("imap", _imap_sync_loop(config))
         logger.info("IMAP sync started: every %d minutes", config.imap_sync_interval)
 
     # Start digest schedule background task if configured
-    digest_task = None
     if config.digest_schedule_enabled:
-        digest_task = asyncio.create_task(_digest_schedule_loop(config))
+        scheduler.start("digest", _digest_schedule_loop(config))
         logger.info("Digest schedule started: daily at %s", config.digest_schedule_time)
-    app.state.digest_task = digest_task
 
     # Start vector retry background task if configured
-    app.state.vector_retry_task = None
     if config.vector_retry_interval > 0:
-        app.state.vector_retry_task = asyncio.create_task(_vector_retry_loop(config))
+        scheduler.start("vector_retry", _vector_retry_loop(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
-    # Cancel background tasks on shutdown. Read digest_task/imap_task off
-    # app.state (not the local variables from startup) — POST
-    # /api/settings/digest-schedule and /api/settings/email can replace
-    # app.state.{digest,imap}_task at runtime; using the stale local would
-    # cancel a dead task object and leak the live one.
-    for task in [
-        getattr(app.state, "imap_task", None),
-        getattr(app.state, "digest_task", None),
-        getattr(app.state, "vector_retry_task", None),
-    ]:
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    await scheduler.shutdown()
 
 
 def create_app(config: TiroConfig | None = None) -> FastAPI:
