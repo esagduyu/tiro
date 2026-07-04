@@ -152,20 +152,22 @@ def test_read_audit_entries_skips_corrupt_lines(initialized_library, caplog):
 
 
 def test_extract_metadata_is_audited(initialized_library, monkeypatch):
-    """The real call site routes through the wrapper (proven by a fake client)."""
+    """The real call site routes through llm_call -> the audit wrapper
+    (proven by a fake client). extractors.py no longer imports anthropic
+    directly (Task 9 migration) — the seam is now the anthropic package
+    itself, which tiro.llm._call_anthropic imports lazily but which
+    resolves to the same cached module object either way."""
+    import anthropic
+
     import tiro.ingestion.extractors as ex
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
-    class FakeAnthropicModule:
-        @staticmethod
-        def Anthropic():
-            return _FakeClient()
-
-    monkeypatch.setattr(ex, "anthropic", FakeAnthropicModule)
-    # _FakeClient returns _FakeResponse which lacks .content — extract_metadata's
-    # broad except catches the AttributeError and returns defaults; the audit
-    # entry must still exist because the API call itself succeeded.
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: _FakeClient())
+    # _FakeClient returns _FakeResponse which lacks .content — llm.py's
+    # _call_anthropic raises AttributeError accessing it, which llm_call
+    # logs as a failed audit entry and re-raises; extract_metadata's broad
+    # except catches it and returns defaults. The audit entry must still
+    # exist because the API call itself reached the client.
     ex.extract_metadata("T", "body", initialized_library)
     entries = read_audit_entries(initialized_library, service="anthropic")
     assert entries and entries[-1]["endpoint"] == "extract_metadata"

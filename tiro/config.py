@@ -31,6 +31,17 @@ class TiroConfig:
     default_embedding_model: str = DEFAULTS["default_embedding_model"]
     opus_model: str = DEFAULTS["opus_model"]
     haiku_model: str = DEFAULTS["haiku_model"]
+    # AI backend routing (Decision #7). Call sites request a capability tier;
+    # these map tiers to (provider, model). Providers: "anthropic",
+    # "openai-compatible", "claude-cli", "codex-cli", "fake" (tests).
+    ai_heavy_provider: str = "anthropic"
+    ai_light_provider: str = "anthropic"
+    ai_heavy_model: str | None = None   # None -> opus_model
+    ai_light_model: str | None = None   # None -> haiku_model
+    ai_openai_base_url: str = "https://api.openai.com/v1"
+    ai_openai_api_key: str | None = None
+    ai_claude_cli_path: str = "claude"
+    ai_codex_cli_path: str = "codex"
     decay_rate_default: float = DEFAULTS["decay_rate_default"]
     decay_rate_disliked: float = DEFAULTS["decay_rate_disliked"]
     decay_rate_vip: float = DEFAULTS["decay_rate_vip"]

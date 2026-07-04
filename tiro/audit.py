@@ -67,6 +67,7 @@ def log_api_call(
     duration_ms: int | None = None,
     success: bool = True,
     error: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     """Append one audit entry. Swallows its own failures by design."""
     try:
@@ -81,7 +82,8 @@ def log_api_call(
             "bytes_out": bytes_out,
             "count": count,
             "duration_ms": duration_ms,
-            "cost_estimate": estimate_cost(service, model, tokens_in, tokens_out, chars),
+            "cost_estimate": cost_usd if cost_usd is not None
+                             else estimate_cost(service, model, tokens_in, tokens_out, chars),
             "success": success,
             "error": error,
         }
