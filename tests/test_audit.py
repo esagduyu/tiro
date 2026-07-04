@@ -171,6 +171,15 @@ def test_extract_metadata_is_audited(initialized_library, monkeypatch):
     assert entries and entries[-1]["endpoint"] == "extract_metadata"
 
 
+def _fresh_created_at() -> str:
+    """UTC-now in the digest cache's naive format — keeps the canned digest
+    younger than send_digest_email's 24h staleness cutoff on any run date
+    (a hardcoded date here broke the suite the day after it was written)."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def test_imap_failure_is_audited(initialized_library, monkeypatch):
     import tiro.ingestion.imap as imap_mod
 
@@ -201,7 +210,7 @@ def test_smtp_send_is_audited(initialized_library, monkeypatch):
 
     monkeypatch.setattr(ed.smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(ed, "get_cached_digest", lambda *a, **k: {
-        "ranked": {"content": "# d", "article_ids": [], "created_at": "2026-07-03 10:00:00"}
+        "ranked": {"content": "# d", "article_ids": [], "created_at": _fresh_created_at()}
     })
     ed.send_digest_email(initialized_library)
     entries = read_audit_entries(initialized_library, service="smtp")
@@ -295,7 +304,7 @@ def test_smtp_auth_error_gets_app_password_hint(initialized_library, monkeypatch
 
     monkeypatch.setattr(ed.smtplib, "SMTP", AuthFailSMTP)
     monkeypatch.setattr(ed, "get_cached_digest", lambda *a, **k: {
-        "ranked": {"content": "# d", "article_ids": [], "created_at": "2026-07-03 10:00:00"}
+        "ranked": {"content": "# d", "article_ids": [], "created_at": _fresh_created_at()}
     })
     with pytest.raises(RuntimeError) as exc:
         ed.send_digest_email(initialized_library)
