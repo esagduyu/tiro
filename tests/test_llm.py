@@ -116,6 +116,49 @@ def test_extract_metadata_through_fake(test_config, fake_llm):
     assert data["summary"] == "sum"
 
 
+def test_extraction_reads_beyond_2000_chars(test_config, fake_llm, monkeypatch):
+    """The old 2,000-char truncation silently degraded every extraction
+    (tags/entities/summary), and everything downstream that consumes them
+    (digest ranking, classification, the future wiki). EXTRACT_CONTENT_CHARS
+    must be >= 12000, and the composed prompt must actually carry content
+    from past the old 2,000-char cutoff.
+
+    Capture seam: extractors.py does the truncation, then calls
+    extract_metadata_prompt(title, content_truncated) (imported from
+    tiro.intelligence.prompts) to compose the final prompt string. We
+    monkeypatch that imported name *in the extractors module* to capture
+    the already-truncated `content` argument and delegate to the real
+    implementation. This is the exact seam Task 12 introduced between
+    "truncate" (extractors.py's job) and "compose prompt" (prompts.py's
+    job) — cleaner than parsing the marker back out of the fully composed
+    prompt string, and doesn't require reaching into tiro.llm internals.
+    """
+    from tiro.ingestion import extractors
+
+    assert extractors.EXTRACT_CONTENT_CHARS >= 12000
+
+    real_prompt_fn = extractors.extract_metadata_prompt
+    captured = {}
+
+    def capture_prompt(title, content):
+        captured["content"] = content
+        return real_prompt_fn(title, content)
+
+    monkeypatch.setattr(extractors, "extract_metadata_prompt", capture_prompt)
+
+    # Marker sits well past the old 2,000-char cap but before the new one;
+    # body is longer than EXTRACT_CONTENT_CHARS so truncation actually fires.
+    body = "start " + "x" * 5000 + " MIDDLE_MARKER " + "y" * 10000
+    assert "MIDDLE_MARKER" not in body[:2000]  # sanity: old cap would have missed it
+
+    fake_llm('{"tags": [], "entities": [], "summary": ""}')
+    extractors.extract_metadata("T", body, test_config)
+
+    assert "content" in captured, "extract_metadata_prompt was never called"
+    assert "MIDDLE_MARKER" in captured["content"]
+    assert len(captured["content"]) == extractors.EXTRACT_CONTENT_CHARS
+
+
 def test_llm_chokepoint_is_the_only_anthropic_caller():
     """No module besides tiro/llm.py may construct an Anthropic client or
     import audited_anthropic_call — the chokepoint owns provider access."""

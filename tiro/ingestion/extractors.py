@@ -9,6 +9,11 @@ from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
 
+# Haiku 4.5 handles this easily; 12k chars ≈ 3k tokens ≈ tenths of a cent.
+# The old 2,000-char cap silently degraded summaries — and everything
+# downstream (digest ranking, classification, the future wiki) consumes them.
+EXTRACT_CONTENT_CHARS = 12000
+
 
 def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
     """Extract tags, entities, and summary using Claude Haiku.
@@ -18,7 +23,7 @@ def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
     """
     empty = {"tags": [], "entities": [], "summary": ""}
 
-    content_truncated = content_md[:2000]
+    content_truncated = content_md[:EXTRACT_CONTENT_CHARS]
 
     prompt = extract_metadata_prompt(title, content_truncated)
 
