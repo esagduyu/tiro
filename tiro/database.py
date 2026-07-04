@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS articles (
     relevance_weight REAL DEFAULT 1.0,
     ingenuity_analysis TEXT,
     ingestion_method TEXT DEFAULT 'manual',
-    vector_status TEXT DEFAULT 'pending'
+    vector_status TEXT DEFAULT 'pending',
+    display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
 );
 
 -- Tags (extracted topics)
@@ -132,6 +133,15 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
+
+CREATE INDEX IF NOT EXISTS idx_articles_display_date ON articles(display_date DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id);
+CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles(is_read);
+CREATE INDEX IF NOT EXISTS idx_articles_vector_status ON articles(vector_status);
+CREATE INDEX IF NOT EXISTS idx_article_tags_tag ON article_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_article_entities_entity ON article_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_article_relations_related ON article_relations(related_article_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 """
 
 

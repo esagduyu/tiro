@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return column in [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    # table_xinfo (not table_info) because table_info hides generated
+    # (VIRTUAL/STORED) columns like display_date — table_info would report
+    # False forever and re-run the ALTER TABLE every migration pass.
+    return column in [r[1] for r in conn.execute(f"PRAGMA table_xinfo({table})").fetchall()]
 
 
 def _m001_ingestion_method(conn: sqlite3.Connection) -> None:
@@ -74,10 +77,52 @@ def _m003_uid_columns(conn: sqlite3.Connection) -> None:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
 
 
+def _m004_indexes(conn: sqlite3.Connection) -> None:
+    # Ultra-legacy safety net: the generated column below references these
+    # by name, so they must exist first (real-world pre-framework DBs have
+    # always had them; only synthetic minimal test tables might not).
+    if not _has_column(conn, "articles", "published_at"):
+        conn.execute("ALTER TABLE articles ADD COLUMN published_at TIMESTAMP")
+    if not _has_column(conn, "articles", "ingested_at"):
+        # SQLite forbids a non-constant default (CURRENT_TIMESTAMP) on
+        # ALTER TABLE ADD COLUMN; backfill existing rows explicitly instead.
+        conn.execute("ALTER TABLE articles ADD COLUMN ingested_at TIMESTAMP")
+        conn.execute(
+            "UPDATE articles SET ingested_at = CURRENT_TIMESTAMP WHERE ingested_at IS NULL"
+        )
+    if not _has_column(conn, "articles", "display_date"):
+        # VIRTUAL (not STORED): SQLite only allows VIRTUAL generated columns
+        # via ALTER TABLE. The index below materializes it for sorting.
+        conn.execute(
+            "ALTER TABLE articles ADD COLUMN display_date TEXT "
+            "GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL"
+        )
+    if not _has_column(conn, "articles", "is_read"):
+        conn.execute("ALTER TABLE articles ADD COLUMN is_read BOOLEAN DEFAULT FALSE")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_display_date ON articles(display_date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles(is_read)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_vector_status ON articles(vector_status)")
+    if _has_table(conn, "article_tags"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_article_tags_tag ON article_tags(tag_id)")
+    if _has_table(conn, "article_entities"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_article_entities_entity ON article_entities(entity_id)"
+        )
+    if _has_table(conn, "article_relations"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_article_relations_related "
+            "ON article_relations(related_article_id)"
+        )
+    if _has_table(conn, "sessions"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
     (3, "uid ULID columns on articles/entities/tags", _m003_uid_columns),
+    (4, "display_date + hot-path indexes", _m004_indexes),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

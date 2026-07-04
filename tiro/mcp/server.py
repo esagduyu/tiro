@@ -161,11 +161,11 @@ def _build_filter_sql(
         params.append(ingestion_method)
 
     if date_from:
-        conditions.append("COALESCE(a.published_at, a.ingested_at) >= ?")
+        conditions.append("a.display_date >= ?")
         params.append(date_from)
 
     if date_to:
-        conditions.append("COALESCE(a.published_at, a.ingested_at) <= ?")
+        conditions.append("a.display_date <= ?")
         params.append(date_to + " 23:59:59")
 
     if is_vip is not None:
@@ -251,7 +251,7 @@ def search_articles(
                   LEFT JOIN sources s ON a.source_id = s.id
                   {tag_join}
                   WHERE {where}
-                  ORDER BY s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC
+                  ORDER BY s.is_vip DESC, a.display_date DESC
                   LIMIT ?"""
         params.append(max_results)
         rows = conn.execute(sql, params).fetchall()

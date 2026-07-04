@@ -187,11 +187,11 @@ async def list_articles(
                 where_clauses.append("a.id NOT IN (SELECT article_id FROM audio)")
 
         if date_from:
-            where_clauses.append("COALESCE(a.published_at, a.ingested_at) >= ?")
+            where_clauses.append("a.display_date >= ?")
             params.append(date_from)
 
         if date_to:
-            where_clauses.append("COALESCE(a.published_at, a.ingested_at) <= ?")
+            where_clauses.append("a.display_date <= ?")
             params.append(date_to + " 23:59:59")
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
@@ -206,18 +206,18 @@ async def list_articles(
 
         # Sort — VIP is always second-order priority within each sort mode
         sort_sql = {
-            "unread": "a.is_read ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC",
-            "newest": "COALESCE(a.published_at, a.ingested_at) DESC, s.is_vip DESC",
-            "oldest": "COALESCE(a.published_at, a.ingested_at) ASC, s.is_vip DESC",
+            "unread": "a.is_read ASC, s.is_vip DESC, a.display_date DESC",
+            "newest": "a.display_date DESC, s.is_vip DESC",
+            "oldest": "a.display_date ASC, s.is_vip DESC",
             "importance": """
                 CASE a.ai_tier
                     WHEN 'must-read' THEN 0
                     WHEN 'summary-enough' THEN 1
                     WHEN 'discard' THEN 2
                     ELSE 3
-                END ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC
+                END ASC, s.is_vip DESC, a.display_date DESC
             """,
-        }.get(sort, "a.is_read ASC, s.is_vip DESC, COALESCE(a.published_at, a.ingested_at) DESC")
+        }.get(sort, "a.is_read ASC, s.is_vip DESC, a.display_date DESC")
 
         # Total count for pagination
         total = conn.execute(

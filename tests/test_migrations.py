@@ -111,3 +111,21 @@ def test_startup_order_on_legacy_db(tmp_path):
     conn = get_connection(db)
     assert conn.execute("SELECT uid FROM articles").fetchone()[0]
     conn.close()
+
+
+def test_display_date_and_indexes(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path, published_at)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 't', 'sl', 'f.md', '2026-01-01')"
+    )
+    conn.commit()
+    row = conn.execute("SELECT display_date FROM articles").fetchone()
+    assert row[0] == "2026-01-01"
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(articles)").fetchall()}
+    assert "idx_articles_display_date" in index_names
+    assert "idx_articles_source_id" in index_names
+    conn.close()
