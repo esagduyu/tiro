@@ -4,6 +4,7 @@ import json
 import logging
 
 from tiro.config import TiroConfig
+from tiro.intelligence.prompts import extract_metadata_prompt
 from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
@@ -19,20 +20,7 @@ def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
 
     content_truncated = content_md[:2000]
 
-    prompt = (
-        "You are analyzing a saved article for a personal reading library. "
-        "Extract structured metadata.\n\n"
-        f"Article title: {title}\n"
-        f"Article content: {content_truncated}\n\n"
-        "Respond with JSON only, no other text:\n"
-        "{\n"
-        '  "tags": ["tag1", "tag2", ...],\n'
-        '  "entities": [\n'
-        '    {"name": "Entity Name", "type": "person|company|organization|product"}\n'
-        "  ],\n"
-        '  "summary": "2-3 sentence summary of the article\'s key points."\n'
-        "}"
-    )
+    prompt = extract_metadata_prompt(title, content_truncated)
 
     try:
         result = llm_call(

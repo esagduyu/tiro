@@ -7,6 +7,20 @@ import pytest
 from tiro.llm import LLMNotConfigured, llm_call, resolve_tier, strip_json_fences
 
 
+def test_templates_load_and_have_placeholders():
+    from tiro.intelligence.prompts import load_template
+
+    for name, needle in [
+        ("extract_metadata", "{title}"),
+        ("daily_digest", "{"),
+        ("ingenuity_analysis", "{"),
+        ("learned_preferences", "{"),
+        ("connection_notes", "{"),
+    ]:
+        tpl = load_template(name)
+        assert needle in tpl, name
+
+
 def test_strip_json_fences():
     fenced = '```json\n{"a": 1}\n```'
     assert json.loads(strip_json_fences(fenced)) == {"a": 1}

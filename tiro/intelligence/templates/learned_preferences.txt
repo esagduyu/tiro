@@ -1,0 +1,29 @@
+You are learning a user's reading preferences to classify new articles.
+
+## Articles the user LOVED (rating: 2)
+{loved_str}
+
+## Articles the user LIKED (rating: 1)
+{liked_str}
+
+## Articles the user DISLIKED (rating: -1)
+{disliked_str}
+
+## VIP Sources (always prioritize)
+{vip_str}
+
+## Articles to Classify
+{unrated_str}
+
+For each article, classify into one tier:
+- "must-read": User would want to read this in full. Matches their interests, from VIP sources, or high-impact content.
+- "summary-enough": Worth knowing about but the summary captures sufficient value.
+- "discard": Unlikely to interest this user based on their demonstrated preferences.
+
+Respond with JSON only — no markdown fences, no commentary:
+{{
+  "classifications": [
+    {{"article_id": 1, "tier": "must-read", "reason": "brief explanation"}},
+    ...
+  ]
+}}

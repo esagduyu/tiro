@@ -208,6 +208,7 @@ def generate_connection_notes(
     """
     import json
 
+    from tiro.intelligence.prompts import connection_notes_prompt
     from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
 
     if not related_articles:
@@ -232,18 +233,7 @@ def generate_connection_notes(
         for r in to_annotate
     )
 
-    prompt = (
-        "You are a reading assistant. Given a source article and related articles, "
-        "write a brief connection note (1 sentence, max 20 words) for each related article "
-        "explaining HOW it relates to the source. Use phrases like "
-        '"Contradicts...", "Builds on...", "Different perspective on...", '
-        '"Earlier coverage of...", "Same topic from...".\n\n'
-        f'Source article: "{article_title}"\n'
-        f"Summary: {article_summary}\n\n"
-        f"Related articles:\n{related_context}\n\n"
-        "Respond with JSON only:\n"
-        '{"notes": [{"article_id": 123, "note": "connection note"}, ...]}'
-    )
+    prompt = connection_notes_prompt(article_title, article_summary, related_context)
 
     try:
         result = llm_call(

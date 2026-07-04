@@ -1,4 +1,28 @@
-"""Centralized prompt templates for Tiro's intelligence layer."""
+"""Centralized prompt templates for Tiro's intelligence layer.
+
+Static prompt skeletons live as data files under `tiro/intelligence/templates/`
+so they can be treated as user-visible content (Phase 1b wiki docs, Phase 6
+personas). Dynamic composition (formatting lists of articles/ratings into
+lines) stays in Python; each `*_prompt` function loads its template and fills
+in the placeholders.
+"""
+
+from importlib.resources import files
+
+
+def load_template(name: str) -> str:
+    """Read a prompt template's raw text by name (without the .txt suffix)."""
+    return (files("tiro.intelligence") / "templates" / f"{name}.txt").read_text()
+
+
+def extract_metadata_prompt(title: str, content: str) -> str:
+    """Build the metadata-extraction prompt for Claude Haiku.
+
+    Args:
+        title: Article title.
+        content: Article content (already truncated by the caller).
+    """
+    return load_template("extract_metadata").format(title=title, content=content)
 
 
 def daily_digest_prompt(
@@ -44,45 +68,11 @@ def daily_digest_prompt(
         )
     articles_str = "\n\n".join(article_lines)
 
-    return f"""You are Tiro, a personal reading assistant. Generate a daily digest of the user's saved articles.
-
-## User Context
-- VIP sources (always prioritize): {vip_str}
-- Recent ratings:
-{ratings_str}
-
-## Today's Articles
-{articles_str}
-
-## Task
-Generate three digest sections in markdown. Each section should be a complete, standalone analysis.
-
-### 1. Ranked by Importance
-Order all articles by significance to this reader. Consider:
-- VIP sources should be weighted higher
-- User's demonstrated interests from ratings
-- Timeliness and impact of the content
-- Articles with lower relevance scores (< 1.0) have decayed due to lack of engagement — rank them lower
-For each article, include a 1-sentence reason for its position.
-
-### 2. Grouped by Topic
-Cluster articles by theme. For each cluster:
-- Name the theme
-- List articles with brief context
-- **Call out cross-references**: where articles discuss the same topic from different angles, reach different conclusions, or where one article's claims contradict another's
-- Highlight thematic threads that connect seemingly unrelated articles
-
-### 3. Grouped by Entity
-Organize by the key people, companies, and organizations discussed.
-Note when the same entity appears across multiple sources with different coverage.
-Map relationships between entities when they appear together.
-
-## Formatting Rules
-- Format ALL article references as markdown links: [Article Title](/articles/ID) where ID is the article's numeric ID
-- Use clear markdown headings and bullet points
-- Be insightful — don't just list articles, find the connections and contradictions the reader would miss
-- Keep each entry concise but substantive
-- For the ranked section, number the entries"""
+    return load_template("daily_digest").format(
+        vip_str=vip_str,
+        ratings_str=ratings_str,
+        articles_str=articles_str,
+    )
 
 
 def ingenuity_analysis_prompt(full_article_text: str, source_name: str) -> str:
@@ -92,32 +82,10 @@ def ingenuity_analysis_prompt(full_article_text: str, source_name: str) -> str:
         full_article_text: The full markdown text of the article.
         source_name: The name of the source (e.g., "Stratechery").
     """
-    return f"""You are a media literacy analyst. Evaluate this article across three dimensions.
-
-Article: {full_article_text}
-Source: {source_name}
-
-Respond with JSON only — no markdown fences, no commentary:
-{{
-  "bias": {{
-    "score": 1-10,
-    "lean": "left|center-left|center|center-right|right|non-political",
-    "indicators": ["list of specific bias indicators found"],
-    "missing_perspectives": ["perspectives not represented"]
-  }},
-  "factual_confidence": {{
-    "score": 1-10,
-    "well_sourced_claims": ["claims with clear evidence or citations"],
-    "unsourced_assertions": ["claims presented as fact without backing"],
-    "flags": ["any potential misinformation or misleading framing"]
-  }},
-  "novelty": {{
-    "score": 1-10,
-    "assessment": "Brief description of what's new vs. known",
-    "novel_claims": ["genuinely new information or synthesis"]
-  }},
-  "overall_summary": "2-sentence overall assessment of this article's trustworthiness and value."
-}}"""
+    return load_template("ingenuity_analysis").format(
+        full_article_text=full_article_text,
+        source_name=source_name,
+    )
 
 
 def learned_preferences_prompt(
@@ -158,32 +126,30 @@ def learned_preferences_prompt(
 
     vip_str = ", ".join(vip_sources) if vip_sources else "None set"
 
-    return f"""You are learning a user's reading preferences to classify new articles.
+    return load_template("learned_preferences").format(
+        loved_str=_format_rated(loved_articles),
+        liked_str=_format_rated(liked_articles),
+        disliked_str=_format_rated(disliked_articles),
+        vip_str=vip_str,
+        unrated_str=_format_unrated(unrated_articles),
+    )
 
-## Articles the user LOVED (rating: 2)
-{_format_rated(loved_articles)}
 
-## Articles the user LIKED (rating: 1)
-{_format_rated(liked_articles)}
+def connection_notes_prompt(
+    article_title: str,
+    article_summary: str,
+    related_context: str,
+) -> str:
+    """Build the connection-notes prompt for Claude Haiku.
 
-## Articles the user DISLIKED (rating: -1)
-{_format_rated(disliked_articles)}
-
-## VIP Sources (always prioritize)
-{vip_str}
-
-## Articles to Classify
-{_format_unrated(unrated_articles)}
-
-For each article, classify into one tier:
-- "must-read": User would want to read this in full. Matches their interests, from VIP sources, or high-impact content.
-- "summary-enough": Worth knowing about but the summary captures sufficient value.
-- "discard": Unlikely to interest this user based on their demonstrated preferences.
-
-Respond with JSON only — no markdown fences, no commentary:
-{{
-  "classifications": [
-    {{"article_id": 1, "tier": "must-read", "reason": "brief explanation"}},
-    ...
-  ]
-}}"""
+    Args:
+        article_title: Title of the source article.
+        article_summary: Summary of the source article.
+        related_context: Pre-formatted lines describing the related articles
+            (see `tiro.search.semantic.generate_connection_notes`).
+    """
+    return load_template("connection_notes").format(
+        article_title=article_title,
+        article_summary=article_summary,
+        related_context=related_context,
+    )
