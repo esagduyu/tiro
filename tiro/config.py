@@ -90,6 +90,10 @@ class TiroConfig:
     def chroma_dir(self) -> Path:
         return self.library / "chroma"
 
+    @property
+    def wiki_dir(self) -> Path:
+        return self.library / "wiki"
+
 
 def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
     """Load configuration from a YAML file, falling back to defaults."""

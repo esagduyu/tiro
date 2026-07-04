@@ -224,6 +224,7 @@ async def lifespan(app: FastAPI):
     # Ensure library directories exist
     config.articles_dir.mkdir(parents=True, exist_ok=True)
     (config.library / "audio").mkdir(parents=True, exist_ok=True)
+    config.wiki_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize SQLite + run migrations
     init_db(config.db_path)

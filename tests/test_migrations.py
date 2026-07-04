@@ -164,3 +164,14 @@ def test_entity_merge_migration(tmp_path):
     links = conn.execute("SELECT COUNT(*) FROM article_entities").fetchone()[0]
     assert links == 1
     conn.close()
+
+
+def test_wiki_dir_property(test_config):
+    """config.wiki_dir resolves next to articles/, db, chroma (Phase 1b prep)."""
+    assert test_config.wiki_dir == test_config.library / "wiki"
+
+
+def test_wiki_dir_reserved(client, initialized_library):
+    """Lifespan (run via the `client` fixture's TestClient context manager)
+    creates wiki/ alongside the other library directories."""
+    assert (initialized_library.library / "wiki").is_dir()
