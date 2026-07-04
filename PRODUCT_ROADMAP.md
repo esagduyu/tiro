@@ -1,8 +1,8 @@
 # Project Tiro — Product Roadmap
 
 Review date: 2026-05-25
-Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03)
-Status: Phase 0 (Security & Integrity) is **complete — shipped as the 0.2.0 public alpha** on `main`. Next up: Phase 1 (read "Decisions Made" #0 before planning it). Origin: hackathon top-30 (out of ~500).
+Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03); 2026-07-04 (v0.2.0 tagged; Decisions #7–8: AI-layer plan, subscription-CLI backends, LLM wiki; Phase 1 foundation milestone expanded; Phase 1b added)
+Status: Phase 0 (Security & Integrity) is **complete — shipped and tagged `v0.2.0`** on `main` (2026-07-04). Next up: Phase 1, which now **opens with the Foundation Milestone (M1.0)** — read "Decisions Made" #0, #7, and #8 before planning it. Origin: hackathon top-30 (out of ~500).
 
 ## How To Use This Document
 
@@ -60,7 +60,7 @@ The product itself decomposes into three components the phases advance: (1) the 
 ## External Product Assumptions
 
 - **Tailscale Serve** is the default recommendation for private access; it exposes a local service only inside the user's tailnet. **Tailscale Funnel** is useful later for public sharing but is a distinct risk class because it exposes a service to the broader internet. See Tailscale's docs for [Serve](https://tailscale.com/docs/reference/tailscale-cli/serve) and [Funnel](https://tailscale.com/docs/features/tailscale-funnel).
-- **Claude paid plans and the Anthropic API are separate products.** A Claude Pro or Max subscription is not a backend API entitlement. See Anthropic's [Claude paid plans vs. API access](https://support.anthropic.com/en/articles/8114521-how-can-i-access-the-claude-api). Tiro must not treat consumer subscriptions as automation surfaces.
+- **Claude paid plans and the Anthropic API are separate products.** A Claude Pro or Max subscription is not a backend API entitlement. See Anthropic's [Claude paid plans vs. API access](https://support.anthropic.com/en/articles/8114521-how-can-i-access-the-claude-api). Tiro never drives consumer *web UIs*; headless **agent-CLI backends** (`claude -p`, Codex CLI) are a distinct, owner-decided surface for the local-only alpha — see Decision #7 for scope, ToS caveats, and the hard rule that hosted Tiro (7b) never touches subscription credentials.
 - **OpenAI's agent direction** points toward tool-using workflows, evals, and embeddable agent experiences. Tiro should expose its library through tools and agent contracts rather than only direct one-off model calls. See [OpenAI Agents documentation](https://platform.openai.com/docs/guides/agents).
 - **MCP remains strategically important** because it lets external assistants use Tiro as a knowledge tool. See the [Claude Code SDK MCP docs](https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-mcp).
 
@@ -259,6 +259,36 @@ None. This is the foundation phase.
 **Goal:** Make the local-first data promise credible end-to-end: rename, merge, restore, back up.
 
 > **Amended 2026-07-03 — see "Decisions Made" #0:** pull a Dockerfile/compose and a minimal second AI provider (Ollama or OpenAI) forward into this phase, plus the post-Phase-0 review deferrals for its first commit.
+>
+> **Amended 2026-07-04 — see "Decisions Made" #7 and #8:** the phase now **opens with the Foundation Milestone (M1.0)** below, consolidated from the 2026-07-04 strategic code review, the AI-layer decisions, and the LLM-wiki design exploration (local reports: `docs/plans/2026-07-04-strategic-code-review.md`, `...-llm-wiki-design-exploration.md`). M1.0 is mostly mechanical (~agent-week) and is a prerequisite for everything else in this phase and Phase 1b.
+
+### Foundation Milestone (M1.0) — first milestone of this phase
+
+Infrastructure that every later phase builds on, landed as one milestone before feature work:
+
+**Dev infrastructure:**
+- **CI**: GitHub Actions workflow — `uv run pytest`, `ruff check` + `ruff format --check`, the Python 3.11 syntax gate. The repo is public AGPL with a CONTRIBUTING.md and currently has zero CI; this is the highest-leverage single hour in the codebase. (mypy optional as a non-blocking second job to start.)
+- **Migration framework** (pulled forward from Phase 5): `tiro/migrations/` with versioned migrations, `tiro migrate` CLI, auto-backup before running. Phases 1–2 add six-plus tables; do not hand-ALTER them.
+- **Cache-bust as a Jinja global** injected by `create_app` instead of the hand-bumped `?v=N` counter across templates.
+
+**Data foundation:**
+- **`uid` ULID columns on `articles`, `entities`, and `tags`** (integer PKs stay for joins; ULIDs become the stable external identity). Retrofit under a live sync protocol (7a) would be XL; adding them now is S. Wiki pages, sidecars, audio filenames, and export formats key on ULIDs from here on.
+- **SQLite indexes** for the hot query patterns (articles list sort, junction lookups, sessions/api_tokens lookups) plus a generated/indexed `display_date` to replace unindexable `COALESCE(published_at, ingested_at)` sorts.
+- **Data-access layer start**: one module owning the article-list SQL (currently duplicated ×4, with a fifth variant drifting in the MCP server). Full repository pattern not required — just kill the copies.
+
+**AI layer (Decision #7):**
+- **`llm_call()` chokepoint** in `tiro/ai.py` (or similar): all five call sites route through it; call sites request a *capability tier* (`heavy` | `light`), never a model name; config maps tiers to `(provider, model)`. JSON parsing/fence-stripping/error-handling live here once. Audit logging moves inside it.
+- **Prompts as data**: templates move out of code into versioned template files so personas (Phase 6) and the wiki (Phase 1b) can treat prompts as content.
+- **Backends**: `anthropic-api` (today's behavior), plus the minimal second API provider from Decision #0 (Ollama or OpenAI/Gemini), plus **agent-CLI backends** (`claude-cli`, `codex-cli`) per Decision #7 — subprocess `-p`-style invocation, JSON envelope parsing, settings-isolated spawn, install/login detection surfaced in Settings, plan-rate-limit errors handled gracefully. CLI backends default to the `heavy` tier only (spawn latency makes them wrong for batch extraction).
+- **Fake-LLM test seam**: a scripted `llm_call` backend for tests, so the intelligence layer stops being tested only by its absence.
+- **Extraction quality fixes** (wiki prerequisite, Decision #8): remove the 2,000-char truncation in Haiku extraction (summaries are the wiki's raw material); add entity canonicalization pass (dedupe "OpenAI"/"Open AI") on top of the new entity ULIDs.
+
+**Scheduler & lifecycle:**
+- **`PeriodicTask` scheduler registry** (pulled forward from Phase 4's RSS plan): one abstraction owning the IMAP, digest, and vector-retry loops (currently three ad-hoc `app.state.*_task` patterns). Wiki sync/lint (Phase 1b) and RSS (Phase 4) become registrations, not new copies.
+- **`wiki/` reserved** in the library layout and included in the Phase 1 backup/export schema (see Decision #8 for its store semantics).
+- **Phase-0 review deferrals** (from Decision #0): vector-metadata parity in `retry_pending_vectors`; audit-log the TTS mid-stream disconnect and `imap.search` raise paths.
+
+**Explicitly deferred out of M1.0** (decided, not forgotten): the ChromaDB → sqlite-vec migration + chunked embeddings (decide at this phase's backup-design point, land before 7a — backup must export embeddings portably either way); the app.js/reader.js ES-module restructuring (lands at the start of Phase 2, before highlight anchoring).
 
 ### Why this phase, why now
 
@@ -336,6 +366,58 @@ This phase also closes the export story (notes/highlights are not in it yet — 
 
 ---
 
+## Phase 1b — Library Wiki (MVP)
+
+**Release target:** `0.3.5 wiki-alpha`
+**Relative complexity:** M
+**Goal:** Ship the first cut of the LLM-maintained wiki: on-demand synthesis pages over the user's library, compiled and owned by the LLM, browsable from the knowledge graph.
+
+> Full design: `docs/plans/2026-07-04-llm-wiki-design-exploration.md` (local). Strategic rationale: Decision #8. Inspired by Karpathy's LLM-wiki pattern; his own framing — "room here for an incredible new product instead of a hacky collection of scripts" — is the positioning: Tiro already ships every piece of that stack except the compiled-wiki middle layer.
+
+### Why this phase, why now
+
+Per-item summaries are commoditized (Decision #0); cross-document synthesis is Tiro's position. The wiki is that position made concrete: entity/concept pages that compound as the library grows, turning the knowledge graph from a visualization into a destination. It lands directly after Phase 1 because M1.0 provides everything it needs (`llm_call`, ULIDs, scheduler registry, extraction fixes, `wiki/` in the export schema) and because the MVP cut is deliberately zero-background-cost, zero-compounding-risk — the trust problem is designed out before automation is added.
+
+### In scope (the W1 cut)
+
+- `{library}/wiki/` of LLM-generated markdown pages (entity/concept kinds first), ULID-keyed frontmatter, Obsidian-compatible `[[wikilinks]]`, **mandatory citations** back to source articles on every claim.
+- **On-demand generation only**: a wiki page is created/refreshed when the user asks — from a knowledge-graph node click or a `/wiki/{slug}` view. No background synthesis in W1.
+- `wiki/index.md` + `wiki/log.md` maintained on every generation (Karpathy's bookkeeping layer; also the human-auditable trail).
+- `wiki/_schema.md` — the user-editable schema/instructions document injected into generation prompts (Layer 3; doubles as the future wiki-maintainer persona prompt).
+- **Staleness is mark-only**: new/deleted articles flip a cheap `stale` flag on affected pages (computable from the existing entity/tag junctions); stale pages show a badge and a one-click regenerate. No auto-regeneration.
+- **Trust rules (non-negotiable, from the design report)**: page updates consume article *summaries* + the prior page only — the wiki never reads the wiki (no compounding-error loops); sources stay immutable; regenerate-from-scratch always available per page and library-wide; wiki markdown renders through the same marked→DOMPurify path as digests (M3 invariant extends to it).
+- **Trust-weighted synthesis**: generation prompts include per-source rating/VIP/decay signals so pages weight what the user has vetted (the Tiro-native differentiator).
+- MCP: `get_wiki_page`, `list_wiki_pages` tools.
+- Store semantics (decided): the wiki is a **files-as-truth fifth artifact** — backed up and exported (it embodies user-directed work), SQLite holds only a derived index, `tiro doctor` reconciles the index but never deletes pages.
+
+### Out of scope (deferred to later waves)
+
+- **W2** — nightly incremental sync (scheduled Haiku batch over stale pages, ~$1–3/mo posture) + the digest gaining a "what changed in your knowledge" wiki-diff section. Lands once W1 pages prove trustworthy.
+- **W3** — lint: contradiction detection, orphan pages, missing-concept proposals, and lint-proposes-next-reads (the wiki suggesting what to save next — library becomes self-extending under explicit user acceptance).
+- **W4** — wiki maintainers (ingester/linter/synthesizer) folded into the Phase 6 persona/plugin system.
+- Reading-telemetry-driven importance scoring (see Decision #8 — signals land in Phase 2, the model later).
+- Synthetic-data/finetuning on the library (parked 7b-era north star).
+
+### Dependencies
+
+- Phase 1 M1.0 complete: `llm_call()` + tiers, prompts-as-data, ULIDs on entities/tags, extraction truncation fix + entity canonicalization (dirty entities would poison pages — hard prerequisite), scheduler registry (W2), `wiki/` in export schema.
+
+### Acceptance criteria
+
+- Clicking a graph node with ≥2 linked articles offers/renders a wiki page whose every claim carries a citation resolving to a saved article.
+- Saving a new article touching an existing page's entity marks it stale within one ingest cycle; regeneration incorporates it.
+- Deleting an article leaves no dangling citations after regeneration; `tiro doctor` reports wiki-index drift without touching page files.
+- `wiki/` round-trips through backup/export/import; hand-deleting the whole directory and regenerating from scratch produces a coherent wiki.
+- A hostile string in an article title/summary does not execute when the wiki page renders.
+
+### Risks and gotchas
+
+- **A subtly-wrong wiki is worse than none** — it erodes the exact trust the product sells. The W1 posture (on-demand, cited, human-triggered) is the mitigation; do not let W2 automation creep in early.
+- **Cost surprise**: generation is user-triggered Opus/heavy-tier; show cost estimates (audit-log pricing table) in the UI before bulk operations ("regenerate all").
+- **Entity quality is the ceiling**: if canonicalization misses duplicates, the wiki fragments. Watch `tiro doctor`-style metrics on entity dedupe before enabling W2.
+
+---
+
 ## Phase 2 — Highlights & Notes
 
 **Release target:** `0.4 reader-memory-beta`
@@ -393,6 +475,7 @@ This phase comes before desktop packaging (Phase 5) because packaging an app who
 - Sent from the reader as a single `PATCH /api/articles/{id}/session` on `visibilitychange→hidden` or `beforeunload`; debounced to avoid network churn.
 - Feed into Phase 6 preference classifier as a richer signal than the current binary read/unread.
 - Strictly local; never transmitted off-device unless cloud sync is opted in.
+- **These signals are also the wiki's importance/trust input (Decision #8)**: %-read, active seconds, likes, and favorited authors let wiki synthesis weight what the user actually engaged with, not just what they hoarded — the primary defense against a poisoned/noisy wiki. Longer-term (post-Phase-6): an opt-in, **locally-running lightweight importance model** trained on these signals (ratings + engagement + VIP as labels) scores articles/claims continuously; the score feeds wiki page weighting and digest ranking. Local inference only (same posture as the sentence-transformers embeddings); never a cloud call.
 
 **Obsidian-vault compatibility** (on-disk format only — bidirectional sync is Phase 2b):
 - New config flag: `obsidian_compatible_mode: bool`. When true:
@@ -855,6 +938,14 @@ Crucially, this phase is *sixth*, not earlier, because the right abstractions fo
 - `TemporalAnalyst` — tracks how coverage of a topic evolves over time across the user's sources. Output is a timeline with stance/framing annotations. Triggered ad-hoc ("how has coverage of X shifted?") and as a monthly digest section.
 - `SourceAuthorityScorer` — builds a PageRank-style authority graph from hyperlinks preserved within saved articles. Sources frequently cited by other saved articles gain authority. Surfaces in the knowledge graph as "foundational sources" and feeds into digest ranking as a tiebreaker.
 - `MultiModelAnalyst` — runs the same analysis prompt through multiple models (Opus, Sonnet, GPT-4, Gemini, local) and surfaces disagreement. Useful both for reducing AI-layer bias and as a power-user feature.
+- `WikiMaintainer` persona set — the Phase 1b wiki's ingester/synthesizer/linter operations re-homed as first-class agents (Decision #8, wave W4). `wiki/_schema.md` is literally their prompt; the wiki becomes the flagship demonstration of the runtime.
+- `ImportanceScorer` — the opt-in local model over reading-telemetry signals (see Phase 2 instrumentation); its scores feed wiki weighting and digest ranking.
+
+**Agent personas (the user-facing form of the runtime — Decision #8):**
+- A persona is a spec file in `{library}/personas/`: markdown body = prompt template; YAML frontmatter declares `scope` (`article` | `day` | `query` | `library`), `schedule` (on-ingest / cron-style / manual), model tier (`heavy`/`light`), and `output` target (note, digest section, wiki page, tier suggestion).
+- Today's four AI features (metadata extractor, digest writer, analyst, classifier) ship as the built-in persona set — user-readable, user-forkable, exactly the Obsidian core-plugins move. The agent-migration work above and personas are the same work seen from two sides.
+- Personas are shareable (a persona file is self-contained); community personas are the most likely first plugin ecosystem.
+- **Sandboxing is in the spec from v1, not retrofitted**: no network access, read access to library content, write access only to the declared output target, outputs rendered through the standard sanitize path and never fed to other personas as trusted instructions (prompt-injection posture: persona prompts from the community are untrusted input).
 
 **Provider adapters**:
 - `AnthropicProvider` (Opus + Haiku).
@@ -1120,10 +1211,10 @@ Land the local logging and AI audit log in Phase 0; extend the audit log per pha
 
 ### Subscription-AI Bridge
 
-- Many users have Claude Pro / ChatGPT Plus / Gemini Advanced subscriptions. They cannot be programmatically driven by Tiro (terms-of-service and product reality).
-- Tiro's posture: **expose**, don't automate. MCP server is the primary surface; "handoff" workflows are the secondary surface.
-- Handoff: a button that creates a "task packet" (article IDs + highlights + notes + a prompt template), copies it to clipboard, opens the user's preferred assistant.
-- Prompt packs: a small library of useful prompts paired with MCP recipes for Claude Code, Claude Desktop, ChatGPT, Gemini, and local assistants.
+- Many users have Claude Pro / ChatGPT Plus / Gemini Advanced subscriptions and no API key. Three surfaces serve them, in order of standing:
+  1. **Expose** (always): MCP server as the primary surface — the user's own assistant works the library.
+  2. **Handoff** (Phase 2): a button that creates a "task packet" (article IDs + highlights + notes + a prompt template), copies it to clipboard, opens the user's preferred assistant. Prompt packs with MCP recipes for Claude Code, Claude Desktop, ChatGPT, Gemini, and local assistants.
+  3. **Agent-CLI backends** (Phase 1 M1.0, local-only alpha — Decision #7): headless `claude -p` / Codex CLI invocations of the user's own locally-authenticated CLI as an `llm_call()` backend. Owner-decided path-of-least-resistance for subscription holders; carries the ToS caveats and hosted-mode prohibition recorded in Decision #7. Web-UI automation remains permanently out (see Out-Of-Scope).
 
 Land MCP-side improvements in Phase 6 (agent runtime). Land handoff UI in Phase 2 (notes) since highlights/notes are the most valuable content for assistant handoff.
 
@@ -1152,7 +1243,7 @@ These are high-value but each is a multi-week project with significant ongoing m
 The following are non-goals through Phase 7b. Some are permanent ("never"); others are **deferred-but-not-killed** with explicit revisit triggers. Planning agents should not drift into them; product strategy may revisit per the trigger.
 
 **Permanent non-goals:**
-- **Automating consumer chat subscriptions.** Tiro does not drive Claude Pro / ChatGPT Plus / Gemini Advanced web UIs. Subscription users are served via MCP and handoff workflows, never via web automation.
+- **Automating consumer chat subscriptions via their web UIs.** Tiro does not drive Claude.ai / ChatGPT / Gemini Advanced web interfaces — no browser automation, ever. (Headless *agent-CLI* backends running the user's own locally-authenticated CLI are a separate, narrowly-scoped surface governed by Decision #7 — local-only alpha, ToS-caveated, never hosted.)
 - **Generic note-taking app.** Notes serve articles; Tiro is not a Notion replacement.
 - **In-app web browsing.** Tiro is downstream of save events, not a browser.
 - **Building yet another AI chat UI.** Tiro is a reading OS that *uses* AI; it is not a chatbot.
@@ -1187,6 +1278,17 @@ Strategic decisions that were Open Questions in earlier roadmap revisions but ha
 
 6. **Social posture: deferred with explicit trigger.** Single-user only through Phase 7b. Revisit when **≥10k MAU OR ≥100 distinct user requests for cross-user sharing**, whichever comes first. Phase 7b's architecture (per-user encrypted blobs) keeps the future open without committing to it.
 
+7. **2026-07-04 — AI layer: provider-agnostic in three stages; subscription-CLI backends in the local alpha.** Full inputs: 2026-07-04 strategic code review + `claude -p` ToS scoping (local reports in `docs/plans/`).
+   - **Staging**: (A) Phase 1 M1.0 ships the `llm_call()` chokepoint — call sites request capability *tiers* (`heavy`/`light`), config maps tiers to `(provider, model)`, prompts move to data. (B) The same milestone lands the first non-Anthropic API backend (Decision #0), which is what actually validates the abstraction. (C) Broad agnosticism (OpenAI-compatible generic endpoint + Ollama local) rides on B nearly free and lands with/before Phase 6's provider adapters. Thin hand-rolled adapter; no LangChain/LiteLLM-class dependency.
+   - **Agent-CLI backends (owner decision)**: most target users already pay for an AI subscription; the path of least resistance matters more than API-key purity for the local alpha. M1.0 therefore ships `claude-cli` and `codex-cli` backends: subprocess headless invocation of the **user's own locally-installed, locally-authenticated** CLI, JSON envelope parsed, settings-isolated spawn (no MCP/instruction-file leakage), install/login detection in Settings, plan-rate-limit errors surfaced gracefully. Default to `heavy`-tier work only (digests/analysis) — spawn latency and plan rate-windows make CLIs wrong for batch extraction.
+   - **Recorded caveats (eyes-open decision)**: Anthropic's Claude Code legal terms state third-party developers should use API keys and may not route requests through consumer-plan credentials; the owner's read is that a local-only, open-source app spawning the user's own CLI on their own machine is materially different from a hosted service intermediating credentials, and accepts the residual risk **for the local alpha**. Mitigations: feature is opt-in in Settings (never default), labeled experimental with the ToS note, disabled the moment a hosted context is detected, and **Tiro Cloud (7b) and any Tiro-operated runtime never touch subscription auth — API-key/managed-quota only there, no exceptions**. Codex CLI's terms need the equivalent check before that backend ships (Open Strategic Question #8). Seeking written clarification from Anthropic/OpenAI is the standing action item; if either says no, the corresponding backend is dropped without architectural loss (it's one backend behind the chokepoint).
+
+8. **2026-07-04 — LLM wiki adopted as the synthesis strategy; reading-telemetry as its trust signal.** Full design: `docs/plans/2026-07-04-llm-wiki-design-exploration.md` (local). Inspired by Karpathy's LLM-wiki pattern (immutable sources → LLM-compiled wiki → schema; ingest/query/lint), adapted to Tiro's economics and trust posture.
+   - **Shape**: `{library}/wiki/` as a files-as-truth fifth artifact (backed up/exported; SQLite is a derived index; doctor reconciles the index, never deletes pages). Entity/concept pages with mandatory citations; `wiki/_schema.md` as the user-editable Layer 3 that later becomes the wiki-maintainer persona prompt. The knowledge graph becomes the wiki's map.
+   - **Phasing**: W1 MVP ships as **Phase 1b** (on-demand only, mark-stale, zero background cost); W2 nightly sync + digest-as-knowledge-diff; W3 lint incl. lint-proposes-next-reads; W4 folds maintainers into Phase 6 personas. Finetuning-on-your-library: parked, 7b-era.
+   - **Anti-poisoning posture** (the design's central risk): mandatory citations; page updates consume article summaries + prior page only (wiki never reads wiki); regenerate-from-scratch always available; on-demand ships before any automation; extraction-quality fixes (truncation, entity canonicalization) are hard prerequisites in M1.0. **Reading telemetry is the importance signal** (owner direction): local-only %-read/active-seconds/likes/favorited-authors (Phase 2 instrumentation) weight wiki synthesis toward what the user actually engaged with; later, an opt-in locally-running lightweight importance model trained on those signals scores content continuously (local inference only — same posture as local embeddings, never a cloud call, consistent with the telemetry principles: local by default, opt-in for anything more).
+   - **Agent personas confirmed as the Phase 6 user-facing frame**: spec files (prompt + scope + schedule + output target) in `{library}/personas/`, shareable; today's four AI features become the built-in set; sandboxing in the spec from v1. M1.0 builds the prerequisites (prompts-as-data, tiers, scheduler registry), not the framework.
+
 ## Open Strategic Questions
 
 These remain unresolved and need product decisions before the relevant phase begins.
@@ -1198,6 +1300,7 @@ These remain unresolved and need product decisions before the relevant phase beg
 5. **Plugin sandboxing approach.** Process isolation? WASM? Trust-the-user-with-warnings? Phase 6 ships without a sandbox; the answer to this question determines when sandboxing becomes mandatory.
 6. **Pricing point ($X/mo).** The model is decided (single tier); the actual number is not. Calibrate against Obsidian Sync (~$8/mo), Readwise Reader (~$8/mo), and the cost of the bundled AI quota. Recommendation: pick after Phase 6 lands so the actual hosted-AI cost is known, not estimated.
 7. **AGPL compatibility for dependencies.** Some existing dependencies may have license terms that interact awkwardly with AGPL. Pre-Phase-0 audit: list every dependency, confirm compatibility, find replacements for any that conflict.
+8. **Agent-CLI backend ToS clarity.** Decision #7 ships `claude-cli`/`codex-cli` backends for the local alpha under recorded caveats. Standing actions before they graduate from "experimental": (a) request written clarification from Anthropic on local-only open-source use of `claude -p` with the user's own login; (b) run the equivalent ToS check on OpenAI's Codex CLI before that backend ships at all; (c) drop either backend without ceremony if the answer is no.
 
 ---
 
