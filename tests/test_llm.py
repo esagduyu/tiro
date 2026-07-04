@@ -26,6 +26,12 @@ def test_strip_json_fences():
     assert json.loads(strip_json_fences(fenced)) == {"a": 1}
     assert strip_json_fences('{"a": 1}') == '{"a": 1}'
     assert strip_json_fences('```\n{"a": 1}\n```') == '{"a": 1}'
+    # No newline after the opening fence (was: IndexError on cleaned.split
+    # ("\n", 1)[1] — a fenced response with no newline anywhere).
+    no_newline = '```json{"a": 1}```'
+    assert json.loads(strip_json_fences(no_newline)) == {"a": 1}
+    # Bare fence with nothing else (was: same IndexError).
+    assert strip_json_fences("```") == ""
 
 
 def test_resolve_tier_defaults_to_legacy_model_fields(test_config):

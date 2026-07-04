@@ -169,12 +169,40 @@ def _m005_entity_canonical(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m006_phase0_tables(conn: sqlite3.Connection) -> None:
+    """Phase-0 tables (sessions, api_tokens) for pre-auth legacy DBs.
+
+    init_db() creates the full schema only for FRESH databases; every table
+    added to SCHEMA after the original hackathon schema needs an idempotent
+    migration like this one (see module docstring — this migration is the
+    contract's first practice)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
     (3, "uid ULID columns on articles/entities/tags", _m003_uid_columns),
     (4, "display_date + hot-path indexes", _m004_indexes),
     (5, "entity canonical_key + duplicate merge", _m005_entity_canonical),
+    (6, "phase-0 tables (sessions/api_tokens) for pre-auth DBs", _m006_phase0_tables),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

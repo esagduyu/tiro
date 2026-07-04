@@ -33,6 +33,7 @@ haiku_model: "claude-haiku-4-5-20251001"
 # AI backend routing (optional). Tiers map to providers+models; defaults use
 # Anthropic with opus_model/haiku_model above.
 # Providers: anthropic | openai-compatible | claude-cli | codex-cli
+# When changing a provider, set the matching ai_*_model too — the defaults are Anthropic model names.
 # ai_heavy_provider: "anthropic"
 # ai_light_provider: "anthropic"
 # ai_heavy_model: null            # defaults to opus_model

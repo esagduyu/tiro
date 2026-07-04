@@ -113,6 +113,53 @@ def test_startup_order_on_legacy_db(tmp_path):
     conn.close()
 
 
+def test_legacy_db_gets_phase0_auth_tables(tmp_path):
+    """A hackathon-era DB (predates auth entirely — no sessions/api_tokens
+    tables) must come out of the app.py lifespan (init_db + migrate_db) able
+    to actually authenticate: create_session/create_api_token must work
+    against real tiro.auth, not just "the table exists" (was:
+    OperationalError: no such table: sessions on first login)."""
+    import sqlite3
+
+    from tiro import auth
+
+    db = tmp_path / "tiro.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "domain TEXT, email_sender TEXT, source_type TEXT NOT NULL, "
+        "is_vip BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute(
+        "CREATE TABLE articles (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "title TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, markdown_path TEXT NOT NULL)"
+    )
+    conn.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+    conn.execute(
+        "CREATE TABLE entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "entity_type TEXT NOT NULL, UNIQUE(name, entity_type))"
+    )
+    conn.execute("INSERT INTO articles (title, slug, markdown_path) VALUES ('t', 's', 'f.md')")
+    conn.commit()
+    conn.close()
+
+    from tiro.database import init_db, migrate_db
+
+    init_db(db)      # legacy DB already has `articles` -> no-op fresh-schema path
+    migrate_db(db)   # app.py lifespan order
+
+    session_token = auth.create_session(db)
+    assert auth.validate_session(db, session_token)
+
+    api_token = auth.create_api_token(db, "mcp")
+    assert auth.validate_api_token(db, api_token)
+
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0] == 1
+    conn.close()
+
+
 def test_display_date_and_indexes(tmp_path):
     db = tmp_path / "tiro.db"
     init_db(db)

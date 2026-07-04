@@ -10,7 +10,7 @@ import frontmatter
 from mcp.server.fastmcp import FastMCP
 
 from tiro.config import TiroConfig, load_config
-from tiro.database import get_connection
+from tiro.database import get_connection, init_db, migrate_db
 from tiro.queries import build_article_filters
 from tiro.vectorstore import get_collection, init_vectorstore
 
@@ -75,6 +75,13 @@ def _get_config() -> TiroConfig:
     global _config
     if _config is None:
         _config = load_config(_config_path())
+        # Mirror the app.py lifespan order: bring SQLite up to the latest
+        # schema (both idempotent/user_version-gated) before any query runs,
+        # since MCP SQL relies on columns added after the hackathon schema
+        # (display_date, uid) and, on legacy DBs, the Phase-0 auth tables
+        # that _require_token_gate() below queries via tiro.auth.
+        init_db(_config.db_path)
+        migrate_db(_config.db_path)
         # Initialize ChromaDB so get_collection() works
         init_vectorstore(_config.chroma_dir, _config.default_embedding_model)
     # Enforced on every call (not just first init) so token revocation takes

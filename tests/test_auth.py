@@ -487,6 +487,53 @@ def test_mcp_gate_enforced_per_call_after_revocation(configured_library, monkeyp
         mcp_server._get_config()  # revocation now bites on next call
 
 
+def test_mcp_get_config_migrates_legacy_db(tmp_path, monkeypatch):
+    """_get_config() must bring a hackathon-era DB (predates the auth tables
+    entirely) up to the latest schema on first init, the same way app.py's
+    lifespan does — otherwise MCP queries relying on post-hackathon columns
+    (display_date/uid) 500, and tools that touch auth (token gating) hit
+    'no such table: sessions'."""
+    import sqlite3
+
+    import tiro.mcp.server as mcp_server
+
+    db = tmp_path / "tiro.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "domain TEXT, email_sender TEXT, source_type TEXT NOT NULL, "
+        "is_vip BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute(
+        "CREATE TABLE articles (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "title TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, markdown_path TEXT NOT NULL)"
+    )
+    conn.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+    conn.execute(
+        "CREATE TABLE entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "entity_type TEXT NOT NULL, UNIQUE(name, entity_type))"
+    )
+    conn.commit()
+    conn.close()
+
+    legacy_config = TiroConfig(library_path=str(tmp_path))
+    monkeypatch.setattr(mcp_server, "_config", None)
+    monkeypatch.setattr(mcp_server, "load_config", lambda *a, **k: legacy_config)
+    monkeypatch.setattr(mcp_server, "init_vectorstore", lambda *a, **k: None)
+
+    mcp_server._get_config()  # must not raise
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+    ).fetchone()
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_tokens'"
+    ).fetchone()
+    conn.close()
+
+
 def test_cross_site_setup_rejected(auth_client, client):
     # On a configured library, "already configured" would also 403 here even
     # if CSRF were removed — so the status code alone doesn't pin CSRF.

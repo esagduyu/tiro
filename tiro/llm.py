@@ -41,7 +41,14 @@ def strip_json_fences(text: str) -> str:
     from analysis.py, now centralized.)"""
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        parts = cleaned.split("\n", 1)
+        if len(parts) == 2:
+            cleaned = parts[1].rsplit("```", 1)[0].strip()
+        else:
+            # No newline after the opening fence (e.g. '```json{"a": 1}```'
+            # or a bare '```') — fall back to stripping backticks/language
+            # tag defensively instead of crashing on a malformed response.
+            cleaned = cleaned.strip("`").removeprefix("json").strip()
     return cleaned
 
 

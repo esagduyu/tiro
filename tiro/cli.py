@@ -681,7 +681,10 @@ def main():
     audit_group = audit_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
     audit_group.add_argument("--month", help="Month summary (YYYY-MM)")
-    audit_parser.add_argument("--service", help="Filter by service (anthropic/openai_tts/imap/smtp)")
+    audit_parser.add_argument(
+        "--service",
+        help="Filter by service (anthropic/openai_tts/imap/smtp/openai-compatible/claude-cli/codex-cli)",
+    )
     audit_parser.add_argument("--json", action="store_true")
 
     token_parser = subparsers.add_parser("token", help="Manage API tokens")
