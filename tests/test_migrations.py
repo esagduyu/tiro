@@ -52,3 +52,37 @@ def test_legacy_column_migrations_are_idempotent(tmp_path):
     assert "ingestion_method" in cols and "vector_status" in cols
     conn.close()
     run_migrations(db)  # must not raise "duplicate column name"
+
+
+def test_uid_migration_backfills_unique_ulids(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO articles (source_id, title, slug, markdown_path) VALUES (1, ?, ?, ?)",
+            (f"t{i}", f"slug-{i}", f"f{i}.md"),
+        )
+    conn.execute("INSERT INTO tags (name) VALUES ('ai')")
+    conn.execute("INSERT INTO entities (name, entity_type) VALUES ('OpenAI', 'company')")
+    conn.commit()
+    # Fresh init_db already stamps LATEST_VERSION and SCHEMA includes uid —
+    # so simulate the pre-uid world: version back to 2, columns dropped is not
+    # possible in SQLite, so instead assert the backfill path fills NULLs.
+    conn.execute("UPDATE articles SET uid = NULL")
+    conn.execute("UPDATE tags SET uid = NULL")
+    conn.execute("UPDATE entities SET uid = NULL")
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+
+    conn = get_connection(db)
+    uids = [r[0] for r in conn.execute("SELECT uid FROM articles").fetchall()]
+    assert all(u and len(u) == 26 for u in uids)
+    assert len(set(uids)) == 3
+    assert conn.execute("SELECT uid FROM tags").fetchone()[0]
+    assert conn.execute("SELECT uid FROM entities").fetchone()[0]
+    conn.close()

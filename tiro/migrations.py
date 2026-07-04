@@ -45,9 +45,39 @@ def _m002_vector_status(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE articles SET vector_status = 'indexed' WHERE vector_status = 'pending'")
 
 
+def new_ulid() -> str:
+    """Stable external identity for rows (sortable, 26 chars). All new
+    articles/entities/tags get one at insert; sync and the wiki key on it."""
+    from ulid import ULID
+
+    return str(ULID())
+
+
+def _has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _m003_uid_columns(conn: sqlite3.Connection) -> None:
+    for table in ("articles", "entities", "tags"):
+        if not _has_table(conn, table):
+            continue
+        if not _has_column(conn, table, "uid"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN uid TEXT")
+        rows = conn.execute(f"SELECT rowid FROM {table} WHERE uid IS NULL").fetchall()
+        for row in rows:
+            conn.execute(f"UPDATE {table} SET uid = ? WHERE rowid = ?", (new_ulid(), row[0]))
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
+    (3, "uid ULID columns on articles/entities/tags", _m003_uid_columns),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

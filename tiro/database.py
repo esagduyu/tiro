@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS sources (
 -- Articles (core content metadata)
 CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     source_id INTEGER REFERENCES sources(id),
     title TEXT NOT NULL,
     author TEXT,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS articles (
 -- Tags (extracted topics)
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT UNIQUE NOT NULL
 );
 
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS article_tags (
 -- Named entities (people, companies, orgs)
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     UNIQUE(name, entity_type)
@@ -125,6 +128,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
 """
 
 
