@@ -8,9 +8,14 @@ databases, taking a file-copy backup of tiro.db first.
 Writing a migration:
 - append (N, "name", fn) to MIGRATIONS with N = previous max + 1
 - fn(conn) must be IDEMPOTENT where cheap (column-adds check PRAGMA
-  table_info) because pre-framework libraries sit at user_version 0 with
+  table_xinfo, not table_info — table_info hides VIRTUAL/STORED generated
+  columns) because pre-framework libraries sit at user_version 0 with
   some later state already present
 - update database.SCHEMA to match the end state for fresh installs
+- init_db() creates the full schema only for FRESH databases (no
+  `articles` table). Adding a NEW TABLE to SCHEMA therefore requires a
+  matching idempotent CREATE TABLE IF NOT EXISTS migration here —
+  existing databases never re-run SCHEMA.
 """
 
 import logging

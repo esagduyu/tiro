@@ -168,7 +168,8 @@ def run_codex_cli(config: TiroConfig, model: str, prompt: str, *,
 
 
 def check_cli_backend(config: TiroConfig, provider: str) -> str:
-    """Cheap install/auth probe for `tiro status`. Never raises."""
+    """Cheap install probe for `tiro status`. Returns "ok" or "not installed"
+    (does not check auth — never raises)."""
     name = config.ai_claude_cli_path if provider == "claude-cli" else config.ai_codex_cli_path
     exe = _resolve_binary(name)
     if not exe:

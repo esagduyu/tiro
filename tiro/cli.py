@@ -467,7 +467,7 @@ def cmd_migrate(args):
     from tiro.config import load_config
     from tiro.migrations import run_migrations
 
-    config = load_config(args.config)
+    config = getattr(args, "_config_override", None) or load_config(args.config)
     if not config.db_path.exists():
         print("No Tiro library found. Run `uv run tiro init` first.")
         sys.exit(1)

@@ -47,7 +47,7 @@ haiku_model: "claude-haiku-4-5-20251001"
 # Anthropic's Claude Code terms direct third-party products to API keys; you
 # are choosing to run your own CLI on your own machine. Slow for batch work —
 # recommended for the heavy tier only (digests/analysis).
-# ai_heavy_provider: "claude-cli"
+# set ai_heavy_provider above to "claude-cli" to enable
 # ai_claude_cli_path: "claude"
 # ai_codex_cli_path: "codex"
 

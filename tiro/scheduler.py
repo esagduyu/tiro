@@ -17,7 +17,7 @@ class Scheduler:
         self._state = state
         self._tasks: dict[str, asyncio.Task] = {}
 
-    def _mirror(self, name: str, task: "asyncio.Task | None") -> None:
+    def _mirror(self, name: str, task: asyncio.Task | None) -> None:
         if self._state is not None:
             setattr(self._state, f"{name}_task", task)
 
@@ -54,7 +54,7 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
 
-    def get(self, name: str) -> "asyncio.Task | None":
+    def get(self, name: str) -> asyncio.Task | None:
         return self._tasks.get(name)
 
     async def shutdown(self) -> None:

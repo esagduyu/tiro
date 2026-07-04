@@ -12,7 +12,7 @@ from importlib.resources import files
 
 def load_template(name: str) -> str:
     """Read a prompt template's raw text by name (without the .txt suffix)."""
-    return (files("tiro.intelligence") / "templates" / f"{name}.txt").read_text()
+    return (files("tiro.intelligence") / "templates" / f"{name}.txt").read_text(encoding="utf-8")
 
 
 def extract_metadata_prompt(title: str, content: str) -> str:
