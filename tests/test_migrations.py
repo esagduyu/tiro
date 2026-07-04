@@ -86,3 +86,28 @@ def test_uid_migration_backfills_unique_ulids(tmp_path):
     assert conn.execute("SELECT uid FROM tags").fetchone()[0]
     assert conn.execute("SELECT uid FROM entities").fetchone()[0]
     conn.close()
+
+
+def test_startup_order_on_legacy_db(tmp_path):
+    """init_db() then migrate_db() — the app.py lifespan order — must not
+    crash on a pre-uid database (the upgrade path for every existing install)."""
+    import sqlite3
+
+    db = tmp_path / "tiro.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, domain TEXT, email_sender TEXT, source_type TEXT NOT NULL, is_vip BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    conn.execute("CREATE TABLE articles (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, title TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, markdown_path TEXT NOT NULL)")
+    conn.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+    conn.execute("CREATE TABLE entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, entity_type TEXT NOT NULL, UNIQUE(name, entity_type))")
+    conn.execute("INSERT INTO articles (title, slug, markdown_path) VALUES ('t', 's', 'f.md')")
+    conn.commit()
+    conn.close()
+
+    from tiro.database import init_db, migrate_db
+
+    init_db(db)      # must NOT raise (was: OperationalError no such column: uid)
+    migrate_db(db)   # brings the legacy DB up: uid columns + backfill
+
+    conn = get_connection(db)
+    assert conn.execute("SELECT uid FROM articles").fetchone()[0]
+    conn.close()

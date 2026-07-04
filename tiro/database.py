@@ -150,15 +150,22 @@ def dir_bytes(path: Path) -> int:
 
 
 def init_db(db_path: Path) -> None:
-    """Initialize the database with the full schema."""
+    """Create the full schema for fresh databases; existing databases are
+    evolved exclusively by migrate_db(). Detected via presence of the
+    `articles` table (not file existence, so a stray empty/corrupt-touched
+    file still gets the fresh-install schema)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
     try:
-        conn.executescript(SCHEMA)
-        from tiro.migrations import LATEST_VERSION
-        conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
-        conn.commit()
-        logger.info("Database initialized at %s", db_path)
+        has_schema = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+        ).fetchone() is not None
+        if not has_schema:
+            conn.executescript(SCHEMA)
+            from tiro.migrations import LATEST_VERSION
+            conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
+            conn.commit()
+            logger.info("Database initialized at %s", db_path)
     finally:
         conn.close()
 
