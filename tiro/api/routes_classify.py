@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -16,7 +15,7 @@ router = APIRouter(prefix="/api", tags=["classify"])
 
 
 class ClassifyRequest(BaseModel):
-    refresh: Optional[bool] = False
+    refresh: bool | None = False
 
 
 @router.post("/classify")

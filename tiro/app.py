@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
@@ -156,7 +156,7 @@ def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     from datetime import timedelta
 
     hour, minute = int(time_str[:2]), int(time_str[3:5])
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
 
     # Convert user's local target time to UTC
     # JS getTimezoneOffset() returns minutes: UTC - local (e.g. EST = 300, CET = -60)
@@ -171,7 +171,7 @@ def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     if target_local <= user_now:
         target_local += timedelta(days=1)
 
-    target_utc = target_local.astimezone(timezone.utc)
+    target_utc = target_local.astimezone(UTC)
     delta = (target_utc - now_utc).total_seconds()
     return max(delta, 60)  # At least 60 seconds to avoid tight loops
 
@@ -195,7 +195,7 @@ async def _digest_schedule_loop(config: TiroConfig):
         if not config.digest_schedule_enabled:
             return
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         try:
             result = await asyncio.to_thread(
                 generate_digest, config, unread_only=config.digest_unread_only
@@ -354,21 +354,21 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         return await call_next(request)
 
     # API routers
-    from tiro.api.routes_auth import router as auth_router
     from tiro.api.routes_articles import router as articles_router
-    from tiro.api.routes_digest import router as digest_router
-    from tiro.api.routes_ingest import router as ingest_router
-    from tiro.api.routes_search import router as search_router
+    from tiro.api.routes_audio import router as audio_router
+    from tiro.api.routes_auth import router as auth_router
     from tiro.api.routes_classify import router as classify_router
     from tiro.api.routes_decay import router as decay_router
+    from tiro.api.routes_digest import router as digest_router
+    from tiro.api.routes_digest_email import router as digest_email_router
+    from tiro.api.routes_export import router as export_router
+    from tiro.api.routes_filters import router as filters_router
+    from tiro.api.routes_graph import router as graph_router
+    from tiro.api.routes_ingest import router as ingest_router
+    from tiro.api.routes_search import router as search_router
+    from tiro.api.routes_settings import router as settings_router
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
-    from tiro.api.routes_export import router as export_router
-    from tiro.api.routes_digest_email import router as digest_email_router
-    from tiro.api.routes_settings import router as settings_router
-    from tiro.api.routes_audio import router as audio_router
-    from tiro.api.routes_graph import router as graph_router
-    from tiro.api.routes_filters import router as filters_router
     from tiro.api.routes_tokens import router as tokens_router
 
     app.include_router(auth_router)

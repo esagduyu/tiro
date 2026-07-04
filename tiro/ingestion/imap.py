@@ -5,9 +5,9 @@ import logging
 
 from tiro.audit import log_api_call
 from tiro.config import TiroConfig
+from tiro.database import get_connection
 from tiro.ingestion.email import parse_eml
 from tiro.ingestion.processor import process_article
-from tiro.database import get_connection
 
 logger = logging.getLogger(__name__)
 

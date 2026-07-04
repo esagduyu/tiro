@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anthropic
@@ -150,7 +150,7 @@ def analyze_article(config: TiroConfig, article_id: int) -> dict:
     _coerce_analysis_scores(analysis)
 
     # Embed timestamp before caching
-    analysis["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+    analysis["analyzed_at"] = datetime.now(UTC).isoformat()
 
     # Cache the result
     _cache_analysis(config, article_id, analysis)

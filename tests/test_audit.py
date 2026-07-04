@@ -1,7 +1,7 @@
 """M6: external-API audit log — writer, cost estimates, readers, wrapper."""
 
 import json
-from datetime import date
+from datetime import UTC, date
 
 import pytest
 
@@ -175,9 +175,9 @@ def _fresh_created_at() -> str:
     """UTC-now in the digest cache's naive format — keeps the canned digest
     younger than send_digest_email's 24h staleness cutoff on any run date
     (a hardcoded date here broke the suite the day after it was written)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def test_imap_failure_is_audited(initialized_library, monkeypatch):

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import anthropic
 
@@ -131,7 +131,7 @@ def _split_digest(content: str) -> dict[str, str]:
     positions.sort(key=lambda x: x[0])
 
     result = {}
-    for i, (start, header_end, dtype) in enumerate(positions):
+    for i, (_start, header_end, dtype) in enumerate(positions):
         # Content runs from after the header to the start of the next section (or end)
         if i + 1 < len(positions):
             section_content = content[header_end : positions[i + 1][0]]
@@ -279,7 +279,7 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     today = date.today().isoformat()
     _cache_digest(config, today, sections, article_ids)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     return {
         dtype: {
             "content": content,

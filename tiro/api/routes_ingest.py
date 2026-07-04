@@ -90,7 +90,7 @@ async def ingest_url(body: IngestURLRequest, request: Request):
         extracted = await fetch_and_extract(url)
     except Exception as e:
         logger.error("Failed to fetch %s: %s", url, e)
-        raise HTTPException(status_code=422, detail=f"Failed to fetch URL: {e}")
+        raise HTTPException(status_code=422, detail=f"Failed to fetch URL: {e}") from e
 
     try:
         article = await asyncio.to_thread(
@@ -104,7 +104,7 @@ async def ingest_url(body: IngestURLRequest, request: Request):
         )
     except Exception as e:
         logger.error("Failed to process article from %s: %s", url, e)
-        raise HTTPException(status_code=500, detail=f"Failed to process article: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process article: {e}") from e
 
     return {"success": True, "data": article}
 
@@ -122,10 +122,10 @@ async def ingest_email(file: UploadFile, request: Request):
         extracted = await asyncio.to_thread(parse_eml, raw)
     except ValueError as e:
         logger.error("Failed to parse email: %s", e)
-        raise HTTPException(status_code=422, detail=f"Failed to parse email: {e}")
+        raise HTTPException(status_code=422, detail=f"Failed to parse email: {e}") from e
     except Exception as e:
         logger.error("Failed to parse email: %s", e)
-        raise HTTPException(status_code=422, detail=f"Failed to parse email: {e}")
+        raise HTTPException(status_code=422, detail=f"Failed to parse email: {e}") from e
 
     # Duplicate check by title + sender
     conn = get_connection(config.db_path)
@@ -169,7 +169,7 @@ async def ingest_email(file: UploadFile, request: Request):
         )
     except Exception as e:
         logger.error("Failed to process email article: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to process email: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process email: {e}") from e
 
     return {"success": True, "data": article}
 
@@ -261,6 +261,6 @@ async def ingest_imap(request: Request):
     try:
         result = await asyncio.to_thread(check_imap_inbox, config)
     except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     return {"success": True, "data": result}

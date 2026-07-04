@@ -8,7 +8,7 @@ Recalculates relevance_weight for all articles based on engagement signals.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -34,7 +34,7 @@ def recalculate_decay(config: TiroConfig) -> dict:
             LEFT JOIN sources s ON a.source_id = s.id
         """).fetchall()
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         updated = 0
         immune = 0
         decayed = 0
@@ -59,7 +59,7 @@ def recalculate_decay(config: TiroConfig) -> dict:
             try:
                 ingested = datetime.fromisoformat(ingested_str.replace(" ", "T"))
                 if ingested.tzinfo is None:
-                    ingested = ingested.replace(tzinfo=timezone.utc)
+                    ingested = ingested.replace(tzinfo=UTC)
             except (ValueError, AttributeError):
                 continue
 

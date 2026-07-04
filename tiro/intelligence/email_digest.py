@@ -2,7 +2,7 @@
 
 import logging
 import smtplib
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,7 +34,7 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
         cached = get_cached_digest(config, today)
         if cached and "ranked" in cached:
             created_at = next(iter(cached.values()))["created_at"]
-            age_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+            age_hours = (datetime.now(UTC).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
             if age_hours < 24:
                 all_data = cached
                 logger.info("Using cached digest (%.1fh old) for email", age_hours)
@@ -63,7 +63,7 @@ def send_digest_email(config: TiroConfig, all_sections: bool = False) -> dict:
         cached = get_cached_digest(config, today, "ranked")
         if cached and "ranked" in cached:
             created_at = cached["ranked"]["created_at"]
-            age_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+            age_hours = (datetime.now(UTC).replace(tzinfo=None) - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
             if age_hours < 24:
                 digest_content = cached["ranked"]["content"]
                 logger.info("Using cached ranked digest (%.1fh old) for email", age_hours)

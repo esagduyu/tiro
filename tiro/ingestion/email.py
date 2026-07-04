@@ -3,7 +3,6 @@
 import email
 import logging
 import re
-from datetime import datetime
 from email import policy
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path

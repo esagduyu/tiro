@@ -8,7 +8,7 @@ unwritable audit dir must never break the API call being observed.
 import json
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from tiro.config import TiroConfig
 
@@ -71,7 +71,7 @@ def log_api_call(
     """Append one audit entry. Swallows its own failures by design."""
     try:
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "service": service,
             "endpoint": endpoint,
             "model": model,

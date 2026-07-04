@@ -91,7 +91,7 @@ async def get_graph(request: Request, min_articles: int = 2):
 
         # Build edges: count co-occurrences between valid node pairs
         edge_counts = defaultdict(int)
-        for article_id, node_set in article_nodes.items():
+        for _article_id, node_set in article_nodes.items():
             # Only consider nodes that pass the filter
             filtered = sorted(node_set & valid_nodes)
             for i in range(len(filtered)):

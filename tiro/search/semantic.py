@@ -32,7 +32,7 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
     # ChromaDB cosine distance: 0 = identical, 2 = opposite
     # Convert to similarity: 1 - (distance / 2) → range [0, 1]
     ids_and_scores = []
-    for chroma_id, distance in zip(results["ids"][0], results["distances"][0]):
+    for chroma_id, distance in zip(results["ids"][0], results["distances"][0], strict=False):
         article_id = int(chroma_id.replace("article_", ""))
         similarity = round(1 - (distance / 2), 4)
         ids_and_scores.append((article_id, similarity))
@@ -41,7 +41,6 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
         return []
 
     article_ids = [aid for aid, _ in ids_and_scores]
-    score_map = {aid: score for aid, score in ids_and_scores}
 
     conn = get_connection(config.db_path)
     try:
@@ -125,7 +124,7 @@ def find_related_articles(
 
     related = []
     candidate_ids = []
-    for cid, distance in zip(results["ids"][0], results["distances"][0]):
+    for cid, distance in zip(results["ids"][0], results["distances"][0], strict=False):
         rid = int(cid.replace("article_", ""))
         if rid == article_id:
             continue

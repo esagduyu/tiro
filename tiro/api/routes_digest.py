@@ -47,12 +47,12 @@ async def digest_generate(request: Request, payload: DigestGenerateRequest | Non
         result = await asyncio.to_thread(generate_digest, config, unread_only=unread_only)
         return {"success": True, "data": result, "cached": False}
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("Digest generation failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Digest generation failed")
+        raise HTTPException(status_code=500, detail="Digest generation failed") from e
 
 
 @router.get("/today/{digest_type}")

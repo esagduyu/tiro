@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from tiro.config import TiroConfig, load_config
 from tiro.database import get_connection
-from tiro.vectorstore import init_vectorstore, get_collection
+from tiro.vectorstore import get_collection, init_vectorstore
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ def search_articles(
             return "No matching articles found."
 
         candidate_ids = []
-        for chroma_id, distance in zip(results["ids"][0], results["distances"][0]):
+        for chroma_id, distance in zip(results["ids"][0], results["distances"][0], strict=False):
             article_id = int(chroma_id.replace("article_", ""))
             similarity = round(1 - (distance / 2), 4)
             candidate_ids.append(article_id)
@@ -475,8 +475,8 @@ async def save_url(url: str) -> str:
     """Save a web page to the Tiro reading library by URL. Fetches the page, extracts content, generates tags/summary with AI, and stores it."""
     config = _get_config()
 
-    from tiro.ingestion.web import fetch_and_extract
     from tiro.ingestion.processor import process_article
+    from tiro.ingestion.web import fetch_and_extract
 
     try:
         extracted = await fetch_and_extract(url)

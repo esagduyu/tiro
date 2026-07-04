@@ -53,6 +53,7 @@ def test_token_routes_require_auth(auth_client):
 def test_created_token_works_as_bearer(authenticated_client, configured_library):
     raw = authenticated_client.post("/api/tokens", json={"name": "cli"}).json()["data"]["token"]
     from fastapi.testclient import TestClient
+
     from tiro.app import create_app
 
     with TestClient(create_app(configured_library), base_url="http://localhost") as c:

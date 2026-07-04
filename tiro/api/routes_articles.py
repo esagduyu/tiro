@@ -392,9 +392,9 @@ async def run_analysis(article_id: int, request: Request):
         analysis = await asyncio.to_thread(analyze_article, config, article_id)
         return {"success": True, "data": analysis}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         logger.error("Analysis failed for article %d: %s", article_id, e)
-        raise HTTPException(status_code=500, detail="Analysis failed")
+        raise HTTPException(status_code=500, detail="Analysis failed") from e

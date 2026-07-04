@@ -121,7 +121,7 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     if body.enable_send:
@@ -213,7 +213,7 @@ async def update_tts_settings(body: TTSSettingsUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     config.openai_api_key = body.openai_api_key
@@ -278,7 +278,7 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Update live config
     config.digest_schedule_enabled = body.enabled
@@ -395,7 +395,7 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
 
     if body.theme_light is not None or body.theme_dark is not None:
         available_names = {t["name"] for t in _list_available_themes(config)}
-        for field_name, value in (("theme_light", body.theme_light), ("theme_dark", body.theme_dark)):
+        for _field_name, value in (("theme_light", body.theme_light), ("theme_dark", body.theme_dark)):
             if value is not None and value not in available_names:
                 raise HTTPException(status_code=400, detail=f"Unknown theme: {value}")
 
@@ -411,7 +411,7 @@ async def update_appearance_settings(body: AppearanceUpdate, request: Request):
     try:
         persist_config(config, updates)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Mutate live config only after the write succeeds.
     if body.theme_light is not None:

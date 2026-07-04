@@ -3,9 +3,8 @@
 import logging
 import re
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 import frontmatter
 import httpx
@@ -192,7 +191,7 @@ async def stream_article_audio(
     audio_path.write_bytes(bytes(all_bytes))
 
     duration = _estimate_mp3_duration(len(all_bytes))
-    generated_at = datetime.now(timezone.utc).isoformat()
+    generated_at = datetime.now(UTC).isoformat()
 
     conn = get_connection(config.db_path)
     try:

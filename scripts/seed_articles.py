@@ -95,7 +95,7 @@ async def main():
             success += 1
         except Exception as e:
             if "UNIQUE constraint" in str(e):
-                print(f"  SKIP: already in library")
+                print("  SKIP: already in library")
             else:
                 print(f"  FAIL: {e}")
             failed += 1
@@ -135,14 +135,14 @@ async def main():
     conn.close()
 
     print(f"\n{'='*50}")
-    print(f"Seed complete!")
+    print("Seed complete!")
     print(f"  Ingested: {success} articles ({failed} failed/skipped)")
     print(f"  Library:  {total_articles} articles, {total_sources} sources")
     print(f"  Rated:    {rated_count} articles")
     print(f"  VIP:      {vip_count} sources")
-    print(f"\nNext steps:")
-    print(f"  uv run tiro run          # Start the server")
-    print(f"  # Then: rate a few articles and run 'Classify inbox' for the full demo experience")
+    print("\nNext steps:")
+    print("  uv run tiro run          # Start the server")
+    print("  # Then: rate a few articles and run 'Classify inbox' for the full demo experience")
 
 
 if __name__ == "__main__":

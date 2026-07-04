@@ -109,7 +109,7 @@ def cmd_init(args):
         print("Skipped — articles will use browser voice (free, lower quality).")
 
     print(f"\nTiro library initialized at {config.library}")
-    print(f"Start the server with: uv run tiro run")
+    print("Start the server with: uv run tiro run")
 
 
 def cmd_run(args):
@@ -252,10 +252,10 @@ def _interactive_email_setup(config_path: Path):
         updates["smtp_password"] = app_password
         updates["smtp_use_tls"] = True
         updates["digest_email"] = gmail
-        print(f"  SMTP configured: smtp.gmail.com:587 (TLS)")
+        print("  SMTP configured: smtp.gmail.com:587 (TLS)")
 
     if want_receive:
-        label = input(f"Gmail label to monitor [tiro]: ").strip() or "tiro"
+        label = input("Gmail label to monitor [tiro]: ").strip() or "tiro"
         updates["imap_host"] = "imap.gmail.com"
         updates["imap_port"] = 993
         updates["imap_user"] = gmail
@@ -272,10 +272,10 @@ def _interactive_email_setup(config_path: Path):
     print(f"\nEmail settings saved to {config_path}")
 
     if want_receive:
-        print(f"\nTo receive newsletters:")
+        print("\nTo receive newsletters:")
         print(f"  1. Create a Gmail label called '{label}'")
-        print(f"  2. Set up a Gmail filter to auto-label forwarded newsletters")
-        print(f"  3. Run: uv run tiro check-email")
+        print("  2. Set up a Gmail filter to auto-label forwarded newsletters")
+        print("  3. Run: uv run tiro check-email")
 
 
 def cmd_setup_email(args):
@@ -465,9 +465,8 @@ def cmd_doctor(args):
 def cmd_audit(args):
     """Show the external-API audit log (calls, tokens, cost estimates)."""
     import json as _json
-    from datetime import date as _date
-
     import re
+    from datetime import date as _date
 
     from tiro.audit import read_audit_entries, summarize
     from tiro.config import load_config

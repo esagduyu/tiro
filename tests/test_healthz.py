@@ -30,11 +30,11 @@ def test_healthz_no_password_has_detail(client):
 
 
 def test_version_single_source():
-    import tiro
-    from tiro.app import create_app  # noqa: F401 — import proves no circularity
-
     import tomllib
     from pathlib import Path
+
+    import tiro
+    from tiro.app import create_app  # noqa: F401 — import proves no circularity
 
     pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
     assert tiro.__version__ == pyproject["project"]["version"]

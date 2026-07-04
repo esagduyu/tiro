@@ -3,8 +3,13 @@
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from tests.conftest import TEST_PASSWORD
+from tiro import auth
+from tiro.app import create_app
 from tiro.config import TiroConfig, load_config
+from tiro.database import get_connection, init_db
 
 
 def test_config_has_auth_fields_default_none(test_config):
@@ -22,10 +27,6 @@ def test_load_config_records_its_path(tmp_path):
 def test_load_config_records_path_even_when_missing(tmp_path):
     cfg = load_config(tmp_path / "nonexistent.yaml")
     assert Path(cfg.config_path) == tmp_path / "nonexistent.yaml"
-
-
-from tiro import auth
-from tiro.database import get_connection, init_db
 
 
 def test_password_hash_roundtrip():
@@ -136,12 +137,6 @@ def test_save_password_hash_failure_leaves_config_intact(tmp_path, monkeypatch):
         auth.save_password_hash(cfg, "hash")
     assert cfg_file.read_text() == original  # untouched
     assert not cfg_file.with_suffix(".yaml.tmp").exists()  # no litter
-
-
-from tiro.app import create_app
-from fastapi.testclient import TestClient
-
-from tests.conftest import TEST_PASSWORD
 
 
 def test_healthz_open(auth_client):
@@ -429,7 +424,6 @@ def test_lan_binding_from_config_accepts_machine_ip(tmp_path, monkeypatch, _shar
 
     import tiro.app as app_mod
     from tiro import auth as tiro_auth
-    from tiro.config import TiroConfig
     from tiro.database import init_db, migrate_db
     from tiro.vectorstore import init_vectorstore
 
@@ -459,13 +453,12 @@ def test_cross_site_login_rejected(auth_client):
 
 
 def test_mount_surface_is_pinned():
+    # config never touched for route inspection — use a bare config object
+    import tempfile
+
     from starlette.routing import Mount
 
     from tiro.app import create_app
-    from tiro.config import TiroConfig
-
-    # config never touched for route inspection — use a bare config object
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
         cfg = TiroConfig(library_path=d)
         (cfg.library / "themes").mkdir(parents=True, exist_ok=True)

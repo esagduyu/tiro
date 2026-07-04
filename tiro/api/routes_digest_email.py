@@ -21,9 +21,9 @@ async def send_digest(request: Request):
         result = await asyncio.to_thread(send_digest_email, config, True)
         return {"success": True, "data": result}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         logger.error("Failed to send digest email: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to send digest email")
+        raise HTTPException(status_code=500, detail="Failed to send digest email") from e

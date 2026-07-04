@@ -1,7 +1,7 @@
 """Reading stats tracking and aggregation for Tiro."""
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
