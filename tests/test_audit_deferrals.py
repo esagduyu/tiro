@@ -47,7 +47,7 @@ def test_retry_reembeds_with_full_metadata(initialized_library, monkeypatch):
     assert n == 1
     md = captured["metadatas"][0]
     assert md["source"] == "Src"
-    assert md["is_vip"] == 1
+    assert md["is_vip"] is True
     assert md["tags"] == "ai"
     assert md["published_at"] == "2026-01-02"
     assert md["title"] == "T"
@@ -119,7 +119,13 @@ async def test_tts_disconnect_writes_audit(initialized_library, monkeypatch):
     )
     conn.commit()
     conn.close()
-    (config.articles_dir / "sl.md").write_text("---\ntitle: T\n---\nSome article body text.")
+    # Two paragraphs, each right under MAX_CHUNK_CHARS, so chunk_text() splits
+    # this into two chunks — this pins that only the FIRST chunk's chars are
+    # audited on a disconnect after chunk 1, not the whole article's chars.
+    para1 = "First paragraph. " * 235  # ~4000 chars
+    para2 = "Second paragraph. " * 235  # ~4000 chars
+    body = f"{para1}\n\n{para2}"
+    (config.articles_dir / "sl.md").write_text(f"---\ntitle: T\n---\n{body}")
     config.openai_api_key = "sk-fake"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -130,16 +136,28 @@ async def test_tts_disconnect_writes_audit(initialized_library, monkeypatch):
         lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=120.0),
     )
 
+    chunks = tts.chunk_text(f"T\n\n{body}")
+    assert len(chunks) >= 2  # sanity: this article must actually span multiple chunks
+    first_chunk_len = len(chunks[0])
+    total_chars = sum(len(c) for c in chunks)
+    assert first_chunk_len < total_chars
+
     agen = tts.stream_article_audio(1, config)
     first = await agen.__anext__()
     assert first  # got at least one chunk of bytes
     await agen.aclose()
 
     entries = read_audit_entries(config, service="openai_tts")
-    assert any(
-        e["endpoint"] == "stream" and e["success"] is False
+    disconnect_entries = [
+        e for e in entries
+        if e["endpoint"] == "stream" and e["success"] is False
         and "disconnect" in (e["error"] or "")
-        for e in entries
-    )
+    ]
+    assert disconnect_entries
+    # Only the first chunk's characters were actually submitted to OpenAI
+    # before the abort — the audited chars must reflect that, not the full
+    # article's char count (which would overstate cost for the aborted call).
+    assert disconnect_entries[0]["chars"] == first_chunk_len
+    assert disconnect_entries[0]["chars"] < total_chars
     # The abandoned stream must not also report a fabricated success line.
     assert not any(e["endpoint"] == "speech" and e["success"] is True for e in entries)

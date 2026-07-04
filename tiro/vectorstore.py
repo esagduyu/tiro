@@ -113,7 +113,7 @@ def retry_pending_vectors(config) -> int:
                 metadatas=[{
                     "title": row["title"],
                     "source": row["source_name"] or "",
-                    "is_vip": row["is_vip"] or 0,
+                    "is_vip": bool(row["is_vip"]),
                     "tags": ",".join(tag_names),
                     "published_at": pub,
                     "article_id": row["id"],

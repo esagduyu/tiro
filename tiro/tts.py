@@ -158,6 +158,11 @@ async def stream_article_audio(
     )
 
     all_bytes = bytearray()
+    # Chars actually submitted to OpenAI so far — incremented as each chunk's
+    # request is issued (i.e. once it's billed), independent of total_chars
+    # (the full article). Used by the disconnect audit line below so an abort
+    # mid-stream doesn't overstate the chars actually sent.
+    chars_sent = 0
     # Set True the moment a terminal audit line (success, or an explicit
     # mid-loop failure) is written, so the `finally` below never logs a
     # second, misleading line for the same call. Left False means the
@@ -172,6 +177,7 @@ async def stream_article_audio(
                 logger.info(
                     "  Streaming chunk %d/%d (%d chars)...", i + 1, len(chunks), len(chunk)
                 )
+                chars_sent += len(chunk)
                 async with client.stream(
                     "POST",
                     "https://api.openai.com/v1/audio/speech",
@@ -245,7 +251,7 @@ async def stream_article_audio(
         if not audited:
             log_api_call(
                 config, "openai_tts", endpoint="stream", model=config.tts_model,
-                chars=total_chars, bytes_out=len(all_bytes),
+                chars=chars_sent, bytes_out=len(all_bytes),
                 success=False, error="stream aborted (client disconnect or error)",
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
