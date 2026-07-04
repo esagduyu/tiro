@@ -562,6 +562,17 @@ def cmd_status(args):
           f"IMAP sync: {'on' if config.imap_enabled else 'off'} | "
           f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
 
+    from tiro.llm import resolve_tier
+    from tiro.llm_cli import check_cli_backend
+
+    heavy_p, _ = resolve_tier(config, "heavy")
+    light_p, _ = resolve_tier(config, "light")
+    parts = [f"heavy: {heavy_p}", f"light: {light_p}"]
+    for p in {heavy_p, light_p}:
+        if p in ("claude-cli", "codex-cli"):
+            parts.append(f"{p}: {check_cli_backend(config, p)}")
+    print("AI backends: " + " | ".join(parts))
+
 
 def cmd_set_password(args):
     """Set or reset the Tiro password."""

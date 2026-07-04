@@ -163,3 +163,19 @@ def llm_call(config: TiroConfig, tier: Tier, prompt: str, *, purpose: str,
         cost_usd=result.cost_usd,
     )
     return result
+
+
+def _call_claude_cli(config, model, prompt, *, system, max_tokens):
+    from tiro.llm_cli import run_claude_cli
+
+    return run_claude_cli(config, model, prompt, system=system, max_tokens=max_tokens)
+
+
+def _call_codex_cli(config, model, prompt, *, system, max_tokens):
+    from tiro.llm_cli import run_codex_cli
+
+    return run_codex_cli(config, model, prompt, system=system, max_tokens=max_tokens)
+
+
+_BACKENDS["claude-cli"] = _call_claude_cli
+_BACKENDS["codex-cli"] = _call_codex_cli

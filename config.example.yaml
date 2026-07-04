@@ -41,6 +41,16 @@ haiku_model: "claude-haiku-4-5-20251001"
 # ai_openai_base_url: "http://localhost:11434/v1"   # Ollama example
 # ai_openai_api_key: "sk-..."                        # not needed for Ollama
 
+# EXPERIMENTAL — agent-CLI backends (local-only): route AI tiers through your
+# own locally-installed, locally-authenticated Claude Code or Codex CLI, using
+# the subscription you already pay for. Opt-in, never a default. Heads-up:
+# Anthropic's Claude Code terms direct third-party products to API keys; you
+# are choosing to run your own CLI on your own machine. Slow for batch work —
+# recommended for the heavy tier only (digests/analysis).
+# ai_heavy_provider: "claude-cli"
+# ai_claude_cli_path: "claude"
+# ai_codex_cli_path: "codex"
+
 # Content decay
 decay_rate_default: 0.95
 decay_rate_disliked: 0.90
