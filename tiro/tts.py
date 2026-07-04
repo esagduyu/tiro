@@ -99,6 +99,12 @@ def _strip_markdown_for_speech(text: str) -> str:
     return text.strip()
 
 
+def _tts_client_factory() -> httpx.AsyncClient:
+    """Separated for test injection (MockTransport), mirroring llm.py's
+    _openai_client_factory."""
+    return httpx.AsyncClient(timeout=120.0)
+
+
 def _estimate_mp3_duration(size_bytes: int) -> float:
     """Estimate MP3 duration from file size (~128kbps = 16,000 bytes/sec)."""
     return size_bytes / 16000.0
@@ -152,77 +158,97 @@ async def stream_article_audio(
     )
 
     all_bytes = bytearray()
+    # Set True the moment a terminal audit line (success, or an explicit
+    # mid-loop failure) is written, so the `finally` below never logs a
+    # second, misleading line for the same call. Left False means the
+    # generator was torn down before reaching a terminal state — e.g. the
+    # client disconnected (GeneratorExit via aclose()) or the task was
+    # cancelled (CancelledError) — which the `finally` logs once.
+    audited = False
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        for i, chunk in enumerate(chunks):
-            logger.info("  Streaming chunk %d/%d (%d chars)...", i + 1, len(chunks), len(chunk))
-            async with client.stream(
-                "POST",
-                "https://api.openai.com/v1/audio/speech",
-                headers={
-                    "Authorization": f"Bearer {config.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": config.tts_model,
-                    "input": chunk,
-                    "voice": config.tts_voice,
-                    "response_format": "mp3",
-                },
-            ) as response:
-                if response.status_code != 200:
-                    body = await response.aread()
-                    logger.error("OpenAI TTS error %d: %s", response.status_code, body[:500])
-                    log_api_call(
-                        config, "openai_tts", endpoint="speech", model=config.tts_model,
-                        success=False, error=f"HTTP {response.status_code}",
-                        duration_ms=int((time.monotonic() - start) * 1000),
-                    )
-                    raise RuntimeError(f"OpenAI TTS API returned {response.status_code}")
-
-                async for data in response.aiter_bytes(chunk_size=8192):
-                    all_bytes.extend(data)
-                    yield data
-
-    # All chunks streamed — cache the complete file
-    audio_dir = config.library / "audio"
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = audio_dir / f"{article_id}.mp3"
-    audio_path.write_bytes(bytes(all_bytes))
-
-    duration = _estimate_mp3_duration(len(all_bytes))
-    generated_at = datetime.now(UTC).isoformat()
-
-    conn = get_connection(config.db_path)
     try:
-        conn.execute(
-            """INSERT INTO audio (article_id, file_path, duration_seconds, voice, model,
-                                  file_size_bytes, generated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(article_id) DO UPDATE SET
-                   file_path = excluded.file_path,
-                   duration_seconds = excluded.duration_seconds,
-                   voice = excluded.voice,
-                   model = excluded.model,
-                   file_size_bytes = excluded.file_size_bytes,
-                   generated_at = excluded.generated_at""",
-            (article_id, f"{article_id}.mp3", duration, config.tts_voice,
-             config.tts_model, len(all_bytes), generated_at),
+        async with _tts_client_factory() as client:
+            for i, chunk in enumerate(chunks):
+                logger.info(
+                    "  Streaming chunk %d/%d (%d chars)...", i + 1, len(chunks), len(chunk)
+                )
+                async with client.stream(
+                    "POST",
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {config.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": config.tts_model,
+                        "input": chunk,
+                        "voice": config.tts_voice,
+                        "response_format": "mp3",
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        body = await response.aread()
+                        logger.error("OpenAI TTS error %d: %s", response.status_code, body[:500])
+                        log_api_call(
+                            config, "openai_tts", endpoint="speech", model=config.tts_model,
+                            success=False, error=f"HTTP {response.status_code}",
+                            duration_ms=int((time.monotonic() - start) * 1000),
+                        )
+                        audited = True
+                        raise RuntimeError(f"OpenAI TTS API returned {response.status_code}")
+
+                    async for data in response.aiter_bytes(chunk_size=8192):
+                        all_bytes.extend(data)
+                        yield data
+
+        # All chunks streamed — cache the complete file
+        audio_dir = config.library / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / f"{article_id}.mp3"
+        audio_path.write_bytes(bytes(all_bytes))
+
+        duration = _estimate_mp3_duration(len(all_bytes))
+        generated_at = datetime.now(UTC).isoformat()
+
+        conn = get_connection(config.db_path)
+        try:
+            conn.execute(
+                """INSERT INTO audio (article_id, file_path, duration_seconds, voice, model,
+                                      file_size_bytes, generated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(article_id) DO UPDATE SET
+                       file_path = excluded.file_path,
+                       duration_seconds = excluded.duration_seconds,
+                       voice = excluded.voice,
+                       model = excluded.model,
+                       file_size_bytes = excluded.file_size_bytes,
+                       generated_at = excluded.generated_at""",
+                (article_id, f"{article_id}.mp3", duration, config.tts_voice,
+                 config.tts_model, len(all_bytes), generated_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        log_api_call(
+            config, "openai_tts", endpoint="speech", model=config.tts_model,
+            chars=total_chars, bytes_out=len(all_bytes),
+            duration_ms=int((time.monotonic() - start) * 1000),
         )
-        conn.commit()
+        audited = True
+
+        logger.info(
+            "Audio cached for article %d: %.1fs, %.1f KB",
+            article_id, duration, len(all_bytes) / 1024,
+        )
     finally:
-        conn.close()
-
-    log_api_call(
-        config, "openai_tts", endpoint="speech", model=config.tts_model,
-        chars=total_chars, bytes_out=len(all_bytes),
-        duration_ms=int((time.monotonic() - start) * 1000),
-    )
-
-    logger.info(
-        "Audio cached for article %d: %.1fs, %.1f KB",
-        article_id, duration, len(all_bytes) / 1024,
-    )
+        if not audited:
+            log_api_call(
+                config, "openai_tts", endpoint="stream", model=config.tts_model,
+                chars=total_chars, bytes_out=len(all_bytes),
+                success=False, error="stream aborted (client disconnect or error)",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
 
 
 def get_audio_status(article_id: int, config: TiroConfig) -> dict:
