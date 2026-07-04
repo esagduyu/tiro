@@ -148,6 +148,8 @@ def init_db(db_path: Path) -> None:
     conn = get_connection(db_path)
     try:
         conn.executescript(SCHEMA)
+        from tiro.migrations import LATEST_VERSION
+        conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
         conn.commit()
         logger.info("Database initialized at %s", db_path)
     finally:
@@ -155,24 +157,7 @@ def init_db(db_path: Path) -> None:
 
 
 def migrate_db(db_path: Path) -> None:
-    """Run schema migrations for backwards compatibility."""
-    conn = get_connection(db_path)
-    try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
-        if "ingestion_method" not in cols:
-            conn.execute("ALTER TABLE articles ADD COLUMN ingestion_method TEXT DEFAULT 'manual'")
-            conn.execute("""
-                UPDATE articles SET ingestion_method = 'email'
-                WHERE source_id IN (SELECT id FROM sources WHERE source_type = 'email')
-                AND ingestion_method = 'manual'
-            """)
-            conn.commit()
-            logger.info("Migrated: added ingestion_method column")
-        if "vector_status" not in cols:
-            conn.execute("ALTER TABLE articles ADD COLUMN vector_status TEXT DEFAULT 'pending'")
-            # Existing rows already have their vectors — mark them indexed, not pending
-            conn.execute("UPDATE articles SET vector_status = 'indexed' WHERE vector_status = 'pending'")
-            conn.commit()
-            logger.info("Migrated: added vector_status column")
-    finally:
-        conn.close()
+    """Run schema migrations (delegates to the versioned framework)."""
+    from tiro.migrations import run_migrations
+
+    run_migrations(db_path)

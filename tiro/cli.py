@@ -462,6 +462,25 @@ def cmd_doctor(args):
     sys.exit(1 if failed else 0)
 
 
+def cmd_migrate(args):
+    """Apply pending database migrations."""
+    from tiro.config import load_config
+    from tiro.migrations import run_migrations
+
+    config = load_config(args.config)
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+
+    applied = run_migrations(config.db_path)
+    if applied:
+        for line in applied:
+            print(f"applied: {line}")
+    else:
+        print("No pending migrations.")
+    sys.exit(0)
+
+
 def cmd_audit(args):
     """Show the external-API audit log (calls, tokens, cost estimates)."""
     import json as _json
@@ -645,6 +664,8 @@ def main():
 
     subparsers.add_parser("status", help="Show library status and store sizes")
 
+    subparsers.add_parser("migrate", help="Apply pending database migrations")
+
     audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
     audit_group = audit_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
@@ -686,6 +707,8 @@ def main():
         cmd_audit(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "migrate":
+        cmd_migrate(args)
     else:
         parser.print_help()
         sys.exit(1)
