@@ -164,8 +164,9 @@ def create_snapshot(
                     for md in sorted(config.articles_dir.glob("*.md")):
                         tar.add(md, arcname=f"articles/{md.name}")
                 if config.wiki_dir.exists():
-                    for page in sorted(config.wiki_dir.glob("*.md")):
-                        tar.add(page, arcname=f"wiki/{page.name}")
+                    for page in sorted(config.wiki_dir.rglob("*.md")):
+                        rel = page.relative_to(config.wiki_dir)
+                        tar.add(page, arcname=f"wiki/{rel.as_posix()}")
                 _add_bytes(tar, "embeddings.jsonl", _dump_embeddings_jsonl(config))
                 audio_dir = config.library / "audio"
                 if include_audio and audio_dir.exists():

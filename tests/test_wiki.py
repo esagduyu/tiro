@@ -670,6 +670,87 @@ def test_mark_pages_stale_is_idempotent_for_already_stale_page(initialized_libra
     assert count == 1  # still reported as matched, even though unchanged
 
 
+# --- process_article ingest hook (Task 5, seam 1) ---------------------------------
+
+
+def test_ingest_marks_existing_wiki_page_stale_same_call(initialized_library, fake_llm):
+    """A wiki page already exists for an entity ("Anthropic"). Ingesting a
+    NEW article whose Haiku extraction cites that same entity must flip the
+    page stale within the same process_article() call -- no second pass, no
+    background job. Free SQL + frontmatter rewrite, no LLM involved in the
+    stale-marking itself (fake_llm here only stands in for the extraction
+    call that discovers the entity link)."""
+    from tiro.database import get_connection
+    from tiro.ingestion.processor import process_article
+
+    write_page(
+        initialized_library,
+        slug="entities/anthropic",
+        kind="entity",
+        title="Anthropic",
+        entity_type="company",
+        article_uids=[],
+        body="Original body, must survive byte-exact.",
+        generated_by=None,
+        status="fresh",
+    )
+
+    fake_llm(
+        '{"tags": [], "entities": [{"name": "Anthropic", "type": "company"}], '
+        '"summary": "About Anthropic."}'
+    )
+    result = process_article(
+        title="Anthropic ships something new",
+        author=None,
+        content_md="Anthropic body text here.",
+        url="https://example.com/anthropic-news",
+        config=initialized_library,
+    )
+    assert result["id"]  # ingest succeeded, not rolled back
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM wiki_pages WHERE slug = 'entities/anthropic'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "stale"
+
+    page = read_page(initialized_library, "entities/anthropic")
+    assert page["status"] == "stale"
+    assert page["body"] == "Original body, must survive byte-exact."
+
+
+def test_ingest_mark_pages_stale_failure_is_nonfatal(initialized_library, fake_llm, monkeypatch):
+    """The stale hook is best-effort bookkeeping -- a failure in it must not
+    roll back an otherwise-successful ingest (unlike a real enrichment
+    failure, which does roll back via delete_article())."""
+    from tiro.database import get_connection
+    from tiro.ingestion import processor
+
+    def boom(config, conn, article_id):
+        raise RuntimeError("stale marking exploded")
+
+    monkeypatch.setattr(processor, "mark_pages_stale", boom)
+    fake_llm('{"tags": [], "entities": [], "summary": ""}')
+    result = processor.process_article(
+        title="Some article",
+        author=None,
+        content_md="body text here",
+        url="https://example.com/x",
+        config=initialized_library,
+    )
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM articles WHERE id = ?", (result["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["n"] == 1  # article survives; not rolled back
+
+
 # --- WIKI_KINDS sanity -------------------------------------------------------------
 
 

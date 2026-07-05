@@ -17,6 +17,7 @@ from tiro.migrations import canonical_key, new_ulid
 from tiro.search.semantic import find_related_articles, generate_connection_notes, store_relations
 from tiro.stats import update_stat
 from tiro.vectorstore import get_collection
+from tiro.wiki import mark_pages_stale
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,19 @@ def process_article(
                     "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
                     (article_id, entity_id),
                 )
+
+            # --- Mark stale any wiki pages for entities/tags this article
+            # just linked to (Phase 1b). Free SQL + frontmatter rewrite, no
+            # LLM -- but best-effort: this is bookkeeping on top of an
+            # already-successful ingest, not something worth unwinding the
+            # whole article over. A failure here is logged and swallowed
+            # rather than left to propagate into the enrichment stage's
+            # rollback-via-delete_article() below (same non-fatal pattern as
+            # the ChromaDB/related-articles steps further down).
+            try:
+                mark_pages_stale(config, conn, article_id)
+            except Exception as e:
+                logger.error("mark_pages_stale failed for article %d (non-fatal): %s", article_id, e)
 
             conn.commit()
 
