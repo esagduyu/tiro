@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "58"
+STATIC_VERSION = "59"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -464,5 +464,15 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def sources_page(request: Request):
         return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+
+    @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def wiki_list_page(request: Request):
+        return templates.TemplateResponse(request, "wiki.html", _theme_context(request.app.state.config))
+
+    @app.get("/wiki/{slug:path}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def wiki_page_view(request: Request, slug: str):
+        return templates.TemplateResponse(
+            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request.app.state.config)}
+        )
 
     return app
