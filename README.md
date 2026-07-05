@@ -471,7 +471,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/`). A small end-to-end browser spec also lives at `playwright-tests/phase0.spec.js` (Playwright), covering the first-run setup flow, login, saving an article, and deleting it — see `playwright-tests/README.md` for how to run it.
+`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS helpers (`tiro/frontend/static/js/core.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. A small end-to-end browser spec also lives at `playwright-tests/phase0.spec.js` (Playwright), covering the first-run setup flow, login, saving an article, and deleting it — see `playwright-tests/README.md` for how to run it.
 
 ---
 

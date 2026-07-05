@@ -1,9 +1,14 @@
-/* Tiro — shared frontend module (M2.0 scaffolding).
+/* Tiro — shared frontend module (M2.0).
  *
- * This module is NOT loaded by any template yet — it is additive scaffolding
- * for the ES-modules migration (see docs/plans/2026-07-05-m2-0-frontend-modules-plan.md).
- * Zero behavior change: app.js/reader.js/sources.js/wiki.js keep their own
- * copies of these helpers until later M2.0 tasks migrate call sites.
+ * Never loaded by a template tag directly — reached only via relative
+ * `import ... from "./core.js"` from every other frontend module
+ * (sidebar.js, inbox.js, digest.js, reader.js, sources.js, wiki.js), per
+ * the ES-modules migration (see
+ * docs/plans/2026-07-05-m2-0-frontend-modules-plan.md and
+ * .superpowers/sdd/task-1-report.md through task-5-report.md for the
+ * per-task migration history). base.html's import map (added in T5) maps
+ * the resolved "/static/js/core.js" specifier to a cache-busted URL so this
+ * file's updates invalidate stale clients like every other static asset.
  *
  * Pure functions (esc/num/formatDate/timeAgo) are covered by node:test in
  * js/tests/core.test.mjs with no DOM. renderMarkdown/apiFetch/showToast/

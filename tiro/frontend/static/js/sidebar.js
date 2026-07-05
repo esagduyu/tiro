@@ -13,14 +13,14 @@
  *
  * `type="module"` scripts do not leak declarations onto `window`. As of
  * Task 3 (reader.js) and Task 4 (sources.js/wiki.js), all four former
- * classic scripts that consumed app.js's globals are now modules that
- * import directly from core.js/sidebar.js instead — see those files' own
- * header comments. `window.showShortcuts`/`window.hideShortcuts` below are
- * consequently unreferenced dead weight (their only consumer, reader.js,
- * imports the named exports directly) but are left in place pending T5's
- * broader sidebar.js/base.html cleanup pass rather than removed here, out
- * of scope for this task. `window.timeAgo` WAS removed in Task 4 — see the
- * comment at its former call site below.
+ * classic scripts that consumed app.js's globals are now modules — reader.js
+ * (the only consumer of showShortcuts/hideShortcuts) and inbox.js both
+ * `import` the named exports directly from this file instead of reading
+ * them off `window`. T5 (closeout) removed the `window.showShortcuts`/
+ * `window.hideShortcuts` re-exposures accordingly (grep-confirmed
+ * consumer-free across templates/*.html and every js/*.js — see
+ * .superpowers/sdd/task-5-report.md). `window.timeAgo` was removed the same
+ * way back in Task 4.
  */
 
 import { esc, timeAgo } from "./core.js";
@@ -436,8 +436,8 @@ function setupSaveModal() {
 }
 
 /* ---- Keyboard-shortcuts overlay (shared markup in base.html; content
-   differs per page). Exported for inbox.js; re-exposed on window for
-   reader.js (still a classic script until Task 3). ---- */
+   differs per page). Exported for inbox.js and reader.js, both of which
+   `import` these directly — no window re-exposure needed or present. ---- */
 
 const INBOX_SHORTCUTS = [
     { section: "Navigation" },
@@ -520,15 +520,6 @@ export {
     showShortcuts, hideShortcuts, INBOX_SHORTCUTS, READER_SHORTCUTS,
     loadSavedViews, openSaveModal, closeSaveModal,
 };
-
-// Re-exposures for classic (non-module) scripts — see the file-header note.
-// `window.timeAgo` was removed in Task 4: wiki.js (its only remaining
-// consumer, guarded with `typeof timeAgo === "function"`) is now a module
-// that imports `timeAgo` from core.js directly — repo-wide grep confirmed
-// no other reference to `window.timeAgo` remains (see
-// .superpowers/sdd/task-4-report.md).
-window.showShortcuts = showShortcuts;
-window.hideShortcuts = hideShortcuts;
 
 /* ---- Init (runs on every page) ---- */
 

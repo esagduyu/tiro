@@ -230,7 +230,8 @@ def test_sidebar_js_has_saved_views_functions():
 def test_static_version_bumped_for_saved_views_ui():
     from tiro.app import STATIC_VERSION
 
-    # Bumped again for Task 9 (/wiki views) -- see test_wiki_views.py for the
-    # pin that owns "59" specifically; this test's job is just to confirm the
+    # Bumped again for Task 9 (/wiki views) and M2.0 Task 5 (frontend module
+    # closeout) -- see test_wiki_views.py / test_static_version.py for the
+    # pins that own specific values; this test's job is just to confirm the
     # saved-views-era bump wasn't silently reverted.
-    assert STATIC_VERSION in ("58", "59")
+    assert STATIC_VERSION in ("58", "59", "60")

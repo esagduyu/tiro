@@ -21,12 +21,21 @@ def test_pages_render_with_current_version(authenticated_client):
     assert resp.status_code == 200
     # app.js was split into js/sidebar.js (base.html, every page) + js/inbox.js
     # (inbox.html only) in M2.0 Task 2 — see
-    # docs/plans/2026-07-05-m2-0-frontend-modules-plan.md. sidebar.js is
-    # deliberately loaded WITHOUT a ?v= query (see the comment above its tag
-    # in base.html): it's the one module both entry-loaded from a template
-    # and relative-imported by other modules (inbox.js/digest.js), and a
-    # mismatched query string there causes the browser to instantiate it
-    # twice under native ES module resolution.
-    assert '/static/js/sidebar.js"' in resp.text
+    # docs/plans/2026-07-05-m2-0-frontend-modules-plan.md. sidebar.js's entry
+    # tag carries the normal ?v= query (restored in T5 closeout): the earlier
+    # bare-URL workaround for the double-instantiation bug (a versioned tag
+    # + an unversioned relative `import ... from "./sidebar.js"` were two
+    # distinct module identities) was replaced by an import map in
+    # base.html that rewrites the resolved "/static/js/sidebar.js" and
+    # "/static/js/core.js" specifiers to the SAME versioned URL the entry
+    # tag/other importers resolve to — see base.html's importmap comment and
+    # .superpowers/sdd/task-5-report.md for the full reasoning.
+    assert f"/static/js/sidebar.js?v={STATIC_VERSION}" in resp.text
     assert f"/static/js/inbox.js?v={STATIC_VERSION}" in resp.text
+    # Import map pins: both mapped specifiers must resolve to the current
+    # STATIC_VERSION, so nobody can silently remove or desync the map (which
+    # would resurrect the double-instantiation bug).
+    assert 'type="importmap"' in resp.text
+    assert f'"/static/js/core.js": "/static/js/core.js?v={STATIC_VERSION}"' in resp.text
+    assert f'"/static/js/sidebar.js": "/static/js/sidebar.js?v={STATIC_VERSION}"' in resp.text
     assert "?v=56" not in resp.text or STATIC_VERSION == "56"

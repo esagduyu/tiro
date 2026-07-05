@@ -140,24 +140,43 @@
     </div>
     <script src="/static/vendor/marked.min.js?v={{ static_v }}"></script>
     <script src="/static/vendor/purify.min.js?v={{ static_v }}"></script>
-    <!-- sidebar.js has no cache-bust query string, unlike every other
-         static asset tag. This is deliberate, not an oversight: it's the
-         only module here that's both entry-loaded from a template AND
-         imported by other ES modules (inbox.js, digest.js do
-         `import ... from "./sidebar.js"`). A relative import specifier
-         resolves against the IMPORTING module's URL and never carries over
-         a query string, so if this tag carried a cache-bust suffix while
-         the relative import resolved to the same path without one, the
-         browser's module specifier map would treat them as two distinct
-         modules and instantiate + execute sidebar.js TWICE (double
-         DOMContentLoaded registration, double event listeners — this was
+    <!-- Import map (T5/M2.0 closeout): fixes cache-busting for the two
+         modules that are both entry-loaded from a template tag AND
+         relative-imported by other ES modules (sidebar.js: imported by
+         inbox.js/reader.js; core.js: imported by every module). A relative
+         import specifier (e.g. `import ... from "./sidebar.js"`) resolves
+         against the IMPORTING module's own URL and never carries over a
+         query string, so without this map, `./sidebar.js` always resolved
+         to the bare "/static/js/sidebar.js" regardless of what query string
+         the entry tag below used. If the entry tag carried a cache-bust
+         query string while the relative import resolved to the same path
+         without one, the browser's module specifier map would treat them
+         as two distinct module identities and instantiate + execute
+         sidebar.js TWICE
+         (double DOMContentLoaded registration, double event listeners —
          caught as a live bug in Task 2's Playwright run: it double-
          submitted the save-modal form on Enter, creating duplicate
-         articles). core.js has the same property and is handled the same
-         way — it has no template tag at all, only ever reached via
-         "./core.js" imports, so every reference to it already resolves to
-         one identical unversioned URL. -->
-    <script type="module" src="/static/js/sidebar.js"></script>
+         articles). The fix: this import map rewrites the bare specifier
+         to the SAME versioned URL the entry tag below requests, so both
+         paths resolve to one identical URL and the module loads exactly
+         once. Deliberately minimal — only sidebar.js and core.js are
+         mapped (the two actually reached via relative `import`); the
+         per-page leaf entry modules (inbox.js/digest.js/reader.js/
+         sources.js/wiki.js) are loaded ONLY via `<script src>` tags that
+         already carry `?v={{ static_v }}` directly and are never
+         `import`ed by anything else, so a map entry for them would be
+         inert (import maps rewrite `import` specifiers, not `src`
+         attributes) — see .superpowers/sdd/task-5-report.md for the full
+         reasoning. Must appear before any `<script type="module">` tag. -->
+    <script type="importmap">
+    {
+        "imports": {
+            "/static/js/core.js": "/static/js/core.js?v={{ static_v }}",
+            "/static/js/sidebar.js": "/static/js/sidebar.js?v={{ static_v }}"
+        }
+    }
+    </script>
+    <script type="module" src="/static/js/sidebar.js?v={{ static_v }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>
