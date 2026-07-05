@@ -66,6 +66,16 @@ def page_path(config: TiroConfig, slug: str) -> Path:
     parts = Path(slug).parts
     if ".." in parts or any(p in ("", ".") for p in parts):
         raise ValueError(f"invalid wiki slug: {slug!r}")
+    # A slug ending in "/" (e.g. "entities/" -- what a non-Latin name that
+    # `wiki_slugify()` collapses to "" produces upstream, W3) has
+    # Path(...).parts silently drop the trailing empty segment, passing the
+    # check above while still resolving to a bare ".md" file
+    # (wiki_dir/entities/.md). Guard the raw string's final segment
+    # explicitly -- defense in depth alongside wiki_gen._generate's earlier,
+    # more specific check.
+    final_segment = slug.rsplit("/", 1)[-1]
+    if not final_segment or final_segment == ".md":
+        raise ValueError(f"invalid wiki slug (empty page name): {slug!r}")
     return config.wiki_dir / f"{slug}.md"
 
 
@@ -263,6 +273,44 @@ def _mark_file_stale(path: Path) -> None:
         logger.warning("Failed to mark wiki page file stale (%s): %s", path, e)
 
 
+def mark_page_ids_stale(config: TiroConfig, conn, page_ids: list[int]) -> int:
+    """Mark stale every wiki page in `page_ids` -- both the derived
+    `wiki_pages` row and, best-effort, the page file's frontmatter status
+    (files are truth, so a later files-win reconcile would otherwise
+    clobber the DB flag back to whatever the untouched file says).
+
+    Shared plumbing: `mark_pages_stale()` resolves slugs from an article's
+    entity/tag junctions and delegates here; `delete_article()`
+    (tiro/lifecycle.py) resolves page ids from `wiki_page_articles` for the
+    article being deleted and delegates here too, so a deleted article's
+    citations always flip their page(s) stale rather than just vanishing
+    from the junction. Returns the number of ids matched (an id that no
+    longer exists is silently skipped, not an error)."""
+    page_ids = list(dict.fromkeys(page_ids))  # de-dupe, preserve order
+    if not page_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in page_ids)
+    params = tuple(page_ids)
+    matched = conn.execute(
+        f"SELECT id, slug, status FROM wiki_pages WHERE id IN ({placeholders})",
+        params,
+    ).fetchall()
+    if not matched:
+        return 0
+
+    conn.execute(
+        f"UPDATE wiki_pages SET status = 'stale' "
+        f"WHERE id IN ({placeholders}) AND status != 'stale'",
+        params,
+    )
+    for p in matched:
+        path = page_path(config, p["slug"])
+        if path.exists():
+            _mark_file_stale(path)
+    return len(matched)
+
+
 def mark_pages_stale(config: TiroConfig, conn, article_id: int) -> int:
     """Mark stale every wiki page whose slug matches an entity/tag node that
     just gained a link to `article_id` (via the article_entities/article_tags
@@ -273,10 +321,7 @@ def mark_pages_stale(config: TiroConfig, conn, article_id: int) -> int:
     "Context Engineering" still has slug `concepts/context-engineering`) and
     type-safe by construction -- the `entities/`/`concepts/` prefix is what
     used to be a separate kind check. Free SQL -- no LLM, safe to call
-    inside the ingest transaction. Updates the derived row AND (best-effort)
-    the page file's frontmatter status, since files are truth and a later
-    files-win reconcile would otherwise clobber the DB flag back to
-    whatever the untouched file says. Returns the number of pages matched
+    inside the ingest transaction. Returns the number of pages matched
     (whether or not they were already stale)."""
     entity_slugs = {
         f"entities/{wiki_slugify(row['name'])}"
@@ -304,23 +349,13 @@ def mark_pages_stale(config: TiroConfig, conn, article_id: int) -> int:
 
     placeholders = ",".join("?" for _ in expected_slugs)
     params = tuple(expected_slugs)
-    matched = conn.execute(
-        f"SELECT id, slug, status FROM wiki_pages WHERE slug IN ({placeholders})",
-        params,
-    ).fetchall()
-    if not matched:
-        return 0
-
-    conn.execute(
-        f"UPDATE wiki_pages SET status = 'stale' "
-        f"WHERE slug IN ({placeholders}) AND status != 'stale'",
-        params,
-    )
-    for p in matched:
-        path = page_path(config, p["slug"])
-        if path.exists():
-            _mark_file_stale(path)
-    return len(matched)
+    matched_ids = [
+        row["id"]
+        for row in conn.execute(
+            f"SELECT id FROM wiki_pages WHERE slug IN ({placeholders})", params
+        ).fetchall()
+    ]
+    return mark_page_ids_stale(config, conn, matched_ids)
 
 
 def reconcile_wiki_index(config: TiroConfig) -> dict:
@@ -331,7 +366,9 @@ def reconcile_wiki_index(config: TiroConfig) -> dict:
     so one corrupt page can't block the whole reconcile.
 
     Returns {"pages": n rebuilt, "skipped": n unparseable files,
-    "unresolved_articles": n cited article_uids that didn't resolve}."""
+    "unresolved_articles": n cited article_uids that didn't resolve,
+    "duplicate_uids": n files whose frontmatter uid collided with an
+    earlier-sorted file's this run}."""
     files = []
     if config.wiki_dir.exists():
         files = sorted(
@@ -370,7 +407,30 @@ def reconcile_wiki_index(config: TiroConfig) -> dict:
         conn.execute("DELETE FROM wiki_page_articles")
         conn.execute("DELETE FROM wiki_pages")
         unresolved = 0
+        duplicate_uids = 0
+        seen_uids: set[str] = set()
         for p in parsed:
+            # Template-copying a page file (`cp entities/a.md entities/b.md`)
+            # carries the source file's uid along, so two files can share a
+            # uid -- idx_wiki_pages_uid is a UNIQUE index and would raise on
+            # the second insert. `files` (and therefore `parsed`) is sorted,
+            # so "later" is deterministic: the earlier-sorted file keeps its
+            # uid, the later one's DERIVED ROW gets a fresh uid. The file
+            # itself is never rewritten -- files-win means the row diverging
+            # from its file's frontmatter uid is the accepted cost of a
+            # collision, not something reconcile silently "fixes" on disk.
+            uid = p["uid"]
+            if uid in seen_uids:
+                duplicate_uids += 1
+                logger.warning(
+                    "reconcile: wiki page %s has uid %r already used by an "
+                    "earlier-sorted page this run; assigning a fresh row-only uid",
+                    p["slug"], uid,
+                )
+                uid = new_ulid()
+            else:
+                seen_uids.add(uid)
+
             article_ids = []
             for a_uid in p["article_uids"]:
                 row = conn.execute("SELECT id FROM articles WHERE uid = ?", (a_uid,)).fetchone()
@@ -383,7 +443,7 @@ def reconcile_wiki_index(config: TiroConfig) -> dict:
                     )
             _upsert_wiki_page_row(
                 conn,
-                uid=p["uid"],
+                uid=uid,
                 slug=p["slug"],
                 kind=p["kind"],
                 title=p["title"],
@@ -397,7 +457,12 @@ def reconcile_wiki_index(config: TiroConfig) -> dict:
     finally:
         conn.close()
 
-    return {"pages": len(parsed), "skipped": skipped, "unresolved_articles": unresolved}
+    return {
+        "pages": len(parsed),
+        "skipped": skipped,
+        "unresolved_articles": unresolved,
+        "duplicate_uids": duplicate_uids,
+    }
 
 
 def ensure_schema_file(config: TiroConfig) -> Path:

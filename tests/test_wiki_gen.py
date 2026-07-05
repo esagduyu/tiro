@@ -333,6 +333,22 @@ def test_generate_wiki_page_no_linked_articles_raises(initialized_library):
         generate_wiki_page(config, "tag", tag_id)
 
 
+def test_generate_wiki_page_non_latin_name_yields_empty_slug_raises(initialized_library):
+    """wiki_slugify() strips all non a-z0-9 runs, so a name written entirely
+    in a non-Latin script collapses to "" -- an unresolvable slug that would
+    otherwise land every such entity on the same `entities/.md` file (W3).
+    Must raise before any LLM call/gather -- fails fast on slug derivation."""
+    config = initialized_library
+    source_id = _seed_source(config)
+    article_id, _ = _seed_article(config, source_id, "a1", title="T1", summary="s")
+    entity_id = _link_entity(config, article_id, "中文实体", entity_type="company")
+
+    with pytest.raises(WikiGenerationError, match="empty slug"):
+        generate_wiki_page(config, "entity", entity_id)
+
+    assert _wiki_page_count(config) == 0
+
+
 # --- generate_wiki_page: 404-equivalents -----------------------------------------
 
 

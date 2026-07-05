@@ -1,5 +1,8 @@
 """Wiki API routes (tiro/api/routes_wiki.py): list, read, generate, regenerate."""
 
+from fastapi.testclient import TestClient
+
+from tests.conftest import TEST_PASSWORD
 from tiro.database import get_connection
 from tiro.migrations import canonical_key, new_ulid
 from tiro.wiki import write_page
@@ -80,6 +83,49 @@ def _link_tag(config, article_id, name):
         return tag_id
     finally:
         conn.close()
+
+
+# --- startup reconcile --------------------------------------------------------
+
+
+def test_startup_reconciles_hand_written_wiki_file(configured_library):
+    """A hand-edited/hand-added wiki page file with no matching derived rows
+    (e.g. `cp`'d in from elsewhere, or the DB wiped) must show up after the
+    app restarts -- app.py's lifespan runs reconcile_wiki_index() (files
+    win) right after migrate_db/init_vectorstore, so metadata drift heals on
+    the next startup without waiting for a manual `tiro doctor --fix`."""
+    from tiro.app import create_app
+
+    config = configured_library
+    (config.wiki_dir / "entities").mkdir(parents=True, exist_ok=True)
+    (config.wiki_dir / "entities" / "acme.md").write_text(
+        "---\n"
+        "uid: 01HANDWRITTENACMEPAGE0000\n"
+        "kind: entity\n"
+        "title: Acme\n"
+        "entity_type: company\n"
+        "status: fresh\n"
+        "article_uids: []\n"
+        "source_count: 0\n"
+        "---\n"
+        "Hand-written body, never went through write_page().\n"
+    )
+
+    # Confirm the premise: the derived table is empty before startup.
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 0
+    finally:
+        conn.close()
+
+    app = create_app(config)
+    with TestClient(app, base_url="http://localhost", follow_redirects=False) as client:
+        client.post("/api/auth/login", json={"password": TEST_PASSWORD})
+        r = client.get("/api/wiki")
+
+    assert r.status_code == 200
+    slugs = {p["slug"] for p in r.json()["data"]["pages"]}
+    assert "entities/acme" in slugs
 
 
 # --- GET /api/wiki (list) -----------------------------------------------------

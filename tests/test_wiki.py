@@ -2,6 +2,7 @@
 
 import re
 
+import frontmatter
 import pytest
 
 from tiro.database import get_connection
@@ -197,6 +198,29 @@ def test_write_page_rejects_invalid_kind(initialized_library):
             body="body",
             generated_by=None,
         )
+
+
+def test_write_page_rejects_empty_page_name(initialized_library):
+    """A slug like "entities/" (final segment empty, e.g. from a name that
+    slugified to "") must be rejected -- otherwise it silently resolves to
+    a bare ".md" file (wiki_dir/entities/.md) instead of raising, and every
+    non-Latin-named entity would collapse onto that one unresolvable file."""
+    with pytest.raises(ValueError):
+        write_page(
+            initialized_library,
+            slug="entities/",
+            kind="entity",
+            title="?",
+            entity_type="company",
+            article_uids=[],
+            body="body",
+            generated_by=None,
+        )
+
+
+def test_page_path_rejects_dot_md_only_slug(initialized_library):
+    with pytest.raises(ValueError):
+        page_path(initialized_library, "entities/")
 
 
 def test_write_page_uid_stability_across_rewrite(initialized_library):
@@ -514,6 +538,53 @@ def test_reconcile_excludes_bookkeeping_files(initialized_library):
     # _schema.md/index.md/log.md exist alongside the one real page but must
     # not be counted as pages.
     assert counts["pages"] == 1
+
+
+def test_reconcile_handles_duplicate_uids_across_files(initialized_library):
+    """Template-copying a page file (`cp entities/a.md entities/b.md`) means
+    two files share a uid. idx_wiki_pages_uid is a UNIQUE index, so a naive
+    rebuild would IntegrityError on the second insert; reconcile must instead
+    mint a fresh row-only uid for the later file (sorted order) and keep
+    going, reporting the collision rather than crashing."""
+    result = write_page(
+        initialized_library,
+        slug="entities/anthropic",
+        kind="entity",
+        title="Anthropic",
+        entity_type="company",
+        article_uids=[],
+        body="original",
+        generated_by=None,
+    )
+    original_uid = result["uid"]
+
+    # Simulate `cp entities/anthropic.md entities/anthropic-copy.md` --
+    # same frontmatter uid, different slug/file.
+    src_path = page_path(initialized_library, "entities/anthropic")
+    dup_path = page_path(initialized_library, "entities/anthropic-copy")
+    dup_path.write_text(src_path.read_text())
+
+    counts = reconcile_wiki_index(initialized_library)
+    assert counts["pages"] == 2
+    assert counts["duplicate_uids"] == 1
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT slug, uid FROM wiki_pages WHERE slug IN "
+            "('entities/anthropic', 'entities/anthropic-copy') ORDER BY slug"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2
+    uids = {r["uid"] for r in rows}
+    assert len(uids) == 2  # the later file's row got a fresh uid
+    assert original_uid in uids
+
+    # Files themselves are never touched -- the copy's file still has the
+    # original (now-duplicate) uid in its frontmatter; only the derived row
+    # diverges.
+    assert frontmatter.load(str(dup_path)).metadata["uid"] == original_uid
 
 
 # --- mark_pages_stale ------------------------------------------------------------

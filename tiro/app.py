@@ -230,6 +230,20 @@ async def lifespan(app: FastAPI):
     init_db(config.db_path)
     migrate_db(config.db_path)
 
+    # Reconcile the wiki derived index (Phase 1b) from what's on disk (files
+    # win). Heals metadata drift that doctor's slug-presence-only check
+    # can't see -- e.g. hand-edited frontmatter fields, or files dropped in
+    # out-of-band -- without waiting for a manual `tiro doctor --fix`.
+    # Cheap at wiki-library scale (one rglob + per-file frontmatter parse);
+    # best-effort like every other startup step here, since a wiki index
+    # hiccup must never block the server from coming up.
+    try:
+        from tiro.wiki import reconcile_wiki_index
+
+        reconcile_wiki_index(config)
+    except Exception as e:
+        logger.error("Startup wiki reconcile failed (non-fatal): %s", e)
+
     # Initialize ChromaDB with configured embedding model
     init_vectorstore(config.chroma_dir, config.default_embedding_model)
 

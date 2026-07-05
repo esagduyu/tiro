@@ -1,11 +1,11 @@
-"""On-demand wiki page generation (Phase 1b, wave W2): the trust boundary
+"""On-demand wiki page generation (Phase 1b, wave W1): the trust boundary
 between the library's data and a written wiki page.
 
 Every page is generated from exactly three ingredients: the gathered
 articles' summaries/trust-signals, the (user-editable) `_schema.md`
 maintenance instructions, and the page's OWN prior body (never another
 page's). This module never reads another wiki page's content -- cross-page
-context is out of scope for W2 by design.
+context is out of scope for W1 by design.
 
 Citations are mandatory, not cosmetic: the model's output is scanned for
 `[[stem|label]]` links, and every target is resolved against the stems of
@@ -164,7 +164,19 @@ def _generate(config: TiroConfig, node_type: str, node_id: int, *, from_scratch:
     page already exists) -- a fresh take on the content, not a fresh page.
     """
     title, kind, entity_type = _resolve_node(config, node_type, node_id)
-    slug = f"{_KIND_SLUG_PREFIX[kind]}/{wiki_slugify(title)}"
+    name_slug = wiki_slugify(title)
+    if not name_slug:
+        # wiki_slugify() strips every non a-z0-9 run, so a name written
+        # entirely in a non-Latin script (e.g. "中文实体") collapses to "".
+        # Left unguarded, every such name would resolve to the SAME
+        # unresolvable page file (wiki_dir/{kind}/.md) -- fail fast here,
+        # before any gather/LLM call, rather than let it through to
+        # write_page()'s page_path() guard (defense in depth, W3).
+        raise WikiGenerationError(
+            f"{node_type} {node_id} ({title!r}) yields an empty slug -- "
+            "non-Latin names are not yet supported (W3)"
+        )
+    slug = f"{_KIND_SLUG_PREFIX[kind]}/{name_slug}"
 
     articles = gather_node_articles(config, node_type, node_id)
     if not articles:

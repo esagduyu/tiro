@@ -7,6 +7,17 @@ are not imported (regenerable caches, this-library activity, or fileless).
 No stats increments, no AI calls; imported articles get
 vector_status='pending' and the retry loop embeds them.
 
+Bundles CARRY a `wiki/` directory (Phase 1b) when the source library has
+synthesis pages, but this module does NOT import it -- `wiki/` page files
+are silently ignored the same way digests/reading_stats are. Wiki page
+import/merge is out of scope for W1; snapshots/restore (whole-library,
+not merge) round-trip `wiki/` faithfully since they copy the directory
+wholesale rather than reversing it row-by-row. This module DOES,
+however, stale-mark any EXISTING local wiki page whose node an imported
+article newly links to (see the `mark_pages_stale` call below) -- import
+is an ingest path like web/email ingestion, so a page's trust status must
+degrade when new source material shows up under it, bundle-imported or not.
+
 Failure semantics: all SQLite writes for a run happen in one transaction
 (commit only at the end) — a mid-run crash leaves the DB untouched. Markdown
 writes are NOT part of that transaction: `_overwrite_article` rewrites the
@@ -27,6 +38,7 @@ from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import canonical_key, new_ulid
+from tiro.wiki import mark_pages_stale
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +150,20 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                     conn.execute(
                         "INSERT OR IGNORE INTO article_entities (article_id, entity_id) VALUES (?, ?)",
                         (local_article_id, local_entity_id),
+                    )
+
+                # Mark stale any wiki pages for entities/tags this article
+                # just linked to (Phase 1b) -- import is an ingest path like
+                # web/email ingestion, same non-fatal pattern as
+                # processor.py's hook: free SQL + frontmatter rewrite, no
+                # LLM, but best-effort bookkeeping that must never fail the
+                # import itself.
+                try:
+                    mark_pages_stale(config, conn, local_article_id)
+                except Exception as e:
+                    logger.error(
+                        "mark_pages_stale failed for imported article %d (non-fatal): %s",
+                        local_article_id, e,
                     )
 
         sources_after = {r["id"] for r in conn.execute("SELECT id FROM sources").fetchall()}

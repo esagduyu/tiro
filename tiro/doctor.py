@@ -313,7 +313,8 @@ def fix(config: TiroConfig) -> dict:
         actions.append(
             f"reconciled wiki index: {wiki_result['pages']} page(s) indexed "
             f"({wiki_result['skipped']} skipped, "
-            f"{wiki_result['unresolved_articles']} unresolved article ref(s))"
+            f"{wiki_result['unresolved_articles']} unresolved article ref(s), "
+            f"{wiki_result['duplicate_uids']} duplicate uid(s))"
         )
 
     report["actions"] = actions
