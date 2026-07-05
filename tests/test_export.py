@@ -136,3 +136,11 @@ def test_opml_endpoint(authenticated_client):
     resp = authenticated_client.get("/api/export/opml")
     assert resp.status_code == 200
     assert "opml" in resp.headers["content-type"]
+
+
+def test_export_schema_doc_lists_all_metadata_keys():
+    from pathlib import Path
+
+    doc = (Path(__file__).parent.parent / "EXPORT_SCHEMA.md").read_text()
+    for key in ("digests", "reading_stats", "audio", "sources.opml", "uid"):
+        assert key in doc, key

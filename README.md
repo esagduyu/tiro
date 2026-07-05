@@ -316,6 +316,8 @@ The zip contains:
 
 Also available via the API (`GET /api/export`) and the Export button on the Stats page.
 
+Full bundle format (metadata.json keys, markdown frontmatter, OPML semantics, identity/versioning rules for importer authors) is documented in [EXPORT_SCHEMA.md](EXPORT_SCHEMA.md).
+
 ---
 
 ## Keyboard Shortcuts
