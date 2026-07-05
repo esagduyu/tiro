@@ -2,19 +2,20 @@
 
 import pytest
 
+from tiro.authors import link_article_author
 from tiro.database import get_connection
 from tiro.export import export_library
 from tiro.importer import import_bundle
 
 
 def _seed(config, *, title="T1", slug="art-1", uid="01AAAAAAAAAAAAAAAAAAAAAAAA",
-          url="https://x.com/a", rating=None):
+          url="https://x.com/a", rating=None, author=None):
     conn = get_connection(config.db_path)
     conn.execute("INSERT OR IGNORE INTO sources (name, source_type) VALUES ('Src', 'web')")
     conn.execute(
-        "INSERT INTO articles (uid, source_id, title, slug, markdown_path, url, rating)"
-        " VALUES (?, 1, ?, ?, ?, ?, ?)",
-        (uid, title, slug, f"{slug}.md", url, rating),
+        "INSERT INTO articles (uid, source_id, title, author, slug, markdown_path, url, rating)"
+        " VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+        (uid, title, author, slug, f"{slug}.md", url, rating),
     )
     conn.execute("INSERT OR IGNORE INTO tags (uid, name) VALUES ('01TAG000000000000000000000', 'ai')")
     conn.execute("INSERT OR IGNORE INTO article_tags (article_id, tag_id) VALUES (1, 1)")
@@ -222,6 +223,126 @@ def test_overwrite_preserves_fields_absent_from_bundle(initialized_library, tmp_
         # is_read survives untouched; other bundle-present fields still apply.
         assert row["is_read"] == 1
         assert row["title"] == "T1"
+    finally:
+        bundle.unlink()
+        stripped.unlink()
+
+
+def _authors_for(conn, article_id):
+    return {
+        r["name"] for r in conn.execute(
+            "SELECT au.name FROM authors au"
+            " JOIN article_authors aa ON aa.author_id = au.id"
+            " WHERE aa.article_id = ?",
+            (article_id,),
+        ).fetchall()
+    }
+
+
+def test_round_trip_links_author(initialized_library, tmp_path):
+    """Final-review item 1: importing a fresh article carrying an author
+    must create the authors row + article_authors junction, not just write
+    the free-text articles.author column — otherwise imported articles are
+    invisible to author VIP (decay/digest) and /api/authors counts."""
+    config = initialized_library
+    _seed(config, author="Jane Reporter")
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        result = import_bundle(target, bundle)
+        assert result["imported"] == 1
+
+        conn = get_connection(target.db_path)
+        row = conn.execute("SELECT id, author FROM articles").fetchone()
+        assert row["author"] == "Jane Reporter"
+        assert _authors_for(conn, row["id"]) == {"Jane Reporter"}
+        conn.close()
+    finally:
+        bundle.unlink()
+
+
+def test_overwrite_changing_author_updates_junction(initialized_library, tmp_path):
+    """Overwrite-import applies the bundle's author to the free-text column
+    (existing behavior via _OVERWRITE_FIELDS) AND must swap the
+    article_authors junction to match: drop the old author's link, link the
+    new one."""
+    config = initialized_library
+    _seed(config, author="Old Author")
+    conn = get_connection(config.db_path)
+    link_article_author(conn, 1, "Old Author")
+    conn.commit()
+    conn.close()
+    bundle = export_library(config)
+    try:
+        # Simulate the bundle carrying a different author than what's
+        # currently in the target library (edit the exported bundle).
+        import json
+        import zipfile
+
+        changed = tmp_path / "changed.zip"
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(changed, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "metadata.json":
+                    meta = json.loads(data)
+                    for art in meta["articles"]:
+                        art["author"] = "New Author"
+                    data = json.dumps(meta).encode()
+                zout.writestr(item, data)
+
+        result = import_bundle(config, changed, conflicts="overwrite")
+        assert result["overwritten"] == 1
+
+        conn = get_connection(config.db_path)
+        row = conn.execute("SELECT id, author FROM articles").fetchone()
+        assert row["author"] == "New Author"
+        assert _authors_for(conn, row["id"]) == {"New Author"}
+        conn.close()
+    finally:
+        bundle.unlink()
+        changed.unlink()
+
+
+def test_overwrite_without_author_key_leaves_junction_untouched(initialized_library, tmp_path):
+    """M1.1 absent-field guard extended to authors: when the bundle's article
+    dict lacks the 'author' key entirely (older schema), the existing
+    article_authors junction must be left alone — not cleared, not
+    re-derived from the (missing) bundle value."""
+    config = initialized_library
+    _seed(config, author="Kept Author")
+    # _seed writes the articles row directly (bypassing process_article),
+    # so link the junction by hand to set up the "existing junction" this
+    # test is about preserving.
+    conn = get_connection(config.db_path)
+    link_article_author(conn, 1, "Kept Author")
+    conn.commit()
+    conn.close()
+    bundle = export_library(config)
+    try:
+        import json
+        import zipfile
+
+        stripped = tmp_path / "stripped-author.zip"
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(stripped, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "metadata.json":
+                    meta = json.loads(data)
+                    for art in meta["articles"]:
+                        art.pop("author", None)
+                    data = json.dumps(meta).encode()
+                zout.writestr(item, data)
+
+        result = import_bundle(config, stripped, conflicts="overwrite")
+        assert result["overwritten"] == 1
+
+        conn = get_connection(config.db_path)
+        row = conn.execute("SELECT id, author FROM articles").fetchone()
+        # author column itself untouched (already covered by the M1.1 test);
+        # the point here is the junction survives too.
+        assert row["author"] == "Kept Author"
+        assert _authors_for(conn, row["id"]) == {"Kept Author"}
+        conn.close()
     finally:
         bundle.unlink()
         stripped.unlink()

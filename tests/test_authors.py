@@ -347,7 +347,9 @@ def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkey
     def capture_prompt(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return real_prompt_fn(*args, **kwargs)
+        composed = real_prompt_fn(*args, **kwargs)
+        captured["composed"] = composed
+        return composed
 
     monkeypatch.setattr(digest_mod, "daily_digest_prompt", capture_prompt)
 
@@ -364,6 +366,12 @@ def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkey
     assert any(
         isinstance(a, list) and "Digest VIP Writer" in a for a in all_args
     ), captured
+
+    # Pin that the author name actually makes it into the COMPOSED prompt
+    # string (not just passed as an argument) — guards against the
+    # `{vip_authors_line}` placeholder being silently dropped from
+    # daily_digest.txt, since str.format() ignores unused kwargs.
+    assert "Digest VIP Writer" in captured["composed"], captured["composed"]
 
     # The article gathered for the article itself is also flagged VIP via
     # the author link even though its source is not VIP.

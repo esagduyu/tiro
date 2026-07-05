@@ -126,6 +126,8 @@ docker compose up -d
 
 (`tiro set-password` refuses to run against a config.yaml that doesn't exist yet, hence creating a minimal one first — this sidesteps the fully-interactive `tiro init` wizard, which isn't a great fit for a one-shot container command. `set-password` itself prompts for the password twice via a real terminal.)
 
+Alternatively, `TIRO_AUTH_PASSWORD_HASH` can be set in the container's environment to a pre-computed bcrypt hash (not a plaintext password) to pre-seed auth without the interactive `set-password` step — the trade-off is that the hash then shows up in `docker inspect`, so the `set-password` flow above remains the recommended path for anything beyond quick, disposable setups.
+
 `config.yaml` lives at `/data/config.yaml` — inside the named `tiro-data` volume, alongside the library — so the password survives container recreation, not just restarts. Once it's up, open `http://localhost:8000` and log in.
 
 The compose file sets `restart: "no"` rather than `unless-stopped`: verified in practice, Docker's restart backoff respawns the refusing container several times a second (it exits fast, so the backoff never has time to slow down), which floods the log without ever helping. `restart: "no"` just exits once with the refusal message; switch it to `unless-stopped` yourself once a password is set and you want the service to survive host reboots unattended.
