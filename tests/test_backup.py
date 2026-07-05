@@ -186,3 +186,9 @@ def test_restore_rejects_traversal_members(initialized_library, tmp_path):
     with pytest.raises(ValueError, match="unsafe path"):
         restore_snapshot(initialized_library, evil)
     assert not (tmp_path / "outside.md").exists()
+    # Atomicity: validation must reject the whole archive BEFORE the live
+    # library is displaced — no .bak sibling should have been created.
+    assert initialized_library.library.exists()
+    assert not list(
+        initialized_library.library.parent.glob(f"{initialized_library.library.name}.bak.*")
+    )

@@ -190,16 +190,18 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
     vector_status='pending' (retry loop re-embeds). Audio rows whose MP3 is
     not present after restore are deleted (cache reconciliation — digest and
     analysis caches live inside the restored tiro.db and are consistent by
-    construction). Run with the server stopped.
+    construction). The entire archive is validated (traversal/link checks on
+    every member, plus the manifest) before anything is touched, so a
+    malicious or corrupt snapshot fails before the live library is displaced.
+    Run with the server stopped.
     """
     snapshot_path = Path(snapshot_path)
-    # Pass 1: validate manifest before touching anything
+    # Pass 1: validate EVERY member and the manifest before touching anything
     manifest = None
     with _open_tar_zst_read(snapshot_path) as tar:
         for member in _safe_members(tar):
             if member.name == "manifest.json":
                 manifest = json.loads(tar.extractfile(member).read())
-                break
     if manifest is None:
         raise ValueError("not a Tiro snapshot: manifest.json missing")
     if manifest.get("format_version") != SNAPSHOT_FORMAT_VERSION:
@@ -207,6 +209,7 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
             f"unsupported snapshot format_version {manifest.get('format_version')!r}"
         )
 
+    # The library is only displaced after the full archive has passed validation
     # Displace the live library (keep it — this IS the pre-restore backup)
     library = config.library
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
