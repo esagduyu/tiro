@@ -166,6 +166,53 @@ def test_restore_cleans_audio_rows_without_files(initialized_library, tmp_path):
     assert result["audio_rows_cleaned"] == 1
 
 
+def test_auto_backup_retention(initialized_library):
+    from tiro.backup import auto_backup
+
+    config = initialized_library
+    _seed_article(config)
+    config.backup_auto_keep = 3
+    made = [auto_backup(config, "test") for _ in range(5)]
+    assert all(p is not None for p in made)
+    remaining = sorted((config.library / "backups" / "auto").glob("*.tar.zst"))
+    assert len(remaining) == 3
+    # newest three survive
+    assert {p.name for p in remaining} == {p.name for p in made[-3:]}
+
+
+def test_auto_backup_never_raises(initialized_library, monkeypatch):
+    from tiro import backup as backup_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(backup_mod, "create_snapshot", boom)
+    assert backup_mod.auto_backup(initialized_library, "test") is None
+
+
+def test_list_snapshots(initialized_library):
+    from tiro.backup import auto_backup, list_snapshots
+
+    config = initialized_library
+    _seed_article(config)
+    create_snapshot(config)  # manual default location
+    auto_backup(config, "classify")
+    snaps = list_snapshots(config)
+    kinds = {s["kind"] for s in snaps}
+    assert kinds == {"manual", "auto"}
+    assert all(s["size_bytes"] > 0 for s in snaps)
+
+
+def test_auto_backup_disabled_when_keep_zero(initialized_library):
+    from tiro.backup import auto_backup
+
+    config = initialized_library
+    _seed_article(config)
+    config.backup_auto_keep = 0
+    assert auto_backup(config, "test") is None
+    assert not (config.library / "backups" / "auto").exists()
+
+
 def test_restore_rejects_traversal_members(initialized_library, tmp_path):
     """A malicious snapshot must not write outside the library."""
     import io

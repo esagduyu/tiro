@@ -168,6 +168,62 @@ def create_snapshot(
     return output_path
 
 
+def auto_backup(config: TiroConfig, reason: str) -> Path | None:
+    """Best-effort snapshot before a destructive operation. Never raises.
+
+    Mirrors the audit-log invariant (tiro/audit.py): failures here must never
+    propagate into the caller (reclassify, source delete, etc.). Writes into
+    {library}/backups/auto/ and prunes down to `config.backup_auto_keep`
+    newest snapshots (mtime order; manual/ snapshots are never touched).
+    """
+    try:
+        keep = config.backup_auto_keep
+        if keep <= 0:
+            return None
+        auto_dir = config.library / "backups" / "auto"
+        auto_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        n = 0
+        while True:
+            suffix = f"-{n}" if n else ""
+            dest = auto_dir / f"{ts}-{reason}{suffix}.tar.zst"
+            if not dest.exists():
+                break
+            n += 1
+        path = create_snapshot(config, dest)
+        # Retention: newest `keep` survive. Sort by (mtime, name) — 5 snapshots
+        # created within the same second can share a coarse filesystem mtime,
+        # so name is the tiebreaker (embeds the -n disambiguation suffix, which
+        # increases lexically in creation order).
+        snaps = sorted(auto_dir.glob("*.tar.zst"), key=lambda p: (p.stat().st_mtime, p.name))
+        for old in snaps[:-keep]:
+            old.unlink(missing_ok=True)
+        return path
+    except Exception as e:
+        logger.error("Auto-backup failed (%s): %s", reason, e)
+        return None
+
+
+def list_snapshots(config: TiroConfig) -> list[dict]:
+    """List manual + auto snapshots, newest first."""
+    out = []
+    for kind in ("manual", "auto"):
+        d = config.library / "backups" / kind
+        if not d.exists():
+            continue
+        for p in d.glob("*.tar.zst"):
+            st = p.stat()
+            out.append({
+                "name": p.name,
+                "path": str(p),
+                "kind": kind,
+                "size_bytes": st.st_size,
+                "created_at": datetime.fromtimestamp(st.st_mtime, tz=UTC)
+                .isoformat(timespec="seconds"),
+            })
+    return sorted(out, key=lambda s: s["created_at"], reverse=True)
+
+
 def _safe_members(tar: tarfile.TarFile):
     """Yield members, rejecting absolute paths / traversal (CVE-class guard).
     Explicit loop instead of extractall(filter='data'): that keyword needs
