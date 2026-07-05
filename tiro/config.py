@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import yaml
@@ -96,6 +96,38 @@ class TiroConfig:
         return self.library / "wiki"
 
 
+_ENV_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _apply_env_overlay(config: "TiroConfig") -> None:
+    """Overlay TIRO_<FIELD_UPPER> environment variables onto an already-built
+    config (YAML values + dataclass defaults). Precedence: env > yaml >
+    defaults. Every TiroConfig field except config_path is eligible.
+
+    Type coercion is driven by the field's declared type: bool via a
+    casefolded membership test against {"1","true","yes","on"} (anything
+    else, including ""), int via int(), float via float(), everything else
+    (str, and Optional[str] fields) verbatim. Never logs values — several
+    fields hold secrets (API keys, SMTP/IMAP passwords, the auth hash).
+    """
+    for field in fields(config):
+        if field.name == "config_path":
+            continue
+        env_name = f"TIRO_{field.name.upper()}"
+        if env_name not in os.environ:
+            continue
+        raw = os.environ[env_name]
+        if field.type is bool:
+            value: object = raw.strip().casefold() in _ENV_TRUTHY
+        elif field.type is int:
+            value = int(raw)
+        elif field.type is float:
+            value = float(raw)
+        else:
+            value = raw
+        setattr(config, field.name, value)
+
+
 def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
     """Load configuration from a YAML file, falling back to defaults."""
     path = Path(config_path)
@@ -114,6 +146,8 @@ def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
 
     config = TiroConfig(**filtered)
     config.config_path = str(path)
+
+    _apply_env_overlay(config)
 
     # Set ANTHROPIC_API_KEY env var from config if not already set
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):

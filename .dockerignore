@@ -1,0 +1,21 @@
+# Build-context exclusions for the Docker image. The real library must
+# never end up baked into an image layer — it's mounted as a volume at
+# runtime (/data), not shipped with the code.
+.git
+tiro-library
+docs
+.superpowers
+playwright-tests
+dist
+__pycache__
+.venv
+
+# Local-only / never needed inside the image
+*.pyc
+.pytest_cache
+.ruff_cache
+config.yaml
+.env
+.envrc
+node_modules
+*.egg-info
