@@ -310,10 +310,17 @@ def test_write_page_creates_schema_index_and_log(initialized_library):
 
 
 def test_ensure_schema_file_creates_once_never_overwrites(initialized_library):
+    from tiro.intelligence.prompts import load_template
+
     path = ensure_schema_file(initialized_library)
     assert path.exists()
     original = path.read_text()
     assert len(original.strip()) > 0
+    # T3 lands the real packaged default (not the old 3-line placeholder) --
+    # ensure_schema_file must yield it byte-for-byte.
+    assert original == load_template("wiki_schema_default", ext="md")
+    assert "Citation rules" in original
+    assert "Compression rules" in original
 
     path.write_text("# My Own Rules\nDo not touch this.\n")
     path2 = ensure_schema_file(initialized_library)

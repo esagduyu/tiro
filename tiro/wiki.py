@@ -35,6 +35,7 @@ import frontmatter
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
+from tiro.intelligence.prompts import load_template
 from tiro.migrations import new_ulid
 
 logger = logging.getLogger(__name__)
@@ -402,23 +403,12 @@ def reconcile_wiki_index(config: TiroConfig) -> dict:
 def ensure_schema_file(config: TiroConfig) -> Path:
     """Ensure {wiki}/_schema.md exists, copying the packaged default
     template on first use. Never overwrites an existing file -- once
-    created it's user-owned maintenance instructions. The packaged default
-    (tiro/intelligence/templates/wiki_schema_default.md) doesn't ship until
-    a later task; until then a minimal placeholder is written so this
-    module is testable standalone."""
+    created it's user-owned maintenance instructions."""
     path = config.wiki_dir / "_schema.md"
     if path.exists():
         return path
     config.wiki_dir.mkdir(parents=True, exist_ok=True)
-    packaged = Path(__file__).parent / "intelligence" / "templates" / "wiki_schema_default.md"
-    if packaged.exists():
-        path.write_text(packaged.read_text())
-    else:
-        path.write_text(
-            "# Wiki Schema\n\n"
-            "Default maintenance instructions placeholder.\n"
-            "(Replaced by the packaged default template once it ships.)\n"
-        )
+    path.write_text(load_template("wiki_schema_default", ext="md"))
     return path
 
 
