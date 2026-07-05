@@ -48,14 +48,14 @@ def test_wiki_list_page_loads_wiki_js(authenticated_client):
     from tiro.app import STATIC_VERSION
 
     r = authenticated_client.get("/wiki")
-    assert f"/static/wiki.js?v={STATIC_VERSION}" in r.text
+    assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
 def test_wiki_page_view_loads_wiki_js(authenticated_client):
     from tiro.app import STATIC_VERSION
 
     r = authenticated_client.get("/wiki/entities/anthropic")
-    assert f"/static/wiki.js?v={STATIC_VERSION}" in r.text
+    assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
 def test_static_version_is_59():
@@ -97,27 +97,30 @@ def test_inbox_page_does_not_mark_nav_wiki_active(authenticated_client):
 
 
 def test_wiki_js_defines_expected_functions():
-    content = (STATIC_DIR / "wiki.js").read_text()
+    content = (STATIC_DIR / "js" / "wiki.js").read_text()
     for fn in [
         "function loadWikiList",
         "function loadWikiPage",
-        "function resolveWikilinks",
-        "function escapeMarkdownLinkText",
-        "function renderMarkdown",
+        "export function resolveWikilinks",
+        "export function escapeMarkdownLinkText",
         "function doWikiRegenerate",
     ]:
         assert fn in content, f"missing {fn}"
+    # renderMarkdown is no longer defined locally (M2.0 Task 4: migrated to
+    # the shared core.js implementation, verified byte-identical) — pin the
+    # import instead of a local function definition.
+    assert 'import { esc, num, renderMarkdown, timeAgo } from "./core.js";' in content
 
 
 def test_wiki_js_regenerate_uses_textcontent_for_server_error():
     # Server-provided `detail` strings (including 422s from
     # WikiGenerationError) must never be assigned via innerHTML.
-    content = (STATIC_DIR / "wiki.js").read_text()
+    content = (STATIC_DIR / "js" / "wiki.js").read_text()
     assert "errEl.textContent = (json && json.detail)" in content
     assert "errEl.innerHTML" not in content
 
 
 def test_wiki_js_no_cdn_references():
-    content = (STATIC_DIR / "wiki.js").read_text()
+    content = (STATIC_DIR / "js" / "wiki.js").read_text()
     for marker in ("cdn.jsdelivr", "unpkg.com", "cdnjs.", "googleapis.com"):
         assert marker not in content

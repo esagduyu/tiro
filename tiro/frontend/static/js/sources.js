@@ -1,4 +1,27 @@
-/* Tiro — Sources & Authors management */
+/* Tiro — Sources & Authors management (M2.0 module split, Task 4).
+ *
+ * Imports esc/num/showToast from core.js (this file's local copies were
+ * verified byte-identical to core.js's versions before deletion — same
+ * DOM-trick esc()/finite-number num()/two-stage-setTimeout showToast() as
+ * documented in core.js's docstrings, which cite this exact file as the
+ * origin of showToast() — see .superpowers/sdd/task-4-report.md for the
+ * confirmation).
+ *
+ * sources.js is a LEAF entry module — nothing else imports it — so it keeps
+ * the normal `?v={{ static_v }}` cache-bust query in sources.html's
+ * <script type="module"> tag (same reasoning as reader.js in Task 3).
+ *
+ * `confirmDeleteSource` (the `sources-delete-overlay`/`sources-delete-cancel`/
+ * `sources-delete-confirm` dialog) is intentionally NOT migrated to core.js's
+ * `confirmDialog`: `setupKeyboard()` below directly checks for
+ * `#sources-delete-overlay`/`#sources-modal-overlay` by id to gate other
+ * keys while a dialog is open, a different id contract than confirmDialog's
+ * `core-confirm-*` ids. Same judgment call as Task 2 (inbox.js) and Task 3
+ * (reader.js) — not mandated by the brief, left local and documented rather
+ * than silently skipped.
+ */
+
+import { esc, num, showToast } from "./core.js";
 
 let sourcesData = [];
 let authorsData = [];
@@ -513,38 +536,6 @@ function setupModalCloseHandlers(overlay) {
         if (e.target === overlay) close();
     });
     document.addEventListener("keydown", onKeydown);
-}
-
-/* --- Toast --- */
-
-function showToast(message, type) {
-    const existing = document.querySelector(".settings-toast");
-    if (existing) existing.remove();
-
-    const toast = document.createElement("div");
-    toast.className = "settings-toast settings-toast-" + (type || "info");
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    setTimeout(() => toast.classList.add("show"), 10);
-    setTimeout(() => {
-        toast.classList.remove("show");
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
-}
-
-/* --- Escaping helpers --- */
-
-function esc(str) {
-    const el = document.createElement("span");
-    el.textContent = str == null ? "" : String(str);
-    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
-
-function num(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : "?";
 }
 
 /* --- Keyboard --- */

@@ -54,6 +54,8 @@
         <p>Wiki pages are generated on demand from the entities and topics in your library. Visit the <a href="/graph">Graph</a>, click a node, and generate its first page.</p>
     </div>
 </section>
+{% endblock %}
 
-<script src="/static/wiki.js?v={{ static_v }}"></script>
+{% block scripts %}
+<script type="module" src="/static/js/wiki.js?v={{ static_v }}"></script>
 {% endblock %}

@@ -11,15 +11,16 @@
  * migration plan and .superpowers/sdd/task-2-report.md for the identifier
  * audit backing the window.* re-exposures below.
  *
- * `type="module"` scripts do not leak declarations onto `window`. Two
- * classic (non-module) scripts still on disk reference former app.js
- * globals directly and are NOT converted in this task (that's Task 3/4):
- *   - reader.js calls `showShortcuts()` / `hideShortcuts()` as bare globals
- *     (guarded with `typeof ... === "function"`).
- *   - wiki.js calls `timeAgo()` as a bare global (same guard pattern).
- * Both are re-exposed on window below. Once those files become modules and
- * import directly from core.js/sidebar.js, these re-exposures can be
- * dropped.
+ * `type="module"` scripts do not leak declarations onto `window`. As of
+ * Task 3 (reader.js) and Task 4 (sources.js/wiki.js), all four former
+ * classic scripts that consumed app.js's globals are now modules that
+ * import directly from core.js/sidebar.js instead — see those files' own
+ * header comments. `window.showShortcuts`/`window.hideShortcuts` below are
+ * consequently unreferenced dead weight (their only consumer, reader.js,
+ * imports the named exports directly) but are left in place pending T5's
+ * broader sidebar.js/base.html cleanup pass rather than removed here, out
+ * of scope for this task. `window.timeAgo` WAS removed in Task 4 — see the
+ * comment at its former call site below.
  */
 
 import { esc, timeAgo } from "./core.js";
@@ -521,9 +522,13 @@ export {
 };
 
 // Re-exposures for classic (non-module) scripts — see the file-header note.
+// `window.timeAgo` was removed in Task 4: wiki.js (its only remaining
+// consumer, guarded with `typeof timeAgo === "function"`) is now a module
+// that imports `timeAgo` from core.js directly — repo-wide grep confirmed
+// no other reference to `window.timeAgo` remains (see
+// .superpowers/sdd/task-4-report.md).
 window.showShortcuts = showShortcuts;
 window.hideShortcuts = hideShortcuts;
-window.timeAgo = timeAgo;
 
 /* ---- Init (runs on every page) ---- */
 
