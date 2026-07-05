@@ -19,6 +19,11 @@ This module owns generic wiki bookkeeping (page I/O, index.md, log.md,
 _schema.md, stale-marking, reconciliation). Prompt composition and the LLM
 call live in `tiro/wiki_gen.py` (later task) — this module never calls an
 LLM and never reads another wiki page's content.
+
+W1 page identity: one page per slugified node name per kind. Two entities
+sharing a name across entity_types (e.g. "Washington" person vs place) map
+to the SAME entities/ page in W1 — the page covers both; stale marking
+treats them as one. Revisit if lint (W3) surfaces real collisions.
 """
 
 import logging
@@ -30,7 +35,7 @@ import frontmatter
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.migrations import canonical_key, new_ulid
+from tiro.migrations import new_ulid
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +171,14 @@ def write_page(
     if kind not in WIKI_KINDS:
         raise ValueError(f"invalid wiki kind: {kind!r} (expected one of {WIKI_KINDS})")
 
+    # frontmatter.dumps() strips leading/trailing whitespace from the body
+    # when it writes the file, so a later read_page() would see a stripped
+    # body regardless. Strip once, up front, so the dict this function
+    # returns already matches what read_page() will return -- callers never
+    # see a body that differs depending on whether they got it from the
+    # write result or a subsequent read.
+    body = body.strip()
+
     path = page_path(config, slug)
     is_update = path.exists()
     resolved_uid = uid or new_ulid()
@@ -236,24 +249,6 @@ def write_page(
     }
 
 
-def _library_root_from_conn(conn) -> Path | None:
-    """Best-effort recovery of the library root from an open connection's
-    own backing file (PRAGMA database_list), so free-SQL call sites that
-    only receive `conn` (no config) can still locate {library}/wiki/ for the
-    file-side half of an update. Returns None for connections with no
-    backing file (should not happen in practice -- get_connection always
-    opens a real tiro.db path), in which case callers skip the file write
-    and rely on the DB row alone (index/reconcile stays consistent)."""
-    try:
-        rows = conn.execute("PRAGMA database_list").fetchall()
-    except Exception:
-        return None
-    main = next((r for r in rows if r["name"] == "main"), None)
-    if not main or not main["file"]:
-        return None
-    return Path(main["file"]).parent
-
-
 def _mark_file_stale(path: Path) -> None:
     """Frontmatter-only rewrite: load, flip status, dump back unchanged body
     (post.content is never touched, so the body is preserved byte-exact)."""
@@ -267,28 +262,33 @@ def _mark_file_stale(path: Path) -> None:
         logger.warning("Failed to mark wiki page file stale (%s): %s", path, e)
 
 
-def mark_pages_stale(conn, article_id: int) -> int:
-    """Mark stale every wiki page whose underlying entity/tag node just
-    gained a link to `article_id` (via the article_entities/article_tags
-    junctions, matched to wiki_pages by kind + canonical title). Free SQL --
-    no LLM, safe to call inside the ingest transaction. Updates the derived
-    row AND (best-effort) the page file's frontmatter status, since files
-    are truth and a later files-win reconcile would otherwise clobber the
-    DB flag back to whatever the untouched file says. Returns the number of
-    pages matched (whether or not they were already stale)."""
-    entity_keys = {
-        row["canonical_key"]
+def mark_pages_stale(config: TiroConfig, conn, article_id: int) -> int:
+    """Mark stale every wiki page whose slug matches an entity/tag node that
+    just gained a link to `article_id` (via the article_entities/article_tags
+    junctions). Matching is SLUG-based, not title-based: for each linked
+    entity the expected slug is `entities/{wiki_slugify(entity.name)}`, and
+    for each linked tag it's `concepts/{wiki_slugify(tag.name)}`. This is
+    exact (immune to cosmetic title prettification, e.g. a page titled
+    "Context Engineering" still has slug `concepts/context-engineering`) and
+    type-safe by construction -- the `entities/`/`concepts/` prefix is what
+    used to be a separate kind check. Free SQL -- no LLM, safe to call
+    inside the ingest transaction. Updates the derived row AND (best-effort)
+    the page file's frontmatter status, since files are truth and a later
+    files-win reconcile would otherwise clobber the DB flag back to
+    whatever the untouched file says. Returns the number of pages matched
+    (whether or not they were already stale)."""
+    entity_slugs = {
+        f"entities/{wiki_slugify(row['name'])}"
         for row in conn.execute(
-            """SELECT e.canonical_key AS canonical_key
+            """SELECT e.name AS name
                FROM entities e
                JOIN article_entities ae ON ae.entity_id = e.id
                WHERE ae.article_id = ?""",
             (article_id,),
         ).fetchall()
-        if row["canonical_key"]
     }
-    tag_keys = {
-        canonical_key(row["name"])
+    tag_slugs = {
+        f"concepts/{wiki_slugify(row['name'])}"
         for row in conn.execute(
             """SELECT t.name AS name
                FROM tags t
@@ -297,28 +297,28 @@ def mark_pages_stale(conn, article_id: int) -> int:
             (article_id,),
         ).fetchall()
     }
-    if not entity_keys and not tag_keys:
+    expected_slugs = entity_slugs | tag_slugs
+    if not expected_slugs:
         return 0
 
-    pages = conn.execute("SELECT id, slug, kind, title, status FROM wiki_pages").fetchall()
-    matched = [
-        p
-        for p in pages
-        if (p["kind"] == "entity" and canonical_key(p["title"]) in entity_keys)
-        or (p["kind"] == "concept" and canonical_key(p["title"]) in tag_keys)
-    ]
+    placeholders = ",".join("?" for _ in expected_slugs)
+    params = tuple(expected_slugs)
+    matched = conn.execute(
+        f"SELECT id, slug, status FROM wiki_pages WHERE slug IN ({placeholders})",
+        params,
+    ).fetchall()
     if not matched:
         return 0
 
-    library_root = _library_root_from_conn(conn)
-    wiki_dir = library_root / "wiki" if library_root else None
+    conn.execute(
+        f"UPDATE wiki_pages SET status = 'stale' "
+        f"WHERE slug IN ({placeholders}) AND status != 'stale'",
+        params,
+    )
     for p in matched:
-        if p["status"] != "stale":
-            conn.execute("UPDATE wiki_pages SET status = 'stale' WHERE id = ?", (p["id"],))
-        if wiki_dir is not None:
-            path = wiki_dir / f"{p['slug']}.md"
-            if path.exists():
-                _mark_file_stale(path)
+        path = page_path(config, p["slug"])
+        if path.exists():
+            _mark_file_stale(path)
     return len(matched)
 
 

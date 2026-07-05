@@ -267,6 +267,29 @@ def test_write_page_skips_unknown_article_uid(initialized_library, caplog):
         conn.close()
 
 
+def test_write_page_returned_body_matches_read_page_after_trailing_whitespace(
+    initialized_library,
+):
+    """frontmatter.dumps() strips leading/trailing whitespace from the body
+    when writing the file, so a body with trailing newlines would otherwise
+    make write_page's returned "body" disagree with what a later read_page
+    sees. write_page must strip once, up front, and return the stripped
+    form so both call sites agree."""
+    result = write_page(
+        initialized_library,
+        slug="entities/anthropic",
+        kind="entity",
+        title="Anthropic",
+        entity_type="company",
+        article_uids=[],
+        body="Body with trailing whitespace.\n\n\n",
+        generated_by=None,
+    )
+    page = read_page(initialized_library, "entities/anthropic")
+    assert result["body"] == page["body"]
+    assert result["body"] == "Body with trailing whitespace."
+
+
 def test_write_page_creates_schema_index_and_log(initialized_library):
     write_page(
         initialized_library,
@@ -514,7 +537,7 @@ def test_mark_pages_stale_entity_updates_db_and_file_preserving_body(initialized
 
     conn = get_connection(initialized_library.db_path)
     try:
-        count = mark_pages_stale(conn, article_id2)
+        count = mark_pages_stale(initialized_library, conn, article_id2)
         conn.commit()
         row = conn.execute(
             "SELECT status FROM wiki_pages WHERE slug = 'entities/anthropic'"
@@ -552,7 +575,47 @@ def test_mark_pages_stale_concept_via_tag_junction(initialized_library):
 
     conn = get_connection(initialized_library.db_path)
     try:
-        count = mark_pages_stale(conn, article_id2)
+        count = mark_pages_stale(initialized_library, conn, article_id2)
+        conn.commit()
+        row = conn.execute(
+            "SELECT status FROM wiki_pages WHERE slug = 'concepts/context-engineering'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert count == 1
+    assert row["status"] == "stale"
+
+
+def test_mark_pages_stale_matches_by_slug_despite_prettified_title(initialized_library):
+    """Regression test for the slug-based rewrite: a concept page's TITLE is
+    a prettified display string ("Context Engineering") but its slug is the
+    raw slugified tag ("concepts/context-engineering"). Title-based matching
+    (canonical_key("Context Engineering") == "context engineering", a space)
+    would never equal canonical_key("context-engineering") ==
+    "context-engineering" (a hyphen) -- exactly the bug the slug switch
+    fixes, since matching now goes through wiki_slugify() on both sides."""
+    article_id, _ = _seed_article(initialized_library, "a1")
+    _link_tag(initialized_library, article_id, "context-engineering")
+
+    write_page(
+        initialized_library,
+        slug="concepts/context-engineering",
+        kind="concept",
+        title="Context Engineering",
+        entity_type=None,
+        article_uids=[],
+        body="concept body",
+        generated_by=None,
+        status="fresh",
+    )
+
+    article_id2, _ = _seed_article(initialized_library, "a2")
+    _link_tag(initialized_library, article_id2, "context-engineering")
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        count = mark_pages_stale(initialized_library, conn, article_id2)
         conn.commit()
         row = conn.execute(
             "SELECT status FROM wiki_pages WHERE slug = 'concepts/context-engineering'"
@@ -570,7 +633,7 @@ def test_mark_pages_stale_returns_zero_when_no_matching_page(initialized_library
 
     conn = get_connection(initialized_library.db_path)
     try:
-        count = mark_pages_stale(conn, article_id)
+        count = mark_pages_stale(initialized_library, conn, article_id)
     finally:
         conn.close()
     assert count == 0
@@ -593,7 +656,7 @@ def test_mark_pages_stale_is_idempotent_for_already_stale_page(initialized_libra
 
     conn = get_connection(initialized_library.db_path)
     try:
-        count = mark_pages_stale(conn, article_id)
+        count = mark_pages_stale(initialized_library, conn, article_id)
         conn.commit()
     finally:
         conn.close()
