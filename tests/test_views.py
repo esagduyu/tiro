@@ -215,11 +215,14 @@ def test_inbox_has_save_view_button(authenticated_client):
     assert 'id="filter-save-view-btn"' in r.text
 
 
-def test_app_js_has_saved_views_functions():
+def test_sidebar_js_has_saved_views_functions():
     from pathlib import Path
 
-    app_js = Path(__file__).parent.parent / "tiro" / "frontend" / "static" / "app.js"
-    content = app_js.read_text()
+    # app.js was split into js/sidebar.js + js/inbox.js in M2.0 Task 2 (see
+    # docs/plans/2026-07-05-m2-0-frontend-modules-plan.md) — the saved-views
+    # section is page chrome (every page), so it lives in sidebar.js now.
+    sidebar_js = Path(__file__).parent.parent / "tiro" / "frontend" / "static" / "js" / "sidebar.js"
+    content = sidebar_js.read_text()
     assert "function loadSavedViews" in content
     assert "function renderSavedViews" in content
 

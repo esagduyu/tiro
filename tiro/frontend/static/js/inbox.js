@@ -1,19 +1,33 @@
-/* Tiro — frontend */
+/* Tiro — inbox (article list) module (M2.0 split of app.js, Task 2).
+ *
+ * Owns the /inbox page only: article list rendering + sort, search, tier
+ * toolbar (classify/discard/archived/VIP-only), the filter panel + active
+ * filter pills, pagination, inbox keyboard navigation, and single/bulk
+ * delete. Loaded as `<script type="module">` from inbox.html only.
+ *
+ * Digest logic (previously interleaved in the same app.js file) now lives
+ * in its own js/digest.js module — see that file's header for why the split
+ * was clean rather than the "keep entangled" fallback the plan allowed.
+ *
+ * Two small pieces of dead code from the pre-M7 single-page (inbox+digest
+ * tabs) layout were dropped rather than carried over, since the DOM they
+ * target no longer exists in any template (verified via grep across
+ * templates/*.html — zero matches) and dropping them is a true no-op:
+ *   - `setupViewTabs()` / the `.view-tab` / `#view-articles` / `#view-digest`
+ *     branch (digest moved to its own /digest route in Checkpoint 22).
+ *   - The `if (document.querySelector(".digest-tab")) loadDigest(...)`
+ *     branch inside the "r" keyboard case — `.digest-tab` never appears on
+ *     /inbox, so this never fired; the `e.preventDefault()` for "r" is kept
+ *     verbatim for behavior parity, the dead body is not.
+ * See .superpowers/sdd/task-2-report.md for the full audit.
+ */
 
-marked.setOptions({ breaks: false, gfm: true });
+import { esc, formatDate, showToast } from "./core.js";
+import {
+    showShortcuts, hideShortcuts, openSaveModal, closeSaveModal,
+    loadSavedViews as refreshSidebarViews,
+} from "./sidebar.js";
 
-function renderMarkdown(md) {
-    var raw = marked.parse(md || '');
-    return DOMPurify.sanitize(raw, {
-        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'style'],
-        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover'],
-        ADD_ATTR: ['loading'],
-    });
-}
-
-let digestData = null; // cached digest response
-let digestLoaded = false;
-let digestGenerating = false; // in-flight guard so rapid r-presses/clicks can't fire concurrent POSTs
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
 let selectedIndex = -1; // keyboard-selected article index
@@ -25,863 +39,6 @@ let activeFilters = {}; // e.g. { is_read: "false", ai_tier: "must-read", tag: "
 let filterPanelOpen = false;
 let filterData = null; // cached /api/filters response
 let selectedForDelete = new Set(); // article ids checked for bulk delete
-
-/* ---- Theme management ---- */
-
-function applyTheme(mode) {
-    document.documentElement.setAttribute('data-theme', mode);
-    const themeLink = document.getElementById('theme-css');
-    if (themeLink) {
-        // Read the server-resolved hrefs off the link element (set from
-        // config.theme_light/theme_dark in the template context) instead of
-        // hardcoding papyrus/roman-night, so a configured custom theme is
-        // honored on toggle too. Falls back to the hardcoded pair if the
-        // data attributes are absent (e.g. an older cached page).
-        const href = mode === 'dark'
-            ? themeLink.getAttribute('data-dark-href')
-            : themeLink.getAttribute('data-light-href');
-        if (href) {
-            themeLink.href = href;
-        } else {
-            const themeName = mode === 'dark' ? 'roman-night' : 'papyrus';
-            const currentVersion = new URL(themeLink.href, window.location.origin).searchParams.get('v');
-            const versionSuffix = currentVersion ? `?v=${currentVersion}` : '';
-            themeLink.href = `/static/themes/${themeName}.css${versionSuffix}`;
-        }
-    }
-    document.querySelectorAll('#theme-toggle, #mobile-theme-toggle').forEach(btn => {
-        const icon = btn.querySelector('.sidebar-icon');
-        if (icon) {
-            icon.textContent = mode === 'dark' ? '\u263D' : '\u2600';
-        } else {
-            btn.textContent = mode === 'dark' ? '\u263D' : '\u2600';
-        }
-    });
-    const label = document.getElementById('theme-label');
-    if (label) label.textContent = mode === 'dark' ? 'Dark' : 'Light';
-    localStorage.setItem('tiro-mode', mode);
-}
-
-function toggleTheme() {
-    const current = localStorage.getItem('tiro-mode') || 'light';
-    applyTheme(current === 'dark' ? 'light' : 'dark');
-}
-
-/* ---- Mobile sidebar ---- */
-
-function openSidebar() {
-    document.getElementById('sidebar')?.classList.add('open');
-    document.getElementById('sidebar-overlay')?.classList.add('open');
-}
-
-function closeSidebar() {
-    document.getElementById('sidebar')?.classList.remove('open');
-    document.getElementById('sidebar-overlay')?.classList.remove('open');
-}
-
-/* ---- Unread badge ---- */
-
-async function updateUnreadBadge() {
-    try {
-        const res = await fetch('/api/articles?is_read=false&include_decayed=false&count_only=true');
-        const json = await res.json();
-        const badge = document.getElementById('unread-badge');
-        if (!badge) return;
-        const count = json.data?.count ?? 0;
-        if (count > 0) {
-            badge.textContent = count > 99 ? '99+' : count;
-            badge.style.display = '';
-        } else {
-            badge.style.display = 'none';
-        }
-    } catch (e) {}
-}
-
-/* ---- Saved views (sidebar) ----
-   Loaded via base.html on every page, mirroring updateUnreadBadge's pattern:
-   guard on the sidebar element's presence rather than assuming a page type. */
-
-let savedViews = []; // cached /api/views response, ordered by position
-let renamingViewId = null; // id of the view currently showing an inline rename input
-
-async function loadSavedViews() {
-    const list = document.getElementById("sidebar-views-list");
-    if (!list) return;
-    try {
-        const res = await fetch("/api/views");
-        const json = await res.json();
-        savedViews = json.success && Array.isArray(json.data) ? json.data : [];
-    } catch (e) {
-        savedViews = [];
-    }
-    renderSavedViews();
-}
-
-function viewToQueryString(view) {
-    const params = new URLSearchParams();
-    let parsed = {};
-    try {
-        parsed = JSON.parse(view.filter_json);
-    } catch (e) {
-        parsed = {};
-    }
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        for (const [key, val] of Object.entries(parsed)) {
-            if (val !== null && val !== undefined && val !== "") {
-                params.set(key, val);
-            }
-        }
-    }
-    if (view.sort_mode) params.set("sort", view.sort_mode);
-    return params.toString();
-}
-
-function renderSavedViews() {
-    const section = document.getElementById("sidebar-views");
-    const list = document.getElementById("sidebar-views-list");
-    if (!section || !list) return;
-
-    if (!savedViews.length) {
-        section.style.display = "none";
-        list.innerHTML = "";
-        return;
-    }
-    section.style.display = "";
-
-    list.innerHTML = savedViews.map((view, idx) => {
-        if (view.id === renamingViewId) {
-            return `<div class="sidebar-view-row">
-                <input type="text" class="sidebar-view-rename-input" data-id="${view.id}" value="${esc(view.name)}">
-                <span class="sidebar-view-actions sidebar-view-actions-visible">
-                    <button class="sidebar-view-btn sidebar-view-rename-save" data-id="${view.id}" title="Save">&#10003;</button>
-                    <button class="sidebar-view-btn sidebar-view-rename-cancel" title="Cancel">&times;</button>
-                </span>
-            </div>`;
-        }
-        return `<div class="sidebar-view-row">
-            <a href="#" class="sidebar-view-link" data-id="${view.id}">${esc(view.name)}</a>
-            <span class="sidebar-view-actions">
-                <button class="sidebar-view-btn sidebar-view-up" data-id="${view.id}" title="Move up" ${idx === 0 ? "disabled" : ""}>&#9650;</button>
-                <button class="sidebar-view-btn sidebar-view-down" data-id="${view.id}" title="Move down" ${idx === savedViews.length - 1 ? "disabled" : ""}>&#9660;</button>
-                <button class="sidebar-view-btn sidebar-view-rename" data-id="${view.id}" title="Rename">&#9998;</button>
-                <button class="sidebar-view-btn sidebar-view-delete" data-id="${view.id}" title="Delete">&times;</button>
-            </span>
-        </div>`;
-    }).join("");
-
-    const activeInput = list.querySelector(".sidebar-view-rename-input");
-    if (activeInput) { activeInput.focus(); activeInput.select(); }
-}
-
-async function moveSavedView(id, direction) {
-    const idx = savedViews.findIndex(v => v.id === id);
-    const targetIdx = idx + direction;
-    if (idx === -1 || targetIdx < 0 || targetIdx >= savedViews.length) return;
-    const a = savedViews[idx];
-    const b = savedViews[targetIdx];
-    try {
-        await fetch(`/api/views/${a.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ position: b.position }),
-        });
-        await fetch(`/api/views/${b.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ position: a.position }),
-        });
-    } catch (e) {}
-    await loadSavedViews();
-}
-
-async function deleteSavedView(id) {
-    try {
-        await fetch(`/api/views/${id}`, { method: "DELETE" });
-    } catch (e) {}
-    await loadSavedViews();
-}
-
-function startRenameSavedView(id) {
-    renamingViewId = id;
-    renderSavedViews();
-}
-
-async function submitRenameSavedView(id) {
-    const input = document.querySelector(`.sidebar-view-rename-input[data-id="${id}"]`);
-    const name = input ? input.value.trim() : "";
-    if (!name) {
-        renamingViewId = null;
-        renderSavedViews();
-        return;
-    }
-    try {
-        await fetch(`/api/views/${id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-        });
-    } catch (e) {}
-    renamingViewId = null;
-    await loadSavedViews();
-}
-
-function setupSidebarViews() {
-    const list = document.getElementById("sidebar-views-list");
-    if (!list) return;
-
-    list.addEventListener("click", (e) => {
-        const link = e.target.closest(".sidebar-view-link");
-        if (link) {
-            e.preventDefault();
-            const view = savedViews.find(v => v.id === parseInt(link.dataset.id, 10));
-            if (view) window.location.href = "/inbox?" + viewToQueryString(view);
-            return;
-        }
-        const upBtn = e.target.closest(".sidebar-view-up");
-        if (upBtn && !upBtn.disabled) {
-            moveSavedView(parseInt(upBtn.dataset.id, 10), -1);
-            return;
-        }
-        const downBtn = e.target.closest(".sidebar-view-down");
-        if (downBtn && !downBtn.disabled) {
-            moveSavedView(parseInt(downBtn.dataset.id, 10), 1);
-            return;
-        }
-        const renameBtn = e.target.closest(".sidebar-view-rename");
-        if (renameBtn) {
-            startRenameSavedView(parseInt(renameBtn.dataset.id, 10));
-            return;
-        }
-        const deleteBtn = e.target.closest(".sidebar-view-delete");
-        if (deleteBtn) {
-            deleteSavedView(parseInt(deleteBtn.dataset.id, 10));
-            return;
-        }
-        const saveBtn = e.target.closest(".sidebar-view-rename-save");
-        if (saveBtn) {
-            submitRenameSavedView(parseInt(saveBtn.dataset.id, 10));
-            return;
-        }
-        const cancelBtn = e.target.closest(".sidebar-view-rename-cancel");
-        if (cancelBtn) {
-            renamingViewId = null;
-            renderSavedViews();
-        }
-    });
-
-    list.addEventListener("keydown", (e) => {
-        const input = e.target.closest(".sidebar-view-rename-input");
-        if (!input) return;
-        if (e.key === "Enter") { e.preventDefault(); submitRenameSavedView(parseInt(input.dataset.id, 10)); }
-        if (e.key === "Escape") { e.preventDefault(); renamingViewId = null; renderSavedViews(); }
-    });
-}
-
-/* ---- Save modal ---- */
-
-function openSaveModal() {
-    const overlay = document.getElementById('save-overlay');
-    if (!overlay) return;
-    overlay.style.display = 'flex';
-    // Reset state
-    const urlInput = document.getElementById('save-url-input');
-    if (urlInput) { urlInput.value = ''; urlInput.focus(); }
-    const status = document.getElementById('save-status');
-    if (status) status.style.display = 'none';
-    const btn = document.getElementById('save-url-btn');
-    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
-    // Reset to URL tab
-    switchSaveTab('url');
-}
-
-function closeSaveModal() {
-    const overlay = document.getElementById('save-overlay');
-    if (overlay) overlay.style.display = 'none';
-}
-
-function switchSaveTab(tab) {
-    document.querySelectorAll('.save-tab').forEach(t => {
-        t.classList.toggle('active', t.dataset.tab === tab);
-    });
-    document.getElementById('save-tab-url').style.display = tab === 'url' ? '' : 'none';
-    document.getElementById('save-tab-email').style.display = tab === 'email' ? '' : 'none';
-    const status = document.getElementById('save-status');
-    if (status) status.style.display = 'none';
-    if (tab === 'url') {
-        document.getElementById('save-url-input')?.focus();
-    }
-}
-
-function showSaveStatus(msg, type) {
-    const el = document.getElementById('save-status');
-    if (!el) return;
-    el.textContent = msg;
-    el.className = 'save-status ' + type;
-    el.style.display = '';
-}
-
-async function submitURL() {
-    const input = document.getElementById('save-url-input');
-    const btn = document.getElementById('save-url-btn');
-    const url = input?.value.trim();
-    if (!url) return;
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
-    showSaveStatus('Fetching and processing...', 'loading');
-    try {
-        const res = await fetch('/api/ingest/url', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
-        });
-        const json = await res.json();
-        if (res.status === 409) {
-            showSaveStatus('Already saved: ' + (json.data?.title || url), 'error');
-            btn.disabled = false;
-            btn.textContent = 'Save';
-            return;
-        }
-        if (!res.ok) throw new Error(json.detail || 'Failed to save');
-        showSaveStatus('Saved: ' + (json.data?.title || 'Article'), 'success');
-        btn.textContent = 'Saved';
-        input.value = '';
-        updateUnreadBadge();
-        // Refresh inbox if we're on it
-        if (document.getElementById('article-list')) {
-            loadInbox();
-            loadFilters();
-        }
-    } catch (e) {
-        showSaveStatus(e.message || 'Failed to save URL', 'error');
-        btn.disabled = false;
-        btn.textContent = 'Save';
-    }
-}
-
-async function uploadEml(file) {
-    if (!file || !file.name.endsWith('.eml')) {
-        showSaveStatus('Please select a .eml file', 'error');
-        return;
-    }
-    showSaveStatus('Processing ' + file.name + '...', 'loading');
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-        const res = await fetch('/api/ingest/email', {
-            method: 'POST',
-            body: formData,
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.detail || 'Failed to import');
-        showSaveStatus('Saved: ' + (json.data?.title || file.name), 'success');
-        updateUnreadBadge();
-        if (document.getElementById('article-list')) {
-            loadInbox();
-            loadFilters();
-        }
-    } catch (e) {
-        showSaveStatus(e.message || 'Failed to import email', 'error');
-    }
-}
-
-function setupSaveModal() {
-    const overlay = document.getElementById('save-overlay');
-    if (!overlay) return;
-
-    // Open
-    document.getElementById('save-btn')?.addEventListener('click', openSaveModal);
-
-    // Close
-    document.getElementById('save-modal-close')?.addEventListener('click', closeSaveModal);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSaveModal(); });
-
-    // Tabs
-    document.querySelectorAll('.save-tab').forEach(tab => {
-        tab.addEventListener('click', () => switchSaveTab(tab.dataset.tab));
-    });
-
-    // URL submit
-    document.getElementById('save-url-btn')?.addEventListener('click', submitURL);
-    document.getElementById('save-url-input')?.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); submitURL(); }
-        if (e.key === 'Escape') { e.preventDefault(); closeSaveModal(); }
-    });
-
-    // File input
-    const fileInput = document.getElementById('save-file-input');
-    fileInput?.addEventListener('change', () => {
-        if (fileInput.files.length > 0) uploadEml(fileInput.files[0]);
-    });
-
-    // Drag and drop
-    const dropZone = document.getElementById('save-drop-zone');
-    if (dropZone) {
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('dragover');
-        });
-        dropZone.addEventListener('dragleave', () => {
-            dropZone.classList.remove('dragover');
-        });
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            if (e.dataTransfer.files.length > 0) uploadEml(e.dataTransfer.files[0]);
-        });
-    }
-}
-
-/* ---- Init ---- */
-
-document.addEventListener("DOMContentLoaded", () => {
-    // Theme toggles
-    document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
-    document.getElementById('mobile-theme-toggle')?.addEventListener('click', toggleTheme);
-
-    // Mobile sidebar
-    document.getElementById('mobile-menu-btn')?.addEventListener('click', openSidebar);
-    document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
-
-    // Logout
-    document.getElementById('logout-btn')?.addEventListener('click', () => {
-        fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
-            window.location.href = '/login';
-        });
-    });
-
-    // Apply stored theme (reinforces the inline script in base.html)
-    const mode = localStorage.getItem('tiro-mode') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    applyTheme(mode);
-
-    // Unread badge
-    updateUnreadBadge();
-
-    // Saved views (sidebar section, present on every page)
-    setupSidebarViews();
-    loadSavedViews();
-
-    // Save modal
-    setupSaveModal();
-
-    // Page-specific init
-    if (document.getElementById("article-list")) {
-        restoreFiltersFromURL();
-        loadInbox();
-        loadFilters();
-        setupSearch();
-        setupSort();
-        setupFilterPanel();
-        setupBulkDeleteToolbar();
-    }
-    if (document.querySelector(".view-tab")) {
-        setupViewTabs();
-    }
-    if (document.querySelector(".digest-tab")) {
-        setupDigestTabs();
-        // Auto-load digest if on the dedicated digest page (no view tabs = standalone)
-        if (!document.querySelector(".view-tab") && !digestLoaded) {
-            loadDigest(false);
-        }
-    }
-    setupKeyboard();
-});
-
-/* ---- View tabs (All Articles / Daily Digest) ---- */
-
-function setupViewTabs() {
-    document.querySelectorAll(".view-tab").forEach((tab) => {
-        tab.addEventListener("click", () => {
-            document.querySelectorAll(".view-tab").forEach((t) => t.classList.remove("active"));
-            tab.classList.add("active");
-
-            const view = tab.dataset.view;
-            document.getElementById("view-articles").style.display =
-                view === "articles" ? "block" : "none";
-            document.getElementById("view-digest").style.display =
-                view === "digest" ? "block" : "none";
-
-            if (view === "digest" && !digestLoaded) {
-                loadDigest(false);
-            }
-        });
-    });
-}
-
-/* ---- Digest sub-tabs (Ranked / By Topic / By Entity) ---- */
-
-function setupDigestTabs() {
-    document.querySelectorAll(".digest-tab").forEach((tab) => {
-        tab.addEventListener("click", () => {
-            document.querySelectorAll(".digest-tab").forEach((t) => t.classList.remove("active"));
-            tab.classList.add("active");
-
-            const type = tab.dataset.type;
-            document.querySelectorAll(".digest-section").forEach((s) => (s.style.display = "none"));
-            const section = document.getElementById(`digest-${type.replace("_", "-")}`);
-            if (section) section.style.display = "block";
-        });
-    });
-
-    // Refresh button
-    const refreshBtn = document.getElementById("digest-refresh");
-    if (refreshBtn) {
-        refreshBtn.addEventListener("click", () => loadDigest(true));
-    }
-
-    // History dropdown
-    const historySelect = document.getElementById("digest-history");
-    if (historySelect) {
-        loadDigestHistory();
-        historySelect.addEventListener("change", () => {
-            const val = historySelect.value;
-            if (val === "today") {
-                loadDigest(false);
-            } else {
-                loadHistoricalDigest(val);
-            }
-        });
-    }
-
-    // Schedule button + modal
-    const scheduleBtn = document.getElementById("digest-schedule-btn");
-    if (scheduleBtn) {
-        scheduleBtn.addEventListener("click", showDigestScheduleModal);
-        loadDigestScheduleState();
-    }
-    const scheduleClose = document.getElementById("digest-schedule-close");
-    if (scheduleClose) {
-        scheduleClose.addEventListener("click", hideDigestScheduleModal);
-    }
-    const scheduleOverlay = document.getElementById("digest-schedule-overlay");
-    if (scheduleOverlay) {
-        scheduleOverlay.addEventListener("click", (e) => {
-            if (e.target === scheduleOverlay) hideDigestScheduleModal();
-        });
-    }
-    const scheduleSaveBtn = document.getElementById("schedule-save-btn");
-    if (scheduleSaveBtn) {
-        scheduleSaveBtn.addEventListener("click", saveDigestSchedule);
-    }
-}
-
-/* ---- Load digest ---- */
-
-async function loadDigest(refresh) {
-    if (digestGenerating) return;
-    digestGenerating = true;
-
-    const loadingEl = document.getElementById("digest-loading");
-    const errorEl = document.getElementById("digest-error");
-    const contentEl = document.getElementById("digest-content");
-    const emptyEl = document.getElementById("digest-empty");
-    const refreshBtn = document.getElementById("digest-refresh");
-
-    loadingEl.style.display = "block";
-    errorEl.style.display = "none";
-    contentEl.style.display = "none";
-    emptyEl.style.display = "none";
-    if (refreshBtn) refreshBtn.disabled = true;
-
-    let phase = refresh ? "generate" : "load";
-    try {
-        // GET is a pure cache read; generation is POST (M4b). A 404 means
-        // no digest exists yet — generate one, preserving first-visit UX.
-        let res = refresh ? null : await fetch("/api/digest/today");
-        if (!res || res.status === 404) {
-            phase = "generate";
-            res = await fetch("/api/digest/today", { method: "POST" });
-        }
-
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.detail || `HTTP ${res.status}`);
-        }
-
-        const json = await res.json();
-
-        if (!json.success || !json.data) {
-            throw new Error("Invalid response");
-        }
-
-        digestData = json.data;
-        digestLoaded = true;
-
-        // Render each section
-        renderDigestSection("ranked", digestData.ranked);
-        renderDigestSection("by_topic", digestData.by_topic);
-        renderDigestSection("by_entity", digestData.by_entity);
-
-        // Show time-ago banner
-        updateDigestBanner(digestData);
-
-        loadingEl.style.display = "none";
-        contentEl.style.display = "block";
-
-        // Show the active tab's section
-        const activeTab = document.querySelector(".digest-tab.active");
-        if (activeTab) {
-            const type = activeTab.dataset.type;
-            document.querySelectorAll(".digest-section").forEach((s) => (s.style.display = "none"));
-            const section = document.getElementById(`digest-${type.replace("_", "-")}`);
-            if (section) section.style.display = "block";
-        }
-
-        // Refresh history dropdown (new digest may have been generated)
-        loadDigestHistory();
-
-        // Reset history select to "Today"
-        const historySelect = document.getElementById("digest-history");
-        if (historySelect) historySelect.value = "today";
-    } catch (err) {
-        console.error("Digest load failed:", err);
-        loadingEl.style.display = "none";
-        document.getElementById("digest-error-msg").textContent =
-            phase === "load"
-                ? `Failed to load digest: ${err.message}`
-                : `Failed to generate digest: ${err.message}`;
-        errorEl.style.display = "block";
-    } finally {
-        digestGenerating = false;
-        if (refreshBtn) refreshBtn.disabled = false;
-    }
-}
-
-function renderDigestSection(type, data) {
-    const elId = `digest-${type.replace("_", "-")}`;
-    const el = document.getElementById(elId);
-    if (!el || !data) return;
-
-    const content = data.content || "";
-    el.innerHTML = renderMarkdown(content);
-
-    // Make article links work (they're /articles/ID)
-    el.querySelectorAll("a").forEach((link) => {
-        const href = link.getAttribute("href");
-        // Internal article links — keep as-is, they already point to /articles/{id}
-        if (href && href.startsWith("/articles/")) {
-            link.addEventListener("click", (e) => {
-                e.preventDefault();
-                // Mark as read
-                const id = href.split("/articles/")[1];
-                fetch(`/api/articles/${id}/read`, { method: "PATCH" }).catch(() => {});
-                window.location.href = href;
-            });
-        } else if (href && (href.startsWith("http://") || href.startsWith("https://"))) {
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-        }
-    });
-}
-
-function updateDigestBanner(data) {
-    const banner = document.getElementById("digest-banner");
-    if (!banner) return;
-
-    // Get created_at from any section (they're all generated together)
-    const section = data.ranked || data.by_topic || data.by_entity;
-    if (!section || !section.created_at) {
-        banner.style.display = "none";
-        return;
-    }
-
-    const then = new Date(section.created_at.replace(" ", "T"));
-    const diffHr = (new Date() - then) / 3600000;
-    const stale = diffHr >= 24;
-    const ago = timeAgo(then);
-
-    banner.className = stale ? "digest-banner digest-banner-stale" : "digest-banner";
-    banner.innerHTML = stale
-        ? `Digest is ${ago} old — new articles may not be included. <button class="digest-refresh-inline" onclick="loadDigest(true)">Regenerate now</button>`
-        : `Generated ${ago} <button class="digest-refresh-inline" onclick="loadDigest(true)">Regenerate</button>`;
-    banner.style.display = "flex";
-}
-
-function timeAgo(then) {
-    const diffMs = new Date() - then;
-    const diffMin = Math.floor(diffMs / 60000);
-    const diffHr = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHr / 24);
-
-    if (diffMin < 1) return "just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHr < 24) return `${diffHr}h ago`;
-    if (diffDay === 1) return "yesterday";
-    return `${diffDay} days ago`;
-}
-
-/* ---- Digest history ---- */
-
-async function loadDigestHistory() {
-    const select = document.getElementById("digest-history");
-    if (!select) return;
-    try {
-        const res = await fetch("/api/digest/history");
-        const json = await res.json();
-        if (!json.success) return;
-
-        // Clear all but "Today"
-        while (select.options.length > 1) select.remove(1);
-
-        const today = new Date().toISOString().slice(0, 10);
-        for (const entry of json.data) {
-            if (entry.date === today) continue; // skip today (already shown)
-            const opt = document.createElement("option");
-            opt.value = entry.date;
-            opt.textContent = formatDigestDate(entry.date);
-            select.appendChild(opt);
-        }
-    } catch (e) {
-        console.error("Failed to load digest history:", e);
-    }
-}
-
-function formatDigestDate(isoDate) {
-    const d = new Date(isoDate + "T12:00:00"); // noon to avoid timezone issues
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-async function loadHistoricalDigest(dateStr) {
-    const loadingEl = document.getElementById("digest-loading");
-    const errorEl = document.getElementById("digest-error");
-    const contentEl = document.getElementById("digest-content");
-    const emptyEl = document.getElementById("digest-empty");
-    const refreshBtn = document.getElementById("digest-refresh");
-
-    loadingEl.style.display = "block";
-    errorEl.style.display = "none";
-    contentEl.style.display = "none";
-    emptyEl.style.display = "none";
-    if (refreshBtn) refreshBtn.disabled = true;
-
-    try {
-        const res = await fetch(`/api/digest/date/${dateStr}`);
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.detail || `HTTP ${res.status}`);
-        }
-
-        const json = await res.json();
-        if (!json.success || !json.data) throw new Error("Invalid response");
-
-        digestData = json.data;
-
-        renderDigestSection("ranked", digestData.ranked);
-        renderDigestSection("by_topic", digestData.by_topic);
-        renderDigestSection("by_entity", digestData.by_entity);
-        updateDigestBanner(digestData);
-
-        loadingEl.style.display = "none";
-        contentEl.style.display = "block";
-
-        const activeTab = document.querySelector(".digest-tab.active");
-        if (activeTab) {
-            const type = activeTab.dataset.type;
-            document.querySelectorAll(".digest-section").forEach((s) => (s.style.display = "none"));
-            const section = document.getElementById(`digest-${type.replace("_", "-")}`);
-            if (section) section.style.display = "block";
-        }
-    } catch (err) {
-        console.error("Historical digest load failed:", err);
-        loadingEl.style.display = "none";
-        document.getElementById("digest-error-msg").textContent =
-            `Failed to load digest for ${formatDigestDate(dateStr)}: ${err.message}`;
-        errorEl.style.display = "block";
-    } finally {
-        if (refreshBtn) refreshBtn.disabled = false;
-    }
-}
-
-/* ---- Digest schedule ---- */
-
-async function loadDigestScheduleState() {
-    try {
-        const res = await fetch("/api/settings/digest-schedule");
-        const json = await res.json();
-        if (!json.success) return;
-        const btn = document.getElementById("digest-schedule-btn");
-        if (btn && json.data.enabled) {
-            btn.classList.add("active");
-            btn.title = `Digest scheduled daily at ${json.data.time}`;
-        }
-    } catch (e) {
-        // ignore
-    }
-}
-
-async function showDigestScheduleModal() {
-    const overlay = document.getElementById("digest-schedule-overlay");
-    if (!overlay) return;
-
-    // Load current settings
-    try {
-        const res = await fetch("/api/settings/digest-schedule");
-        const json = await res.json();
-        if (json.success) {
-            document.getElementById("schedule-enabled").checked = json.data.enabled;
-            document.getElementById("schedule-time").value = json.data.time;
-            document.getElementById("schedule-unread-only").checked = json.data.unread_only;
-
-            const statusEl = document.getElementById("schedule-email-status");
-            if (statusEl) {
-                statusEl.textContent = json.data.email_configured
-                    ? "Email configured — digests will be emailed automatically"
-                    : "No email configured — digests will be generated but not emailed";
-            }
-        }
-    } catch (e) {
-        // use defaults
-    }
-
-    overlay.style.display = "flex";
-}
-
-function hideDigestScheduleModal() {
-    const overlay = document.getElementById("digest-schedule-overlay");
-    if (overlay) overlay.style.display = "none";
-}
-
-async function saveDigestSchedule() {
-    const enabled = document.getElementById("schedule-enabled").checked;
-    const time = document.getElementById("schedule-time").value;
-    const unreadOnly = document.getElementById("schedule-unread-only").checked;
-    const tzOffset = new Date().getTimezoneOffset();
-
-    const btn = document.getElementById("schedule-save-btn");
-    if (btn) btn.disabled = true;
-
-    try {
-        const res = await fetch("/api/settings/digest-schedule", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                enabled,
-                time,
-                unread_only: unreadOnly,
-                timezone_offset: tzOffset,
-            }),
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.detail || "Save failed");
-
-        hideDigestScheduleModal();
-
-        // Update button state
-        const scheduleBtn = document.getElementById("digest-schedule-btn");
-        if (scheduleBtn) {
-            if (enabled) {
-                scheduleBtn.classList.add("active");
-                scheduleBtn.title = `Digest scheduled daily at ${time}`;
-            } else {
-                scheduleBtn.classList.remove("active");
-                scheduleBtn.title = "Schedule daily digest";
-            }
-        }
-    } catch (e) {
-        alert("Failed to save schedule: " + e.message);
-    } finally {
-        if (btn) btn.disabled = false;
-    }
-}
 
 /* ---- Inbox (articles list) ---- */
 
@@ -983,6 +140,14 @@ function renderArticleList(articles) {
     // When using server-side pagination + sort, render as-is (already sorted by server)
     // Only client-sort when per_page=0 (all articles loaded)
     const toRender = perPage > 0 ? articles : sortArticles(articles, currentSort);
+    // NOTE: `.map(renderArticle)` (not a wrapped arrow fn) is intentional —
+    // it matches the historical app.js exactly, including Array.map's
+    // implicit (item, index, array) call passing the loop index into
+    // renderArticle's second param (`showScore`). That's inert today since
+    // plain /api/articles rows never carry `similarity_score` (only search
+    // results do, via the explicit `renderArticle(a, true)` call in
+    // runSearch), but preserving the exact call shape avoids any risk of
+    // behavior drift here.
     listEl.innerHTML = toRender.map(renderArticle).join("");
     attachListeners();
     selectedIndex = -1;
@@ -1200,27 +365,6 @@ function attachListeners() {
             window.location.href = link.href;
         });
     });
-}
-
-function formatDate(isoStr) {
-    if (!isoStr) return "";
-    const d = new Date(isoStr);
-    const now = new Date();
-    const months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
-    if (d.getFullYear() === now.getFullYear()) {
-        return `${months[d.getMonth()]} ${d.getDate()}`;
-    }
-    return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-}
-
-function esc(str) {
-    const el = document.createElement("span");
-    el.textContent = str;
-    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* ---- Sort ---- */
@@ -1545,7 +689,10 @@ function setupFilterPanel() {
             const json = await res.json();
             if (!res.ok || !json.success) throw new Error(json.detail || "Failed to save view");
             closeSaveViewForm();
-            loadSavedViews();
+            // Sidebar (chrome, every page) owns the saved-views list DOM;
+            // ask it to reload+re-render itself rather than duplicating that
+            // logic here.
+            await refreshSidebarViews();
         } catch (e) {
             alert(e.message || "Failed to save view");
         }
@@ -1616,7 +763,7 @@ function renderFilterPanelContent(data) {
 
     // Ratings
     if (data.ratings?.length) {
-        const ratingLabels = { loved: "\u2665 Loved", liked: "+ Liked", disliked: "\u2212 Disliked", unrated: "Unrated" };
+        const ratingLabels = { loved: "♥ Loved", liked: "+ Liked", disliked: "− Disliked", unrated: "Unrated" };
         const ratingItems = data.ratings.map(r => ({
             label: ratingLabels[r.name] || r.name,
             value: r.name,
@@ -1629,7 +776,7 @@ function renderFilterPanelContent(data) {
     // Sources
     if (data.sources?.length) {
         const sourceItems = data.sources.map(s => ({
-            label: (s.is_vip ? "\u2605 " : "") + s.name,
+            label: (s.is_vip ? "★ " : "") + s.name,
             value: String(s.id),
             key: "source_id",
             count: s.count,
@@ -1796,7 +943,7 @@ function renderActiveFilters() {
             return `Source #${v}`;
         },
         tag: v => `Tag: ${v}`,
-        rating: v => ({ loved: "\u2665 Loved", liked: "Liked", disliked: "Disliked", unrated: "Unrated" })[v] || v,
+        rating: v => ({ loved: "♥ Loved", liked: "Liked", disliked: "Disliked", unrated: "Unrated" })[v] || v,
         ingestion_method: v => ({ manual: "Manual", extension: "Extension", email: "Email", imap: "IMAP" })[v] || v,
         has_audio: () => "Has audio",
     };
@@ -1865,7 +1012,7 @@ function renderPagination(pagination) {
     const pages = getPageRange(page, total_pages, 7);
     for (const p of pages) {
         if (p === "...") {
-            html += `<span class="page-info">\u2026</span>`;
+            html += `<span class="page-info">…</span>`;
         } else {
             html += `<button class="page-link${p === page ? " active" : ""}" data-page="${p}">${toRoman(p)}</button>`;
         }
@@ -1927,7 +1074,9 @@ function getPageRange(current, total, maxVisible) {
 /* ---- Keyboard navigation ---- */
 
 function setupKeyboard() {
-    // Only activate on the inbox page (not reader)
+    // Only activate on the inbox page (not reader) — inbox.js is only ever
+    // loaded from inbox.html, so this guard is defensive parity with the
+    // historical app.js rather than a live requirement.
     if (!document.getElementById("article-list")) return;
 
     document.addEventListener("keydown", handleInboxKeydown);
@@ -2031,11 +1180,10 @@ function handleInboxKeydown(e) {
             window.location.href = "/digest";
             break;
         case "r":
+            // "r" regenerates the digest from the digest page (js/digest.js);
+            // `.digest-tab` never exists on /inbox so this was always a
+            // no-op here beyond swallowing the keypress — see file header.
             e.preventDefault();
-            // Generate or regenerate digest if on digest page
-            if (document.querySelector(".digest-tab")) {
-                loadDigest(digestLoaded);
-            }
             break;
         case "c":
             e.preventDefault();
@@ -2227,109 +1375,34 @@ async function performDelete(ids) {
     }
 
     if (failed.length) {
-        showInboxToast(
+        showToast(
             succeeded.length
                 ? `Deleted ${succeeded.length}, failed to delete ${failed.length}`
                 : `Failed to delete ${failed.length === 1 ? "article" : "articles"}`,
             "error"
         );
     } else {
-        showInboxToast(`Deleted ${succeeded.length} article${succeeded.length === 1 ? "" : "s"}`, "success");
+        showToast(`Deleted ${succeeded.length} article${succeeded.length === 1 ? "" : "s"}`, "success");
     }
 }
 
-function showInboxToast(message, type) {
-    const existing = document.querySelector(".settings-toast");
-    if (existing) existing.remove();
+/* ---- Init ---- */
 
-    const toast = document.createElement("div");
-    toast.className = "settings-toast settings-toast-" + (type || "info");
-    toast.textContent = message;
-    document.body.appendChild(toast);
+document.addEventListener("DOMContentLoaded", () => {
+    if (!document.getElementById("article-list")) return;
 
-    setTimeout(() => toast.classList.add("show"), 10);
-    setTimeout(() => {
-        toast.classList.remove("show");
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
-}
+    restoreFiltersFromURL();
+    loadInbox();
+    loadFilters();
+    setupSearch();
+    setupSort();
+    setupFilterPanel();
+    setupBulkDeleteToolbar();
+    setupKeyboard();
 
-
-/* ---- Shortcuts overlay ---- */
-
-const INBOX_SHORTCUTS = [
-    { section: "Navigation" },
-    { keys: ["j"], desc: "Move down" },
-    { keys: ["k"], desc: "Move up" },
-    { keys: ["Enter"], desc: "Open selected article" },
-    { keys: ["/"], desc: "Focus search bar" },
-    { keys: ["d"], desc: "Go to digest" },
-    { keys: ["g"], desc: "Go to reading stats" },
-    { keys: ["v"], desc: "Go to knowledge graph" },
-    { section: "Actions" },
-    { keys: ["s"], desc: "Toggle VIP on selected source" },
-    { keys: ["1"], desc: "Rate dislike" },
-    { keys: ["2"], desc: "Rate like" },
-    { keys: ["3"], desc: "Rate love" },
-    { keys: ["x"], desc: "Delete selected article" },
-    { hint: "Click checkboxes to bulk-select articles for deletion" },
-    { keys: ["n"], desc: "Save new item (URL or email)" },
-    { keys: ["c"], desc: "Classify / reclassify inbox" },
-    { keys: ["f"], desc: "Toggle filter panel" },
-    { keys: ["r"], desc: "Regenerate digest (in digest view)" },
-    { section: "General" },
-    { keys: ["?"], desc: "Show this help" },
-    { keys: ["Esc"], desc: "Blur search / close overlay" },
-];
-
-const READER_SHORTCUTS = [
-    { section: "Navigation" },
-    { keys: ["b", "Esc"], desc: "Back to inbox" },
-    { keys: ["d"], desc: "Go to digest" },
-    { keys: ["g"], desc: "Go to reading stats" },
-    { keys: ["v"], desc: "Go to knowledge graph" },
-    { section: "Actions" },
-    { keys: ["s"], desc: "Toggle VIP on source" },
-    { keys: ["1"], desc: "Rate dislike" },
-    { keys: ["2"], desc: "Rate like" },
-    { keys: ["3"], desc: "Rate love" },
-    { keys: ["x"], desc: "Delete article" },
-    { keys: ["i"], desc: "Toggle analysis panel" },
-    { keys: ["r"], desc: "Run / re-run analysis (panel open)" },
-    { keys: ["p"], desc: "Play / pause audio" },
-    { section: "General" },
-    { keys: ["?"], desc: "Show this help" },
-];
-
-function showShortcuts(view) {
-    const overlay = document.getElementById("shortcuts-overlay");
-    const body = document.getElementById("shortcuts-body");
-    if (!overlay || !body) return;
-
-    const shortcuts = view === "reader" ? READER_SHORTCUTS : INBOX_SHORTCUTS;
-
-    body.innerHTML = shortcuts
-        .map((item) => {
-            if (item.section) {
-                return `<div class="shortcut-section">${item.section}</div>`;
-            }
-            if (item.hint) {
-                return `<div class="shortcut-hint">${esc(item.hint)}</div>`;
-            }
-            const keys = item.keys
-                .map((k) => `<kbd>${esc(k)}</kbd>`)
-                .join(" / ");
-            return `<div class="shortcut-row">
-                <span class="shortcut-keys">${keys}</span>
-                <span class="shortcut-desc">${esc(item.desc)}</span>
-            </div>`;
-        })
-        .join("");
-
-    overlay.style.display = "flex";
-}
-
-function hideShortcuts() {
-    const overlay = document.getElementById("shortcuts-overlay");
-    if (overlay) overlay.style.display = "none";
-}
+    // Refresh after a save from the chrome-level save modal (sidebar.js).
+    document.addEventListener("tiro:content-saved", () => {
+        loadInbox();
+        loadFilters();
+    });
+});

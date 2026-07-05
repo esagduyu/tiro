@@ -140,6 +140,24 @@
     </div>
     <script src="/static/vendor/marked.min.js?v={{ static_v }}"></script>
     <script src="/static/vendor/purify.min.js?v={{ static_v }}"></script>
-    <script src="/static/app.js?v={{ static_v }}"></script>
+    <!-- sidebar.js has no cache-bust query string, unlike every other
+         static asset tag. This is deliberate, not an oversight: it's the
+         only module here that's both entry-loaded from a template AND
+         imported by other ES modules (inbox.js, digest.js do
+         `import ... from "./sidebar.js"`). A relative import specifier
+         resolves against the IMPORTING module's URL and never carries over
+         a query string, so if this tag carried a cache-bust suffix while
+         the relative import resolved to the same path without one, the
+         browser's module specifier map would treat them as two distinct
+         modules and instantiate + execute sidebar.js TWICE (double
+         DOMContentLoaded registration, double event listeners — this was
+         caught as a live bug in Task 2's Playwright run: it double-
+         submitted the save-modal form on Enter, creating duplicate
+         articles). core.js has the same property and is handled the same
+         way — it has no template tag at all, only ever reached via
+         "./core.js" imports, so every reference to it already resolves to
+         one identical unversioned URL. -->
+    <script type="module" src="/static/js/sidebar.js"></script>
+    {% block scripts %}{% endblock %}
 </body>
 </html>

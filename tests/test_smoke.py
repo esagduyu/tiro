@@ -87,8 +87,14 @@ def test_no_cdn_references_in_static_js():
     import tiro
 
     static = Path(tiro.__file__).parent / "frontend" / "static"
+    # Top-level *.js (the historical per-page files) plus static/js/*.js (the
+    # M2.0 ES module entry points, e.g. sidebar.js/inbox.js/digest.js) — but
+    # NOT static/js/tests/ (node:test files) or vendor/ (the vendored copies
+    # themselves, which legitimately mention their own CDN origins in
+    # comments/sourcemaps).
+    js_files = list(static.glob("*.js")) + list((static / "js").glob("*.js"))
     offenders = []
-    for js in static.glob("*.js"):  # top level only — vendor/ is the vendored copy itself
+    for js in js_files:
         text = js.read_text()
         for marker in ("cdn.jsdelivr", "unpkg.com", "cdnjs.", "googleapis.com"):
             if marker in text:

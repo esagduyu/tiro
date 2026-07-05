@@ -48,7 +48,7 @@
     </div>
     <div id="digest-error" class="digest-error" style="display: none;">
         <p id="digest-error-msg">Failed to generate digest.</p>
-        <button onclick="loadDigest(true)">Try again</button>
+        <button id="digest-retry-btn">Try again</button>
     </div>
     <div id="digest-banner" class="digest-banner" style="display: none;"></div>
     <div id="digest-content" class="digest-content">
@@ -61,4 +61,8 @@
         <p>Save some articles first, then come back for your daily digest.</p>
     </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/digest.js?v={{ static_v }}"></script>
 {% endblock %}
