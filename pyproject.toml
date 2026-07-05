@@ -1,6 +1,6 @@
 [project]
 name = "tiro-reader"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local-first, open-source reading OS for the AI age"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

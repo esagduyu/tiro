@@ -470,7 +470,7 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.2.0 alpha to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.3.0 alpha to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 2 — Highlights & notes (0.4):** anchored highlights and markdown notes stored as human-readable sidecar files next to your articles — Tiro becomes a place to think, not just to save.
