@@ -66,6 +66,7 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
         # SQLite last, in one transaction: junctions (both directions) + audio + article
         conn.execute("DELETE FROM article_tags WHERE article_id = ?", (article_id,))
         conn.execute("DELETE FROM article_entities WHERE article_id = ?", (article_id,))
+        conn.execute("DELETE FROM article_authors WHERE article_id = ?", (article_id,))
         conn.execute(
             "DELETE FROM article_relations WHERE article_id = ? OR related_article_id = ?",
             (article_id, article_id),
