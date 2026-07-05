@@ -109,7 +109,13 @@ export function timeAgo(then) {
  * constraint, and classic scripts execute before deferred modules, so by
  * the time any module calls this, both are guaranteed to be on window.
  * Guarded with a clear error if that invariant is ever violated.
+ *
+ * marked.setOptions() is applied once (lazily, on first render) rather than
+ * per-call, matching the originals' load-time configuration — still safe if
+ * marked finishes loading after this module.
  */
+let _markedConfigured = false;
+
 export function renderMarkdown(md) {
     if (typeof window === "undefined" || !window.marked || !window.DOMPurify) {
         throw new Error(
@@ -117,7 +123,10 @@ export function renderMarkdown(md) {
             "(vendor scripts) to be loaded before this module runs"
         );
     }
-    window.marked.setOptions({ breaks: false, gfm: true });
+    if (!_markedConfigured) {
+        window.marked.setOptions({ breaks: false, gfm: true });
+        _markedConfigured = true;
+    }
     const raw = window.marked.parse(md || "");
     return window.DOMPurify.sanitize(raw, {
         FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "style"],
@@ -181,7 +190,7 @@ export function showToast(message, type) {
     setTimeout(() => {
         toast.classList.remove("show");
         setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    }, 3500);
 }
 
 /**
