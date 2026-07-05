@@ -8,6 +8,7 @@ from tiro.migrations import canonical_key, new_ulid
 from tiro.wiki import read_page, write_page
 from tiro.wiki_gen import (
     WikiGenerationError,
+    _strip_md_fences,
     gather_node_articles,
     generate_wiki_page,
     regenerate_wiki_page,
@@ -205,6 +206,67 @@ def test_generate_wiki_page_tag_maps_to_concept_kind(initialized_library, fake_l
     assert page["kind"] == "concept"
     assert page["entity_type"] is None
     assert page["article_uids"] == [uid]
+
+
+# --- generate_wiki_page: fence-stripped model output -----------------------------
+
+
+def test_generate_strips_markdown_fences_from_model_output(initialized_library, fake_llm):
+    config = initialized_library
+    source_id = _seed_source(config)
+    article_id, uid = _seed_article(
+        config, source_id, "a1", title="Article One", summary="A summary."
+    )
+    entity_id = _link_entity(config, article_id, "Anthropic", entity_type="company")
+
+    stem = "a1"
+    fake_llm(f"```markdown\nBody with a citation [[{stem}|per source]].\n```")
+
+    result = generate_wiki_page(config, "entity", entity_id)
+    assert result["cited_articles"] == 1
+
+    page = read_page(config, "entities/anthropic")
+    assert page["body"].startswith("Body with")
+    assert "`" not in page["body"]
+
+
+def test_generate_strips_bare_fences(initialized_library, fake_llm):
+    config = initialized_library
+    source_id = _seed_source(config)
+    article_id, uid = _seed_article(
+        config, source_id, "a1", title="Article One", summary="A summary."
+    )
+    entity_id = _link_entity(config, article_id, "Anthropic", entity_type="company")
+
+    stem = "a1"
+    fake_llm(f"```\nBody with a citation [[{stem}|per source]].\n```")
+
+    result = generate_wiki_page(config, "entity", entity_id)
+    assert result["cited_articles"] == 1
+
+    page = read_page(config, "entities/anthropic")
+    assert page["body"].startswith("Body with")
+    assert "`" not in page["body"]
+
+
+# --- _strip_md_fences (direct) ---------------------------------------------------
+
+
+def test_strip_md_fences_with_lang_hint():
+    assert _strip_md_fences("```markdown\nHello world\n```") == "Hello world"
+
+
+def test_strip_md_fences_bare_fence():
+    assert _strip_md_fences("```\nHello world\n```") == "Hello world"
+
+
+def test_strip_md_fences_unfenced_passthrough():
+    assert _strip_md_fences("Hello world") == "Hello world"
+
+
+def test_strip_md_fences_inline_code_span_untouched():
+    text = "A body mentioning an inline `x` code span, not a wrapping fence."
+    assert _strip_md_fences(text) == text
 
 
 # --- generate_wiki_page: citation validation -------------------------------------
