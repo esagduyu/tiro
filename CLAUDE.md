@@ -67,7 +67,7 @@ uv run tiro run            # Start server on localhost:8000 (auto-opens browser)
 uv run tiro run --lan      # Bind to 0.0.0.0 for LAN access — refuses without a password
 ```
 
-Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`. Tests: `uv run pytest` (221, must stay 0-warnings).
+Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`, `tiro backup [--output|--include-audio]`, `tiro restore <snapshot> [--yes]`, `tiro import <bundle> [--conflicts]`. Tests: `uv run pytest` (247, must stay 0-warnings).
 
 Before starting the server, kill any existing process on port 8000:
 ```bash
@@ -118,6 +118,8 @@ lsof -ti :8000 | xargs kill -9
 | GET | /api/digest/date/{date} | Get cached digest for specific date (404 if not found) |
 | GET | /api/settings/digest-schedule | Get digest schedule config + email_configured flag |
 | POST | /api/settings/digest-schedule | Update digest schedule (enabled, time, unread_only, tz_offset) |
+| GET | /api/backup/snapshots | List library snapshots (manual + auto, newest first) |
+| GET | /api/export/opml | Export sources as OPML |
 
 ## Current Status
 
@@ -142,6 +144,7 @@ lsof -ti :8000 | xargs kill -9
 - **Article list SQL (M1.0)**: `tiro/queries.py` is the single owner (builder + SORT_SQL + ARTICLE_COLUMNS); `display_date` (generated column) replaces COALESCE sorts.
 - **Cache-bust (M1.0)**: `?v={{ static_v }}` from `STATIC_VERSION` in app.py — bump one constant only (currently 57).
 - **CI (M1.0)**: GitHub Actions runs ruff + pytest on 3.11/3.13 — `uv run ruff check .` must pass before push.
+- **Backup/import (M1.1):** snapshots are tar.zst with portable `embeddings.jsonl` (ChromaDB internals never copied); restore displaces the library to a sibling `.bak.{ts}`, rebuilds vectors, marks the rest `pending`, cleans fileless audio rows, and runs `migrate_db` (snapshots may be older schema); `{library}/backups/` is excluded from snapshots (recursion guard) and from doctor's concerns; `auto_backup(config, reason)` is best-effort-never-raises with `backup_auto_keep` retention; `tiro import` merges bundles per-article (uid→url→title+source match, skip/overwrite/keep-both), never touches stats or AI; export bundle format is documented in EXPORT_SCHEMA.md — keep it in sync when metadata.json changes.
 
 ## Playwright MCP
 

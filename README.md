@@ -196,6 +196,9 @@ Storage Layer (all local)
 | `uv run tiro run --no-browser` | Start server without opening browser |
 | `uv run tiro export -o backup.zip` | Export library as zip (supports `--tag`, `--source-id`, `--rating-min`, `--date-from` filters) |
 | `uv run tiro import-emails ./newsletters/` | Bulk import .eml files from a directory |
+| `uv run tiro backup [--output path] [--include-audio]` | Write a full library snapshot (tar.zst) |
+| `uv run tiro restore <snapshot> [--yes]` | Replace the library from a snapshot (displaces the current library to a `.bak.{ts}` sibling) |
+| `uv run tiro import <bundle> [--conflicts skip\|overwrite\|keep-both]` | Import a Tiro export bundle, merging per-article into the current library |
 | `uv run tiro setup-email` | Configure Gmail SMTP + IMAP integration |
 | `uv run tiro check-email` | Check IMAP inbox for new newsletters |
 | `uv run tiro-mcp` | Start the MCP server (for Claude Desktop/Code integration) |
