@@ -222,6 +222,8 @@ def cmd_backup(args):
 
 def cmd_restore(args):
     """Replace the library from a snapshot."""
+    import socket
+
     from tiro.backup import restore_snapshot
     from tiro.config import load_config
 
@@ -230,6 +232,20 @@ def cmd_restore(args):
     if not snapshot.exists():
         print(f"Snapshot not found: {snapshot}")
         sys.exit(1)
+
+    if not getattr(args, "force", False):
+        try:
+            with socket.create_connection((config.host, config.port), timeout=1):
+                server_running = True
+        except OSError:
+            server_running = False
+        if server_running:
+            print(
+                f"A server appears to be running on {config.host}:{config.port} — "
+                "stop it first (or pass --force)."
+            )
+            sys.exit(1)
+
     if not args.yes:
         answer = input(
             f"Replace the library at {config.library} with {snapshot.name}?\n"
@@ -240,6 +256,11 @@ def cmd_restore(args):
             print("Aborted.")
             sys.exit(1)
     result = restore_snapshot(config, snapshot)
+    if result.get("schema_newer_than_app"):
+        print(
+            "WARNING: the restored snapshot's database schema is newer than this "
+            "Tiro version supports — upgrade Tiro before relying on this library."
+        )
     print(
         f"Restored {result['articles']} articles "
         f"({result['vectors_restored']} vectors restored, "
@@ -715,6 +736,10 @@ def main():
     restore_parser = subparsers.add_parser("restore", help="Replace the library from a snapshot")
     restore_parser.add_argument("snapshot", help="Path to a .tar.zst snapshot")
     restore_parser.add_argument("--yes", action="store_true", help="Skip confirmation")
+    restore_parser.add_argument(
+        "--force", action="store_true",
+        help="Skip the running-server check (restoring while the server is up corrupts state)",
+    )
 
     import_parser = subparsers.add_parser("import-emails", help="Bulk import .eml files")
     import_parser.add_argument("directory", type=Path, help="Directory containing .eml files")

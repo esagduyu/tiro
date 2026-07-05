@@ -181,3 +181,47 @@ def test_import_leaves_doctor_clean(initialized_library, tmp_path):
         assert report["vector_failed"] == []
     finally:
         bundle.unlink()
+
+
+def test_overwrite_preserves_fields_absent_from_bundle(initialized_library, tmp_path):
+    """M1.1 review item 8: a bundle produced by a schema that predates one
+    of _OVERWRITE_FIELDS (here simulated by hand-stripping 'is_read' from
+    the article dict) must not null that field out on overwrite-import —
+    only fields actually present in the bundle should be applied."""
+    import json
+    import zipfile
+
+    config = initialized_library
+    _seed(config, rating=1)
+    conn = get_connection(config.db_path)
+    conn.execute("UPDATE articles SET is_read = 1")
+    conn.commit()
+    conn.close()
+
+    bundle = export_library(config)
+    stripped = tmp_path / "stripped.zip"
+    try:
+        # Rewrite the bundle with 'is_read' removed from every article dict,
+        # simulating a pre-schema bundle that never had the field.
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(stripped, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "metadata.json":
+                    meta = json.loads(data)
+                    for art in meta["articles"]:
+                        art.pop("is_read", None)
+                    data = json.dumps(meta).encode()
+                zout.writestr(item, data)
+
+        result = import_bundle(config, stripped, conflicts="overwrite")
+        assert result["overwritten"] == 1
+
+        conn = get_connection(config.db_path)
+        row = conn.execute("SELECT is_read, title FROM articles").fetchone()
+        conn.close()
+        # is_read survives untouched; other bundle-present fields still apply.
+        assert row["is_read"] == 1
+        assert row["title"] == "T1"
+    finally:
+        bundle.unlink()
+        stripped.unlink()

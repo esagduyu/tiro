@@ -45,7 +45,12 @@ def export_library(
         # filtered by article_ids: a digest can span articles outside the
         # current filter and daily stats aren't per-article at all, so
         # scoping them to the filtered set would silently drop or corrupt
-        # data the importer needs to reconstruct history faithfully.
+        # data a THIRD-PARTY importer might rely on to reconstruct history
+        # faithfully. Tiro's own importer (tiro/importer.py) deliberately
+        # ignores both fields — they're regenerable caches / this-library
+        # activity, not article content — so this scoping decision is about
+        # keeping the bundle complete for other consumers, not about
+        # round-tripping through `tiro import-bundle`.
         digests = _get_digests(conn)
         reading_stats = _get_reading_stats(conn)
         audio = _get_audio_metadata(conn, article_ids)
@@ -314,7 +319,7 @@ def _bundle_readme(article_count: int) -> str:
     """Generate a README.md for the export bundle."""
     return f"""# Tiro Library Export
 
-This bundle was exported from [Tiro](https://github.com/egebeyaztas/project-tiro), a local-first reading OS.
+This bundle was exported from [Tiro](https://github.com/esagduyu/tiro), a local-first reading OS.
 
 ## Contents
 

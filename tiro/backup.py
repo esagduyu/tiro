@@ -11,6 +11,7 @@ live config.yaml).
 
 import json
 import logging
+import os
 import shutil
 import tarfile
 import tempfile
@@ -144,25 +145,36 @@ def create_snapshot(
         "article_count": article_count,
     }
 
-    with tempfile.TemporaryDirectory() as td:
-        db_copy = Path(td) / "tiro.db"
-        _checkpointed_db_copy(config, db_copy)
+    # Write to a sibling .tmp and os.replace() into place on success — a
+    # mid-write failure (disk full, ChromaDB error, etc.) must never leave a
+    # truncated .tar.zst at `output_path`: retention (auto_backup) sorts by
+    # mtime and would happily count a corrupt partial file as the newest
+    # snapshot, evicting a good one.
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            db_copy = Path(td) / "tiro.db"
+            _checkpointed_db_copy(config, db_copy)
 
-        with _open_tar_zst_write(output_path) as tar:
-            _add_bytes(tar, "manifest.json", json.dumps(manifest, indent=2).encode())
-            tar.add(db_copy, arcname="tiro.db")
-            _add_bytes(tar, "config-snapshot.yaml", _sanitized_config_yaml(config).encode())
-            if config.articles_dir.exists():
-                for md in sorted(config.articles_dir.glob("*.md")):
-                    tar.add(md, arcname=f"articles/{md.name}")
-            if config.wiki_dir.exists():
-                for page in sorted(config.wiki_dir.glob("*.md")):
-                    tar.add(page, arcname=f"wiki/{page.name}")
-            _add_bytes(tar, "embeddings.jsonl", _dump_embeddings_jsonl(config))
-            audio_dir = config.library / "audio"
-            if include_audio and audio_dir.exists():
-                for mp3 in sorted(audio_dir.glob("*.mp3")):
-                    tar.add(mp3, arcname=f"audio/{mp3.name}")
+            with _open_tar_zst_write(tmp_path) as tar:
+                _add_bytes(tar, "manifest.json", json.dumps(manifest, indent=2).encode())
+                tar.add(db_copy, arcname="tiro.db")
+                _add_bytes(tar, "config-snapshot.yaml", _sanitized_config_yaml(config).encode())
+                if config.articles_dir.exists():
+                    for md in sorted(config.articles_dir.glob("*.md")):
+                        tar.add(md, arcname=f"articles/{md.name}")
+                if config.wiki_dir.exists():
+                    for page in sorted(config.wiki_dir.glob("*.md")):
+                        tar.add(page, arcname=f"wiki/{page.name}")
+                _add_bytes(tar, "embeddings.jsonl", _dump_embeddings_jsonl(config))
+                audio_dir = config.library / "audio"
+                if include_audio and audio_dir.exists():
+                    for mp3 in sorted(audio_dir.glob("*.mp3")):
+                        tar.add(mp3, arcname=f"audio/{mp3.name}")
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     logger.info("Snapshot written: %s (%d articles)", output_path, article_count)
     return output_path
@@ -250,8 +262,26 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
     every member, plus the manifest) before anything is touched, so a
     malicious or corrupt snapshot fails before the live library is displaced.
     Run with the server stopped.
+
+    If `snapshot_path` lives inside the library being restored (the default
+    `tiro backup` output is `{library}/backups/manual/...`), it is copied to
+    a tempfile BEFORE the library is displaced — otherwise pass 2 would try
+    to re-open a path that `shutil.move` just relocated out from under it.
+    The `backups/` directory of the displaced (pre-restore) library —
+    snapshot history, an independent artifact and not library state — is
+    moved back into the restored library at the end, so restoring from an
+    in-library snapshot doesn't make the whole backup history (including the
+    snapshot just restored from) disappear into the `.bak` sibling.
+
+    If the restored database's schema_version is newer than this version of
+    Tiro understands (`schema_newer_than_app` in the returned dict), a
+    downgrade has occurred — the snapshot was made by a newer Tiro. This is
+    logged loudly but not fatal; migrate_db() only applies forward
+    migrations, so the schema is left as-is.
     """
     snapshot_path = Path(snapshot_path)
+    library = config.library
+
     # Pass 1: validate EVERY member and the manifest before touching anything
     manifest = None
     with _open_tar_zst_read(snapshot_path) as tar:
@@ -265,37 +295,73 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
             f"unsupported snapshot format_version {manifest.get('format_version')!r}"
         )
 
-    # The library is only displaced after the full archive has passed validation
-    # Displace the live library (keep it — this IS the pre-restore backup)
-    library = config.library
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    displaced = library.parent / f"{library.name}.bak.{ts}"
-    if library.exists():
-        shutil.move(str(library), str(displaced))
-    library.mkdir(parents=True, exist_ok=True)
+    # If the snapshot is inside the library, copy it out first — the library
+    # directory is about to be moved aside, which would otherwise leave
+    # `snapshot_path` pointing nowhere for pass 2.
+    read_path = snapshot_path
+    temp_copy: Path | None = None
+    if snapshot_path.resolve().is_relative_to(library.resolve()):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.zst") as tf:
+            temp_copy = Path(tf.name)
+        shutil.copy2(snapshot_path, temp_copy)
+        read_path = temp_copy
 
-    # Pass 2: extract (streaming tar needs a fresh open)
-    embeddings_path = library / "embeddings.jsonl"
-    with _open_tar_zst_read(snapshot_path) as tar:
-        for member in _safe_members(tar):
-            if member.name == "manifest.json" or not member.isfile():
-                continue
-            if member.name == "tiro.db":
-                dest = config.db_path
-            elif member.name == "config-snapshot.yaml":
-                continue  # reference copy only; never touches live config.yaml
-            elif member.name == "embeddings.jsonl":
-                dest = embeddings_path
-            else:
-                dest = library / member.name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with tar.extractfile(member) as src, dest.open("wb") as out:
-                shutil.copyfileobj(src, out)
+    try:
+        # The library is only displaced after the full archive has passed
+        # validation. Displace the live library (keep it — this IS the
+        # pre-restore backup).
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        displaced = library.parent / f"{library.name}.bak.{ts}"
+        if library.exists():
+            shutil.move(str(library), str(displaced))
+        library.mkdir(parents=True, exist_ok=True)
+
+        # Pass 2: extract (streaming tar needs a fresh open)
+        embeddings_path = library / "embeddings.jsonl"
+        with _open_tar_zst_read(read_path) as tar:
+            for member in _safe_members(tar):
+                if member.name == "manifest.json" or not member.isfile():
+                    continue
+                if member.name == "tiro.db":
+                    dest = config.db_path
+                elif member.name == "config-snapshot.yaml":
+                    continue  # reference copy only; never touches live config.yaml
+                elif member.name == "embeddings.jsonl":
+                    dest = embeddings_path
+                else:
+                    dest = library / member.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile(member) as src, dest.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+    finally:
+        if temp_copy is not None:
+            temp_copy.unlink(missing_ok=True)
 
     # Snapshot may predate current schema
     from tiro.database import migrate_db
 
     migrate_db(config.db_path)
+
+    # Downgrade detection: the snapshot's schema may be NEWER than what this
+    # Tiro version understands (restoring a newer-Tiro snapshot into an
+    # older Tiro install). migrate_db only runs forward migrations, so a
+    # newer schema_version is left untouched — surface it loudly rather than
+    # silently proceeding against a schema this code wasn't written for.
+    from tiro.migrations import LATEST_VERSION, schema_version
+
+    conn = get_connection(config.db_path)
+    try:
+        restored_schema_version = schema_version(conn)
+    finally:
+        conn.close()
+    schema_newer_than_app = restored_schema_version > LATEST_VERSION
+    if schema_newer_than_app:
+        logger.warning(
+            "Restored snapshot's schema version (%d) is NEWER than this Tiro "
+            "version supports (%d) — it was likely created by a newer Tiro. "
+            "Upgrade Tiro before relying on this library.",
+            restored_schema_version, LATEST_VERSION,
+        )
 
     # Rebuild ChromaDB from the portable dump
     from tiro.vectorstore import init_vectorstore
@@ -352,6 +418,15 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
     finally:
         conn.close()
 
+    # Snapshot/backup history is an independent artifact, not library state —
+    # bring the displaced library's backups/ back so it isn't stranded inside
+    # the .bak sibling (this also restores the very snapshot just used above,
+    # since it was copied out to `temp_copy` before displacement in item 1's
+    # fix, not read from its original in-library path).
+    displaced_backups = displaced / "backups"
+    if displaced_backups.exists():
+        shutil.move(str(displaced_backups), str(library / "backups"))
+
     logger.info(
         "Restored %d articles from %s (vectors: %d restored, %d pending; displaced: %s)",
         article_count, snapshot_path, vectors_restored, vectors_pending, displaced,
@@ -362,4 +437,5 @@ def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
         "vectors_pending": vectors_pending,
         "audio_rows_cleaned": audio_rows_cleaned,
         "displaced_library": str(displaced),
+        "schema_newer_than_app": schema_newer_than_app,
     }

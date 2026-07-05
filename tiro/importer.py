@@ -242,13 +242,24 @@ def _unique_slug(conn: sqlite3.Connection, base: str) -> str:
 
 def _overwrite_article(conn: sqlite3.Connection, config: TiroConfig, existing: sqlite3.Row, art: dict, body_md: str) -> None:
     """Update the existing row's content fields, rewrite its markdown file
-    (under its own existing slug/markdown_path), keep id/uid/slug."""
-    updates = {field: art.get(field) for field in _OVERWRITE_FIELDS}
-    set_clause = ", ".join(f"{field} = ?" for field in _OVERWRITE_FIELDS)
-    conn.execute(
-        f"UPDATE articles SET {set_clause}, vector_status = 'pending' WHERE id = ?",
-        (*updates.values(), existing["id"]),
-    )
+    (under its own existing slug/markdown_path), keep id/uid/slug.
+
+    Only fields actually present in the bundle's article dict are
+    overwritten (`if field in art`) — a bundle produced by an older schema
+    that predates one of `_OVERWRITE_FIELDS` must not null that column out
+    just because the key is absent, e.g. a pre-`is_read`-export shouldn't be
+    able to un-read every existing article on overwrite-import."""
+    updates = {field: art[field] for field in _OVERWRITE_FIELDS if field in art}
+    if updates:
+        set_clause = ", ".join(f"{field} = ?" for field in updates)
+        conn.execute(
+            f"UPDATE articles SET {set_clause}, vector_status = 'pending' WHERE id = ?",
+            (*updates.values(), existing["id"]),
+        )
+    else:
+        conn.execute(
+            "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (existing["id"],)
+        )
     md_path = config.articles_dir / existing["markdown_path"]
     md_path.write_text(body_md)
 

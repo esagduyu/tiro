@@ -27,7 +27,7 @@ async def classify(request: Request, body: ClassifyRequest = ClassifyRequest()):
     if body.refresh:
         from tiro.backup import auto_backup
 
-        auto_backup(config, "reclassify")
+        await asyncio.to_thread(auto_backup, config, "reclassify")
 
         conn = get_connection(config.db_path)
         try:

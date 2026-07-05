@@ -248,3 +248,171 @@ def test_restore_rejects_traversal_members(initialized_library, tmp_path):
     assert not list(
         initialized_library.library.parent.glob(f"{initialized_library.library.name}.bak.*")
     )
+
+
+def test_restore_from_in_library_snapshot(initialized_library):
+    """M1.1 review item 1 regression: `tiro backup`'s default output lives
+    under {library}/backups/manual/ — restore must survive displacing the
+    live library out from under the very snapshot path it's reading."""
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+    from tiro.lifecycle import delete_article
+
+    config = initialized_library
+    _seed_article(config, "art-1", "T1")
+    snap = create_snapshot(config)  # default in-library location
+    assert snap.is_relative_to(config.library)
+
+    delete_article(config, 1)  # mutate after snapshot
+    assert not (config.articles_dir / "art-1.md").exists()
+
+    result = restore_snapshot(config, snap)
+
+    conn = get_connection(config.db_path)
+    titles = {r["title"] for r in conn.execute("SELECT title FROM articles").fetchall()}
+    conn.close()
+    assert titles == {"T1"}
+    assert (config.articles_dir / "art-1.md").exists()
+    assert result["articles"] == 1
+
+
+def test_create_snapshot_atomic_on_mid_write_failure(initialized_library, tmp_path, monkeypatch):
+    """M1.1 review item 3: a mid-write failure must not leave a truncated
+    .tar.zst (nor a stray .tmp) that retention could mistake for the
+    newest — and therefore keep — snapshot."""
+    import pytest
+
+    from tiro import backup as backup_mod
+
+    config = initialized_library
+    _seed_article(config)
+
+    def boom(_config):
+        raise RuntimeError("embeddings dump exploded")
+
+    monkeypatch.setattr(backup_mod, "_dump_embeddings_jsonl", boom)
+
+    output = tmp_path / "snap.tar.zst"
+    with pytest.raises(RuntimeError, match="embeddings dump exploded"):
+        backup_mod.create_snapshot(config, output)
+
+    assert not output.exists()
+    assert not output.with_name(output.name + ".tmp").exists()
+
+
+def test_restore_flags_schema_newer_than_app(initialized_library, tmp_path, caplog):
+    """M1.1 review item 4: restoring a snapshot whose schema is newer than
+    this Tiro understands must be flagged, not silently accepted."""
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+    from tiro.migrations import LATEST_VERSION
+
+    config = initialized_library
+    _seed_article(config)
+
+    conn = get_connection(config.db_path)
+    conn.execute(f"PRAGMA user_version = {LATEST_VERSION + 5}")
+    conn.commit()
+    conn.close()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    with caplog.at_level("WARNING"):
+        result = restore_snapshot(config, snap)
+
+    assert result["schema_newer_than_app"] is True
+    assert any("newer" in r.message.lower() for r in caplog.records)
+
+
+def test_restore_schema_newer_flag_defaults_false(initialized_library, tmp_path):
+    """Companion to the above: the normal (non-downgrade) path must report
+    schema_newer_than_app=False, not just omit the key."""
+    from tiro.backup import restore_snapshot
+
+    config = initialized_library
+    _seed_article(config)
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    result = restore_snapshot(config, snap)
+    assert result["schema_newer_than_app"] is False
+
+
+def test_restore_preserves_backup_history(initialized_library):
+    """M1.1 review item 5: snapshot/backup history is an independent
+    artifact, not library state — it must survive a restore, including the
+    very in-library snapshot that was just restored from (exercises item 1's
+    temp-copy fix too)."""
+    from tiro.backup import list_snapshots, restore_snapshot
+
+    config = initialized_library
+    _seed_article(config)
+    snap = create_snapshot(config)  # {library}/backups/manual/tiro-....tar.zst
+
+    restore_snapshot(config, snap)
+
+    assert snap.exists()
+    kinds = {s["kind"] for s in list_snapshots(config)}
+    assert "manual" in kinds
+
+
+def test_cmd_restore_refuses_when_server_running(initialized_library, tmp_path, capsys):
+    """M1.1 review item 6: `tiro restore` must refuse to run against a
+    library whose server is still up, unless --force is passed.
+
+    Args-stub pattern per test_importer.py::test_cli_import — the outer
+    local is named `lib_config` (not `config`) specifically so it isn't
+    shadowed by the `Args` class body's own `config` attribute (Python's
+    class-body scoping treats any name assigned in the class body as local
+    to that block for the whole block, which would otherwise turn the
+    earlier reference into a NameError).
+    """
+    import socket
+
+    import pytest
+
+    from tiro.cli import cmd_restore
+
+    lib_config = initialized_library
+    _seed_article(lib_config)
+    snap_path = create_snapshot(lib_config, tmp_path / "snap.tar.zst")
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        bound_port = srv.getsockname()[1]
+        lib_config.host = "127.0.0.1"
+        lib_config.port = bound_port
+
+        class Args:
+            _config_override = lib_config
+            config = "unused"
+            snapshot = str(snap_path)
+            yes = True
+            force = False
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_restore(Args())
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "stop it first" in out
+    finally:
+        srv.close()
+
+    # --force bypasses the guard entirely (server still bound at this point
+    # would be flaky since the socket is closed above, so re-bind to prove
+    # --force skips the check rather than merely happening to see it down).
+    srv2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv2.bind(("127.0.0.1", 0))
+        srv2.listen(1)
+        lib_config.port = srv2.getsockname()[1]
+
+        class ForcedArgs:
+            _config_override = lib_config
+            config = "unused"
+            snapshot = str(snap_path)
+            yes = True
+            force = True
+
+        cmd_restore(ForcedArgs())  # must not raise SystemExit
+    finally:
+        srv2.close()
