@@ -125,6 +125,15 @@ def test_get_wiki_page_unknown_slug_404(authenticated_client):
     assert r.status_code == 404
 
 
+def test_get_wiki_page_traversal_slug_returns_404_not_500(authenticated_client):
+    # %2E%2E decodes to ".." while the literal "/" stays a path separator, so
+    # the slug reaching the route is "entities/../../etc" -- a traversal shape
+    # that page_path() rejects with ValueError. The route must map that to a
+    # 404, not let it bubble up as an unhandled 500.
+    r = authenticated_client.get("/api/wiki/entities/%2E%2E/%2E%2E/etc")
+    assert r.status_code == 404
+
+
 def test_get_wiki_page_returns_body_and_resolved_citations(
     authenticated_client, configured_library
 ):

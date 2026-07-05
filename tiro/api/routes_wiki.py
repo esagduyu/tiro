@@ -52,13 +52,18 @@ def _build_citations(config, body: str) -> dict[str, int]:
         return {}
     conn = get_connection(config.db_path)
     try:
+        placeholders = ",".join("?" for _ in stems)
+        paths = [f"{stem}.md" for stem in stems]
+        rows = conn.execute(
+            f"SELECT id, markdown_path FROM articles WHERE markdown_path IN ({placeholders})",
+            paths,
+        ).fetchall()
+        by_path = {row["markdown_path"]: row["id"] for row in rows}
         citations: dict[str, int] = {}
         for stem in stems:
-            row = conn.execute(
-                "SELECT id FROM articles WHERE markdown_path = ?", (f"{stem}.md",)
-            ).fetchone()
-            if row:
-                citations[stem] = row["id"]
+            article_id = by_path.get(f"{stem}.md")
+            if article_id is not None:
+                citations[stem] = article_id
         return citations
     finally:
         conn.close()
@@ -85,7 +90,10 @@ async def get_wiki_page(slug: str, request: Request):
     """Read a wiki page by slug, plus a resolved citation map (`{stem:
     article_id}`) for the renderer. 404 on an unknown slug."""
     config = request.app.state.config
-    page = await asyncio.to_thread(read_page, config, slug)
+    try:
+        page = await asyncio.to_thread(read_page, config, slug)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     if page is None:
         raise HTTPException(status_code=404, detail=f"Unknown wiki page: {slug!r}")
     citations = await asyncio.to_thread(_build_citations, config, page["body"])
