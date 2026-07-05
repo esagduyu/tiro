@@ -182,6 +182,13 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Knowledge graph** — Interactive d3.js force-directed graph showing entities and tags connected by article co-occurrence. Density slider, click-to-explore article panel.
 - **Content decay** — Unengaged articles naturally fade from digests over time
 
+### Library Wiki (alpha)
+
+- **Cited synthesis pages** — Generate an on-demand wiki page for any entity or tag from the knowledge graph or the `/wiki` list: a Haiku-tier pass over every article linked to that node, synthesized into a markdown page with `[[wikilinks]]` back to your library.
+- **Every claim is cited, or the page doesn't exist** — Generation is discarded outright if the model's output resolves to zero real citations; nothing gets written. Wikilinks resolve to their source article, or render as plain text if unresolvable — never a dead link.
+- **Regenerate from scratch, anytime** — A pinned note you add survives regeneration; everything else is rebuilt fresh from the current library state, no accumulated drift.
+- **Cheap by design** — One light-tier (Haiku) API call per page, generated only when you ask. `_schema.md` in your wiki folder is yours to edit — it's the instructions the model follows.
+
 ### Interface
 
 - **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Graph, Stats, Settings. Collapses to icons on narrower screens, hamburger menu on mobile.
@@ -214,7 +221,7 @@ FastAPI Backend
   ├── TTS Engine (OpenAI TTS streaming + speechSynthesis fallback)
   ├── Query Layer (ChromaDB semantic search + SQLite metadata)
   ├── Knowledge Graph (d3.js force-directed visualization)
-  └── MCP Server (7 tools for Claude integration)
+  └── MCP Server (10 tools for Claude integration)
   ↕
 Storage Layer (all local)
   ├── articles/*.md      (markdown files with YAML frontmatter)
@@ -295,6 +302,8 @@ Once you've set a password (see [Security & your data](#security--your-data)), t
 | `get_articles_by_tag(tag)` | Articles filtered by topic tag |
 | `get_articles_by_source(source)` | Articles filtered by source name or domain |
 | `list_filters()` | Available filter facets with counts (tiers, sources, tags, ratings) |
+| `list_wiki_pages()` | List AI-generated wiki pages (entities/concepts), with slug, status, and source count |
+| `get_wiki_page(slug)` | Full content of a wiki page by slug |
 | `save_url(url)` | Save a web page to your library |
 | `save_email(file_path)` | Save an .eml newsletter to your library |
 
@@ -472,9 +481,10 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.3.0 alpha to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.3.5 alpha to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
+- **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4):** anchored highlights and markdown notes stored as human-readable sidecar files next to your articles — Tiro becomes a place to think, not just to save.
 - **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this.
 - **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine.
