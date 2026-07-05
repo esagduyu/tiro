@@ -213,6 +213,15 @@ def test_auto_backup_disabled_when_keep_zero(initialized_library):
     assert not (config.library / "backups" / "auto").exists()
 
 
+def test_snapshots_endpoint(authenticated_client):
+    resp = authenticated_client.get("/api/backup/snapshots")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert "snapshots" in body["data"]
+    assert body["data"]["snapshots"] == []
+
+
 def test_restore_rejects_traversal_members(initialized_library, tmp_path):
     """A malicious snapshot must not write outside the library."""
     import io

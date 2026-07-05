@@ -348,6 +348,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_articles import router as articles_router
     from tiro.api.routes_audio import router as audio_router
     from tiro.api.routes_auth import router as auth_router
+    from tiro.api.routes_backup import router as backup_router
     from tiro.api.routes_classify import router as classify_router
     from tiro.api.routes_decay import router as decay_router
     from tiro.api.routes_digest import router as digest_router
@@ -367,7 +368,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         ingest_router, articles_router, sources_router, digest_router,
         digest_email_router, search_router, classify_router, decay_router,
         stats_router, export_router, settings_router, audio_router,
-        graph_router, filters_router, tokens_router,
+        graph_router, filters_router, tokens_router, backup_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
