@@ -460,4 +460,8 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     async def graph_page(request: Request):
         return templates.TemplateResponse(request, "graph.html", _theme_context(request.app.state.config))
 
+    @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def sources_page(request: Request):
+        return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+
     return app

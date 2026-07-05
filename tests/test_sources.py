@@ -268,3 +268,34 @@ def test_patch_requires_auth(auth_client, configured_library):
         auth_client.patch(f"/api/sources/{source_id}", json={"name": "X"}).status_code
         == 401
     )
+
+
+# --- /sources page ------------------------------------------------------
+
+
+def test_sources_page_redirects_when_anonymous(auth_client):
+    r = auth_client.get("/sources", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
+
+
+def test_sources_page_renders_authenticated(authenticated_client):
+    r = authenticated_client.get("/sources")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_sources_page_has_both_tabs(authenticated_client):
+    r = authenticated_client.get("/sources")
+    assert ">Sources<" in r.text
+    assert ">Authors<" in r.text
+
+
+def test_sources_page_loads_sources_js(authenticated_client):
+    r = authenticated_client.get("/sources")
+    assert "/static/sources.js?v=" in r.text
+
+
+def test_sidebar_has_sources_link(authenticated_client):
+    r = authenticated_client.get("/inbox")
+    assert 'href="/sources"' in r.text

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Tiro ⁊ Sources{% endblock %}
+{% block nav_sources %}active{% endblock %}
+
+{% block content %}
+<section class="sources-view">
+    <div class="sources-header">
+        <h2>Sources & Authors</h2>
+    </div>
+
+    <div class="sources-tabs">
+        <button class="sources-tab active" data-tab="sources">Sources</button>
+        <button class="sources-tab" data-tab="authors">Authors</button>
+    </div>
+
+    <div id="sources-panel" class="sources-panel">
+        <div id="sources-status" class="settings-status">
+            <div class="settings-loading">
+                <div class="digest-spinner"></div>
+                <p>Loading sources...</p>
+            </div>
+        </div>
+        <table id="sources-table" class="sources-table" style="display: none;">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Domain / Sender</th>
+                    <th class="sources-col-count">Articles</th>
+                    <th class="sources-col-vip">VIP</th>
+                    <th class="sources-col-actions">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="sources-tbody"></tbody>
+        </table>
+        <div id="sources-empty" class="empty-state" style="display: none;">
+            <h2>No sources yet</h2>
+            <p>Save some articles first, then manage their sources here.</p>
+        </div>
+    </div>
+
+    <div id="authors-panel" class="sources-panel" style="display: none;">
+        <div id="authors-status" class="settings-status">
+            <div class="settings-loading">
+                <div class="digest-spinner"></div>
+                <p>Loading authors...</p>
+            </div>
+        </div>
+        <table id="authors-table" class="sources-table" style="display: none;">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th class="sources-col-count">Articles</th>
+                    <th class="sources-col-vip">VIP</th>
+                    <th class="sources-col-actions">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="authors-tbody"></tbody>
+        </table>
+        <div id="authors-empty" class="empty-state" style="display: none;">
+            <h2>No authors yet</h2>
+            <p>Authors are linked automatically as articles are ingested.</p>
+        </div>
+    </div>
+</section>
+
+<script src="/static/sources.js?v={{ static_v }}"></script>
+{% endblock %}

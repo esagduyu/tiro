@@ -15,7 +15,7 @@ def test_root_redirects_to_inbox(client):
 
 
 def test_html_pages_redirect_unauthenticated(client):
-    for path in ["/inbox", "/digest", "/stats", "/settings", "/graph"]:
+    for path in ["/inbox", "/digest", "/stats", "/settings", "/graph", "/sources"]:
         r = client.get(path, follow_redirects=False)
         assert r.status_code == 302, f"{path} -> {r.status_code}"
         assert r.headers["location"] == "/login"
