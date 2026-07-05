@@ -33,7 +33,7 @@ async def list_views(request: Request):
         rows = conn.execute(
             f"SELECT {_COLUMNS} FROM saved_views ORDER BY position ASC, id ASC"
         ).fetchall()
-        return {"data": [dict(r) for r in rows]}
+        return {"success": True, "data": [dict(r) for r in rows]}
     finally:
         conn.close()
 
@@ -83,7 +83,7 @@ async def create_view(body: ViewCreate, request: Request):
         row = conn.execute(
             f"SELECT {_COLUMNS} FROM saved_views WHERE uid = ?", (uid,)
         ).fetchone()
-        return {"data": dict(row)}
+        return {"success": True, "data": dict(row)}
     finally:
         conn.close()
 
@@ -119,7 +119,7 @@ async def update_view(view_id: int, body: ViewUpdate, request: Request):
         row = conn.execute(
             f"SELECT {_COLUMNS} FROM saved_views WHERE id = ?", (view_id,)
         ).fetchone()
-        return {"data": dict(row)}
+        return {"success": True, "data": dict(row)}
     finally:
         conn.close()
 
@@ -139,6 +139,6 @@ async def delete_view(view_id: int, request: Request):
         conn.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
         conn.commit()
 
-        return {"data": {"id": view_id}}
+        return {"success": True, "data": {"id": view_id}}
     finally:
         conn.close()

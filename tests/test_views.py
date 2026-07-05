@@ -24,7 +24,7 @@ def _seed_view(config, name, position, filter_json='{"tag": "ai"}', sort_mode="u
 def test_list_views_empty(authenticated_client, configured_library):
     r = authenticated_client.get("/api/views")
     assert r.status_code == 200, r.text
-    assert r.json() == {"data": []}
+    assert r.json() == {"success": True, "data": []}
 
 
 def test_list_views_ordered_by_position_then_id(authenticated_client, configured_library):
@@ -51,7 +51,9 @@ def test_create_view_round_trip(authenticated_client, configured_library):
     body = {"name": "My View", "filter_json": json.dumps({"tag": "ai", "rating_min": 1})}
     r = authenticated_client.post("/api/views", json=body)
     assert r.status_code == 200, r.text
-    data = r.json()["data"]
+    body_json = r.json()
+    assert body_json["success"] is True
+    data = body_json["data"]
     assert data["name"] == "My View"
     assert json.loads(data["filter_json"]) == {"tag": "ai", "rating_min": 1}
     assert data["sort_mode"] == "unread"  # default
