@@ -5,10 +5,10 @@ import logging
 import os
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
-from tiro.export import export_library
+from tiro.export import export_library, export_opml
 
 logger = logging.getLogger(__name__)
 
@@ -59,3 +59,10 @@ async def export_library_endpoint(
         filename=filename,
         background=BackgroundTask(cleanup, str(zip_path)),
     )
+
+
+@router.get("/export/opml")
+async def get_opml(request: Request):
+    """Export all sources as an OPML 2.0 document."""
+    config = request.app.state.config
+    return Response(content=export_opml(config), media_type="text/x-opml+xml")

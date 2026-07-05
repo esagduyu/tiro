@@ -25,6 +25,10 @@ async def classify(request: Request, body: ClassifyRequest = ClassifyRequest()):
 
     # If refresh, clear all existing tiers so everything gets reclassified
     if body.refresh:
+        from tiro.backup import auto_backup
+
+        await asyncio.to_thread(auto_backup, config, "reclassify")
+
         conn = get_connection(config.db_path)
         try:
             conn.execute("UPDATE articles SET ai_tier = NULL")
