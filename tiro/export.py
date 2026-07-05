@@ -98,6 +98,9 @@ def export_library(
         # Add metadata.json
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))
 
+        # Add sources.opml
+        zf.writestr("sources.opml", export_opml(config))
+
         # Add README.md
         zf.writestr("README.md", _bundle_readme(len(articles)))
 
@@ -170,6 +173,29 @@ def _get_sources(conn) -> list[dict]:
     """Fetch all sources."""
     rows = conn.execute("SELECT * FROM sources ORDER BY name").fetchall()
     return [dict(row) for row in rows]
+
+
+def export_opml(config: TiroConfig) -> str:
+    """OPML 2.0 of all sources. Forward-looking for Phase 4 RSS: web sources
+    carry htmlUrl only (no feed URLs exist yet); email sources are name-only."""
+    import xml.etree.ElementTree as ET
+
+    conn = get_connection(config.db_path)
+    try:
+        sources = conn.execute("SELECT name, domain, source_type FROM sources ORDER BY name").fetchall()
+    finally:
+        conn.close()
+
+    opml = ET.Element("opml", version="2.0")
+    head = ET.SubElement(opml, "head")
+    ET.SubElement(head, "title").text = "Tiro sources"
+    body = ET.SubElement(opml, "body")
+    for s in sources:
+        attrs = {"text": s["name"], "title": s["name"]}
+        if s["domain"]:
+            attrs["htmlUrl"] = f"https://{s['domain']}"
+        ET.SubElement(body, "outline", attrs)
+    return ET.tostring(opml, encoding="unicode", xml_declaration=True)
 
 
 def _get_tags(conn, article_ids: list[int]) -> list[dict]:

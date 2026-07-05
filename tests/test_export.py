@@ -85,3 +85,54 @@ def test_export_includes_digests_stats_audio(initialized_library):
         assert meta["articles"][0]["uid"] == "01AAAAAAAAAAAAAAAAAAAAAAAA"
     finally:
         zip_path.unlink()
+
+
+def test_opml_export(initialized_library):
+    import xml.etree.ElementTree as ET
+
+    from tiro.database import get_connection
+    from tiro.export import export_opml
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, domain, source_type) VALUES ('Blog & Co', 'blog.example.com', 'web')")
+    conn.execute("INSERT INTO sources (name, email_sender, source_type) VALUES ('Letter', 'l@x.com', 'email')")
+    conn.commit()
+    conn.close()
+
+    xml_text = export_opml(config)
+    root = ET.fromstring(xml_text)  # well-formed (— '&' must be escaped)
+    outlines = root.findall(".//outline")
+    by_text = {o.get("text"): o for o in outlines}
+    assert by_text["Blog & Co"].get("htmlUrl") == "https://blog.example.com"
+    assert "Letter" in by_text
+    assert by_text["Letter"].get("htmlUrl") is None
+
+
+def test_opml_export_included_in_zip(initialized_library):
+    import zipfile
+
+    from tiro.database import get_connection
+    from tiro.export import export_library
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, domain, source_type) VALUES ('S', 's.example.com', 'web')")
+    conn.commit()
+    conn.close()
+
+    zip_path = export_library(config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert "sources.opml" in names
+            content = zf.read("sources.opml").decode("utf-8")
+            assert "s.example.com" in content
+    finally:
+        zip_path.unlink()
+
+
+def test_opml_endpoint(authenticated_client):
+    resp = authenticated_client.get("/api/export/opml")
+    assert resp.status_code == 200
+    assert "opml" in resp.headers["content-type"]
