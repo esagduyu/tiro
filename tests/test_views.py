@@ -197,3 +197,34 @@ def test_delete_view(authenticated_client, configured_library):
 def test_delete_view_missing_404(authenticated_client, configured_library):
     r = authenticated_client.delete("/api/views/999999")
     assert r.status_code == 404
+
+
+# --- Frontend pins (Task 8: saved views UI) ---------------------------------
+
+
+def test_base_html_has_sidebar_views_section(authenticated_client):
+    r = authenticated_client.get("/inbox")
+    assert r.status_code == 200
+    assert 'id="sidebar-views"' in r.text
+    assert 'id="sidebar-views-list"' in r.text
+
+
+def test_inbox_has_save_view_button(authenticated_client):
+    r = authenticated_client.get("/inbox")
+    assert r.status_code == 200
+    assert 'id="filter-save-view-btn"' in r.text
+
+
+def test_app_js_has_saved_views_functions():
+    from pathlib import Path
+
+    app_js = Path(__file__).parent.parent / "tiro" / "frontend" / "static" / "app.js"
+    content = app_js.read_text()
+    assert "function loadSavedViews" in content
+    assert "function renderSavedViews" in content
+
+
+def test_static_version_bumped_for_saved_views_ui():
+    from tiro.app import STATIC_VERSION
+
+    assert STATIC_VERSION == "58"

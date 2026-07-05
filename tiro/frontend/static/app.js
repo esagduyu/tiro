@@ -97,6 +97,186 @@ async function updateUnreadBadge() {
     } catch (e) {}
 }
 
+/* ---- Saved views (sidebar) ----
+   Loaded via base.html on every page, mirroring updateUnreadBadge's pattern:
+   guard on the sidebar element's presence rather than assuming a page type. */
+
+let savedViews = []; // cached /api/views response, ordered by position
+let renamingViewId = null; // id of the view currently showing an inline rename input
+
+async function loadSavedViews() {
+    const list = document.getElementById("sidebar-views-list");
+    if (!list) return;
+    try {
+        const res = await fetch("/api/views");
+        const json = await res.json();
+        savedViews = json.success && Array.isArray(json.data) ? json.data : [];
+    } catch (e) {
+        savedViews = [];
+    }
+    renderSavedViews();
+}
+
+function viewToQueryString(view) {
+    const params = new URLSearchParams();
+    let parsed = {};
+    try {
+        parsed = JSON.parse(view.filter_json);
+    } catch (e) {
+        parsed = {};
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [key, val] of Object.entries(parsed)) {
+            if (val !== null && val !== undefined && val !== "") {
+                params.set(key, val);
+            }
+        }
+    }
+    if (view.sort_mode) params.set("sort", view.sort_mode);
+    return params.toString();
+}
+
+function renderSavedViews() {
+    const section = document.getElementById("sidebar-views");
+    const list = document.getElementById("sidebar-views-list");
+    if (!section || !list) return;
+
+    if (!savedViews.length) {
+        section.style.display = "none";
+        list.innerHTML = "";
+        return;
+    }
+    section.style.display = "";
+
+    list.innerHTML = savedViews.map((view, idx) => {
+        if (view.id === renamingViewId) {
+            return `<div class="sidebar-view-row">
+                <input type="text" class="sidebar-view-rename-input" data-id="${view.id}" value="${esc(view.name)}">
+                <span class="sidebar-view-actions sidebar-view-actions-visible">
+                    <button class="sidebar-view-btn sidebar-view-rename-save" data-id="${view.id}" title="Save">&#10003;</button>
+                    <button class="sidebar-view-btn sidebar-view-rename-cancel" title="Cancel">&times;</button>
+                </span>
+            </div>`;
+        }
+        return `<div class="sidebar-view-row">
+            <a href="#" class="sidebar-view-link" data-id="${view.id}">${esc(view.name)}</a>
+            <span class="sidebar-view-actions">
+                <button class="sidebar-view-btn sidebar-view-up" data-id="${view.id}" title="Move up" ${idx === 0 ? "disabled" : ""}>&#9650;</button>
+                <button class="sidebar-view-btn sidebar-view-down" data-id="${view.id}" title="Move down" ${idx === savedViews.length - 1 ? "disabled" : ""}>&#9660;</button>
+                <button class="sidebar-view-btn sidebar-view-rename" data-id="${view.id}" title="Rename">&#9998;</button>
+                <button class="sidebar-view-btn sidebar-view-delete" data-id="${view.id}" title="Delete">&times;</button>
+            </span>
+        </div>`;
+    }).join("");
+
+    const activeInput = list.querySelector(".sidebar-view-rename-input");
+    if (activeInput) { activeInput.focus(); activeInput.select(); }
+}
+
+async function moveSavedView(id, direction) {
+    const idx = savedViews.findIndex(v => v.id === id);
+    const targetIdx = idx + direction;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= savedViews.length) return;
+    const a = savedViews[idx];
+    const b = savedViews[targetIdx];
+    try {
+        await fetch(`/api/views/${a.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ position: b.position }),
+        });
+        await fetch(`/api/views/${b.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ position: a.position }),
+        });
+    } catch (e) {}
+    await loadSavedViews();
+}
+
+async function deleteSavedView(id) {
+    try {
+        await fetch(`/api/views/${id}`, { method: "DELETE" });
+    } catch (e) {}
+    await loadSavedViews();
+}
+
+function startRenameSavedView(id) {
+    renamingViewId = id;
+    renderSavedViews();
+}
+
+async function submitRenameSavedView(id) {
+    const input = document.querySelector(`.sidebar-view-rename-input[data-id="${id}"]`);
+    const name = input ? input.value.trim() : "";
+    if (!name) {
+        renamingViewId = null;
+        renderSavedViews();
+        return;
+    }
+    try {
+        await fetch(`/api/views/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+        });
+    } catch (e) {}
+    renamingViewId = null;
+    await loadSavedViews();
+}
+
+function setupSidebarViews() {
+    const list = document.getElementById("sidebar-views-list");
+    if (!list) return;
+
+    list.addEventListener("click", (e) => {
+        const link = e.target.closest(".sidebar-view-link");
+        if (link) {
+            e.preventDefault();
+            const view = savedViews.find(v => v.id === parseInt(link.dataset.id, 10));
+            if (view) window.location.href = "/inbox?" + viewToQueryString(view);
+            return;
+        }
+        const upBtn = e.target.closest(".sidebar-view-up");
+        if (upBtn && !upBtn.disabled) {
+            moveSavedView(parseInt(upBtn.dataset.id, 10), -1);
+            return;
+        }
+        const downBtn = e.target.closest(".sidebar-view-down");
+        if (downBtn && !downBtn.disabled) {
+            moveSavedView(parseInt(downBtn.dataset.id, 10), 1);
+            return;
+        }
+        const renameBtn = e.target.closest(".sidebar-view-rename");
+        if (renameBtn) {
+            startRenameSavedView(parseInt(renameBtn.dataset.id, 10));
+            return;
+        }
+        const deleteBtn = e.target.closest(".sidebar-view-delete");
+        if (deleteBtn) {
+            deleteSavedView(parseInt(deleteBtn.dataset.id, 10));
+            return;
+        }
+        const saveBtn = e.target.closest(".sidebar-view-rename-save");
+        if (saveBtn) {
+            submitRenameSavedView(parseInt(saveBtn.dataset.id, 10));
+            return;
+        }
+        const cancelBtn = e.target.closest(".sidebar-view-rename-cancel");
+        if (cancelBtn) {
+            renamingViewId = null;
+            renderSavedViews();
+        }
+    });
+
+    list.addEventListener("keydown", (e) => {
+        const input = e.target.closest(".sidebar-view-rename-input");
+        if (!input) return;
+        if (e.key === "Enter") { e.preventDefault(); submitRenameSavedView(parseInt(input.dataset.id, 10)); }
+        if (e.key === "Escape") { e.preventDefault(); renamingViewId = null; renderSavedViews(); }
+    });
+}
+
 /* ---- Save modal ---- */
 
 function openSaveModal() {
@@ -275,6 +455,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Unread badge
     updateUnreadBadge();
+
+    // Saved views (sidebar section, present on every page)
+    setupSidebarViews();
+    loadSavedViews();
 
     // Save modal
     setupSaveModal();
@@ -1320,6 +1504,60 @@ function setupFilterPanel() {
             updateFilterTabIndicator();
         });
     }
+
+    // Save view
+    const saveViewBtn = document.getElementById("filter-save-view-btn");
+    const saveViewForm = document.getElementById("filter-save-view-form");
+    const saveViewInput = document.getElementById("filter-save-view-input");
+    const saveViewSubmit = document.getElementById("filter-save-view-submit");
+    const saveViewCancel = document.getElementById("filter-save-view-cancel");
+
+    function closeSaveViewForm() {
+        if (saveViewForm) saveViewForm.style.display = "none";
+        if (saveViewBtn) saveViewBtn.style.display = Object.keys(activeFilters).length ? "" : "none";
+    }
+
+    if (saveViewBtn && saveViewForm) {
+        saveViewBtn.addEventListener("click", () => {
+            saveViewBtn.style.display = "none";
+            saveViewForm.style.display = "flex";
+            if (saveViewInput) { saveViewInput.value = ""; saveViewInput.focus(); }
+        });
+    }
+
+    if (saveViewCancel) {
+        saveViewCancel.addEventListener("click", closeSaveViewForm);
+    }
+
+    async function submitSaveView() {
+        const name = saveViewInput ? saveViewInput.value.trim() : "";
+        if (!name) return;
+        try {
+            const res = await fetch("/api/views", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    name,
+                    filter_json: JSON.stringify(activeFilters),
+                    sort_mode: currentSort,
+                }),
+            });
+            const json = await res.json();
+            if (!res.ok || !json.success) throw new Error(json.detail || "Failed to save view");
+            closeSaveViewForm();
+            loadSavedViews();
+        } catch (e) {
+            alert(e.message || "Failed to save view");
+        }
+    }
+
+    if (saveViewSubmit) saveViewSubmit.addEventListener("click", submitSaveView);
+    if (saveViewInput) {
+        saveViewInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); submitSaveView(); }
+            if (e.key === "Escape") { e.preventDefault(); closeSaveViewForm(); }
+        });
+    }
 }
 
 function updateFilterTabIndicator() {
@@ -1327,6 +1565,16 @@ function updateFilterTabIndicator() {
     if (!tab) return;
     const hasFilters = Object.keys(activeFilters).length > 0;
     tab.classList.toggle("has-filters", hasFilters);
+
+    const saveViewBtn = document.getElementById("filter-save-view-btn");
+    const saveViewForm = document.getElementById("filter-save-view-form");
+    const formOpen = !!(saveViewForm && saveViewForm.style.display === "flex");
+    if (!hasFilters && formOpen) {
+        saveViewForm.style.display = "none";
+    }
+    if (saveViewBtn && !formOpen) {
+        saveViewBtn.style.display = hasFilters ? "" : "none";
+    }
 }
 
 async function loadFilters() {

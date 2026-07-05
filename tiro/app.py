@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "57"
+STATIC_VERSION = "58"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
