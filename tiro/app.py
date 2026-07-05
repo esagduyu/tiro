@@ -364,6 +364,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_stats import router as stats_router
     from tiro.api.routes_tokens import router as tokens_router
     from tiro.api.routes_views import router as views_router
+    from tiro.api.routes_wiki import router as wiki_router
 
     app.include_router(auth_router)
     protected = [
@@ -371,7 +372,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         digest_email_router, search_router, classify_router, decay_router,
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
-        authors_router, views_router,
+        authors_router, views_router, wiki_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
