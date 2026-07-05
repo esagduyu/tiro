@@ -1,3 +1,7 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
 from tiro.authors import ensure_author, link_article_author, merge_authors
 from tiro.database import get_connection, init_db
 
@@ -206,3 +210,163 @@ def test_delete_article_cleans_article_authors(initialized_library, fake_llm):
         ).fetchone() is not None
     finally:
         conn.close()
+
+
+# --- Author VIP feeds decay ---------------------------------------------------
+
+
+def test_recalculate_decay_vip_author_slows_decay(initialized_library):
+    """An article by a VIP author (source itself not VIP) decays at
+    decay_rate_vip, same as a VIP-source article would — matching the
+    OR semantics: s.is_vip OR any linked author.is_vip."""
+    from tiro.database import get_connection
+    from tiro.decay import GRACE_PERIOD_DAYS, recalculate_decay
+
+    config = initialized_library
+    old_ts = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute("INSERT INTO sources (name, source_type) VALUES ('Neutral Source', 'web')")
+        source_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+        # VIP-author article: source is NOT VIP, but the linked author is.
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, ingested_at)"
+            " VALUES (?, ?, 'VIP author piece', 'vip-a', 'vip-a.md', ?)",
+            ("VIPA".ljust(26, "0"), source_id, old_ts),
+        )
+        vip_article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        author_id = ensure_author(conn, "VIP Writer")
+        conn.execute("UPDATE authors SET is_vip = 1 WHERE id = ?", (author_id,))
+        link_article_author(conn, vip_article_id, "VIP Writer")
+
+        # Non-VIP twin: identical source and age, no VIP author link.
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, ingested_at)"
+            " VALUES (?, ?, 'Plain piece', 'plain-a', 'plain-a.md', ?)",
+            ("PLAINA".ljust(26, "0"), source_id, old_ts),
+        )
+        plain_article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.commit()
+    finally:
+        conn.close()
+
+    recalculate_decay(config)
+
+    conn = get_connection(config.db_path)
+    try:
+        vip_weight = conn.execute(
+            "SELECT relevance_weight FROM articles WHERE id = ?", (vip_article_id,)
+        ).fetchone()["relevance_weight"]
+        plain_weight = conn.execute(
+            "SELECT relevance_weight FROM articles WHERE id = ?", (plain_article_id,)
+        ).fetchone()["relevance_weight"]
+    finally:
+        conn.close()
+
+    decay_days = 30 - GRACE_PERIOD_DAYS
+    expected_vip = config.decay_rate_vip**decay_days
+    expected_plain = config.decay_rate_default**decay_days
+    assert vip_weight == pytest.approx(expected_vip, rel=1e-6)
+    assert plain_weight == pytest.approx(expected_plain, rel=1e-6)
+    assert vip_weight > plain_weight
+
+
+def test_recalculate_decay_liked_vip_author_article_stays_immune(initialized_library):
+    """Liked/Loved articles are immune to decay regardless of VIP-author
+    status — the rating check must still short-circuit before the VIP
+    rate is even considered."""
+    from tiro.database import get_connection
+    from tiro.decay import recalculate_decay
+
+    config = initialized_library
+    old_ts = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute("INSERT INTO sources (name, source_type) VALUES ('Neutral Source', 'web')")
+        source_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, ingested_at, rating)"
+            " VALUES (?, ?, 'Liked VIP author piece', 'liked-vip-a', 'liked-vip-a.md', ?, 1)",
+            ("LIKEDVIPA".ljust(26, "0"), source_id, old_ts),
+        )
+        article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        author_id = ensure_author(conn, "VIP Writer 2")
+        conn.execute("UPDATE authors SET is_vip = 1 WHERE id = ?", (author_id,))
+        link_article_author(conn, article_id, "VIP Writer 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    recalculate_decay(config)
+
+    conn = get_connection(config.db_path)
+    try:
+        weight = conn.execute(
+            "SELECT relevance_weight FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()["relevance_weight"]
+    finally:
+        conn.close()
+    assert weight == 1.0
+
+
+# --- Author VIP feeds the digest prompt ---------------------------------------
+
+
+def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkeypatch):
+    """A VIP author's name reaches the composed digest prompt via the new
+    `vip_authors` argument, the same seam pattern as the extraction
+    truncation test in test_llm.py: monkeypatch `daily_digest_prompt`
+    where digest.py imports it, capture args, delegate to the real impl."""
+    from tiro.database import get_connection
+    from tiro.intelligence import digest as digest_mod
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute("INSERT INTO sources (name, source_type) VALUES ('Neutral Source', 'web')")
+        source_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, summary)"
+            " VALUES (?, ?, 'By a VIP author', 'vip-author-piece', 'vip-author-piece.md', 'sum')",
+            ("VIPAUTHORDIGEST".ljust(26, "0"), source_id),
+        )
+        article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        author_id = ensure_author(conn, "Digest VIP Writer")
+        conn.execute("UPDATE authors SET is_vip = 1 WHERE id = ?", (author_id,))
+        link_article_author(conn, article_id, "Digest VIP Writer")
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_prompt_fn = digest_mod.daily_digest_prompt
+    captured = {}
+
+    def capture_prompt(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return real_prompt_fn(*args, **kwargs)
+
+    monkeypatch.setattr(digest_mod, "daily_digest_prompt", capture_prompt)
+
+    fake_llm(
+        "## 1. Ranked by Importance\n1. T\n\n"
+        "## 2. Grouped by Topic\n- T\n\n"
+        "## 3. Grouped by Entity\n- T"
+    )
+    result = digest_mod.generate_digest(config)
+    assert set(result.keys()) == {"ranked", "by_topic", "by_entity"}
+
+    # vip_authors reached daily_digest_prompt (positionally or by kwarg).
+    all_args = list(captured["args"]) + list(captured["kwargs"].values())
+    assert any(
+        isinstance(a, list) and "Digest VIP Writer" in a for a in all_args
+    ), captured
+
+    # The article gathered for the article itself is also flagged VIP via
+    # the author link even though its source is not VIP.
+    articles_arg = next(a for a in captured["args"] if isinstance(a, list) and a and isinstance(a[0], dict))
+    gathered = next(a for a in articles_arg if a["id"] == article_id)
+    assert gathered["is_vip"] is True

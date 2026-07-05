@@ -29,7 +29,12 @@ def recalculate_decay(config: TiroConfig) -> dict:
         rows = conn.execute("""
             SELECT
                 a.id, a.rating, a.ingested_at, a.is_read, a.opened_count,
-                s.is_vip
+                s.is_vip,
+                EXISTS (
+                    SELECT 1 FROM article_authors aa
+                    JOIN authors au ON au.id = aa.author_id
+                    WHERE aa.article_id = a.id AND au.is_vip = 1
+                ) AS author_vip
             FROM articles a
             LEFT JOIN sources s ON a.source_id = s.id
         """).fetchall()
@@ -79,8 +84,8 @@ def recalculate_decay(config: TiroConfig) -> dict:
             if rating is not None and rating < 0:
                 # Disliked: fastest decay
                 rate = config.decay_rate_disliked
-            elif row["is_vip"]:
-                # VIP source: slowest decay
+            elif row["is_vip"] or row["author_vip"]:
+                # VIP source or VIP author: slowest decay
                 rate = config.decay_rate_vip
             else:
                 # Default decay

@@ -29,6 +29,7 @@ def daily_digest_prompt(
     vip_sources: list[str],
     recent_ratings: list[dict],
     articles: list[dict],
+    vip_authors: list[str] | None = None,
 ) -> str:
     """Build the daily digest prompt for Opus 4.6.
 
@@ -36,9 +37,18 @@ def daily_digest_prompt(
         vip_sources: Names of VIP sources (e.g., ["Stratechery", "Matt Levine"])
         recent_ratings: List of dicts with keys: title, source, rating_label, summary
         articles: List of dicts with keys: id, title, source, is_vip, tags, entities, summary, published_date
+        vip_authors: Names of VIP authors (e.g., ["Matt Levine"]). Omitted from
+            the prompt entirely when empty, keeping the composed prompt
+            byte-compatible with the pre-VIP-author template.
     """
     # Format VIP sources
     vip_str = ", ".join(vip_sources) if vip_sources else "None set"
+
+    # Format VIP authors — only add a line when there are any, so the
+    # composed prompt is unchanged (byte-for-byte) when no author is VIP.
+    vip_authors_line = (
+        f"\n- VIP authors (always prioritize): {', '.join(vip_authors)}" if vip_authors else ""
+    )
 
     # Format recent ratings
     if recent_ratings:
@@ -70,6 +80,7 @@ def daily_digest_prompt(
 
     return load_template("daily_digest").format(
         vip_str=vip_str,
+        vip_authors_line=vip_authors_line,
         ratings_str=ratings_str,
         articles_str=articles_str,
     )
