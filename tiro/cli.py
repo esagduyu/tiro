@@ -424,6 +424,21 @@ def cmd_import_emails(args):
     print(f"\nDone! {processed} imported, {skipped} skipped, {failed} failed")
 
 
+def cmd_import_bundle(args):
+    """Import a Tiro export bundle (zip) into the current library."""
+    from tiro.config import load_config
+    from tiro.importer import import_bundle
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    result = import_bundle(config, Path(args.bundle), conflicts=args.conflicts)
+    print(
+        f"Imported: {result['imported']} | skipped: {result['skipped']} | "
+        f"overwritten: {result['overwritten']} | kept-both: {result['kept_both']} | "
+        f"sources created: {result['sources_created']}"
+    )
+    return 0
+
+
 def cmd_delete(args):
     """Delete an article by id from all stores."""
     from tiro.config import load_config
@@ -704,6 +719,13 @@ def main():
     import_parser = subparsers.add_parser("import-emails", help="Bulk import .eml files")
     import_parser.add_argument("directory", type=Path, help="Directory containing .eml files")
 
+    import_bundle_parser = subparsers.add_parser("import", help="Import a Tiro export bundle (zip)")
+    import_bundle_parser.add_argument("bundle", help="Path to a tiro-export zip")
+    import_bundle_parser.add_argument(
+        "--conflicts", choices=["skip", "overwrite", "keep-both"], default="skip",
+        help="What to do when an article already exists (default: skip)",
+    )
+
     delete_parser = subparsers.add_parser("delete", help="Delete an article by id")
     delete_parser.add_argument("id", type=int)
 
@@ -756,6 +778,8 @@ def main():
         cmd_restore(args)
     elif args.command == "import-emails":
         cmd_import_emails(args)
+    elif args.command == "import":
+        cmd_import_bundle(args)
     elif args.command == "delete":
         cmd_delete(args)
     elif args.command == "setup-email":

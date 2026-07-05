@@ -125,3 +125,59 @@ def test_conflict_keep_both(initialized_library, tmp_path):
 def test_invalid_conflicts_mode(initialized_library, tmp_path):
     with pytest.raises(ValueError, match="conflicts"):
         import_bundle(initialized_library, tmp_path / "x.zip", conflicts="merge")
+
+
+def test_cli_import(initialized_library, tmp_path, capsys):
+    from tiro.cli import cmd_import_bundle
+
+    cfg = initialized_library
+    _seed(cfg)
+    bundle_path = export_library(cfg)
+
+    class Args:
+        # NOTE: `config`/`bundle` here are class attributes (unused —
+        # `_config_override` wins over `config`), not references to the
+        # outer `cfg`/`bundle_path`. Reusing those names for both the outer
+        # local and the class attribute would make Python treat them as
+        # local to the class body for the whole block (same rule as
+        # function scoping), breaking a same-named reference above the
+        # assignment with a NameError.
+        _config_override = cfg
+        config = "unused"
+        bundle = str(bundle_path)
+        conflicts = "keep-both"
+
+    try:
+        rc = cmd_import_bundle(Args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "kept-both: 1" in out
+    finally:
+        bundle_path.unlink()
+
+
+def test_import_leaves_doctor_clean(initialized_library, tmp_path):
+    """Roadmap acceptance: doctor reports zero structural inconsistencies
+    after a keep-both import. Imported articles land with
+    vector_status='pending' and no ChromaDB vector — scan() only flags
+    vector_missing for status='indexed' and vector_unmarked for a vector
+    that IS present, so a freshly-imported pending/no-vector row matches
+    neither and is correctly treated as expected-pending, not structural."""
+    from tiro.doctor import scan
+
+    config = initialized_library
+    _seed(config)
+    bundle = export_library(config)
+    try:
+        result = import_bundle(config, bundle, conflicts="keep-both")
+        assert result["kept_both"] == 1
+
+        report = scan(config)
+        assert report["structurally_consistent"] is True, report
+        assert report["orphaned_markdown"] == []
+        assert report["missing_markdown"] == []
+        assert report["vector_missing"] == []
+        assert report["vector_unmarked"] == []
+        assert report["vector_failed"] == []
+    finally:
+        bundle.unlink()
