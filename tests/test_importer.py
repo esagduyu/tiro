@@ -73,6 +73,14 @@ def test_conflict_skip_and_overwrite(initialized_library, tmp_path):
 
         conn = get_connection(config.db_path)
         conn.execute("UPDATE articles SET rating = -1, title = 'CHANGED'")
+        # Local-only tag, not present in the bundle, linked to the article.
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (uid, name) VALUES ('01TAGLOCAL0000000000000000', 'local-only')"
+        )
+        conn.execute(
+            "INSERT INTO article_tags (article_id, tag_id)"
+            " SELECT 1, id FROM tags WHERE name = 'local-only'"
+        )
         conn.commit()
         conn.close()
 
@@ -80,9 +88,18 @@ def test_conflict_skip_and_overwrite(initialized_library, tmp_path):
         assert r_over["overwritten"] == 1
         conn = get_connection(config.db_path)
         row = conn.execute("SELECT title, rating, vector_status FROM articles").fetchone()
+        tag_names = {
+            r["name"] for r in conn.execute(
+                "SELECT t.name FROM tags t JOIN article_tags at ON t.id = at.tag_id"
+                " WHERE at.article_id = 1"
+            ).fetchall()
+        }
         conn.close()
         assert row["title"] == "T1" and row["rating"] == 1
         assert row["vector_status"] == "pending"
+        # Overwrite means the bundle's state wins: the local-only tag link
+        # is gone (bundle only had 'ai'); the tag row itself may remain.
+        assert tag_names == {"ai"}
     finally:
         bundle.unlink()
 

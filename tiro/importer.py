@@ -6,6 +6,15 @@ articles into an existing library. digests/reading_stats/audio/relations
 are not imported (regenerable caches, this-library activity, or fileless).
 No stats increments, no AI calls; imported articles get
 vector_status='pending' and the retry loop embeds them.
+
+Failure semantics: all SQLite writes for a run happen in one transaction
+(commit only at the end) — a mid-run crash leaves the DB untouched. Markdown
+writes are NOT part of that transaction: `_overwrite_article` rewrites the
+existing file on disk immediately. A crash on a later article therefore
+rolls back the DB while an earlier overwritten article's FILE keeps the
+bundle's content — invisible to `tiro doctor` since both row and file still
+exist, just inconsistent with each other. Narrow window, accepted for M1.1;
+re-running the same import with the same conflict mode converges.
 """
 
 import json
@@ -84,6 +93,15 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                         _overwrite_article(conn, config, existing, art, body_md)
                         counts["overwritten"] += 1
                         local_article_id = existing["id"]
+                        # Overwrite means the bundle's state wins: clear
+                        # existing junction links so locally-added tags/
+                        # entities not present in the bundle don't survive.
+                        conn.execute(
+                            "DELETE FROM article_tags WHERE article_id = ?", (local_article_id,)
+                        )
+                        conn.execute(
+                            "DELETE FROM article_entities WHERE article_id = ?", (local_article_id,)
+                        )
                     else:  # keep-both
                         src = _bundle_source_for(sources_by_id, art, source_name)
                         source_id = _ensure_source(conn, src)
