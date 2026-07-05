@@ -344,6 +344,7 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         probe = probe.replace("{digest_type}", "ranked").replace("{target_date}", "2026-01-01")
         probe = probe.replace("{source_id}", "1").replace("{node_type}", "tag").replace("{node_id}", "1")
         probe = probe.replace("{author_id}", "1")
+        probe = probe.replace("{view_id}", "1")
         assert "{" not in probe, f"unsubstituted placeholder in {probe}"
         for method in methods - {"HEAD", "OPTIONS"}:
             r = auth_client.request(method, probe)
