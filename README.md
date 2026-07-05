@@ -105,6 +105,48 @@ Then open `http://<your-ip>:8000` on your phone. The mobile UI has a responsive 
 
 ---
 
+## Docker
+
+A `Dockerfile` and `deploy/docker/docker-compose.yml` are included for running Tiro as a container instead of a local `uv` install.
+
+```bash
+cd deploy/docker
+docker compose build
+docker compose up -d
+```
+
+**First run:** the container binds `0.0.0.0` (so it's reachable outside the container), and Tiro's Phase 0 security invariant refuses to bind a non-loopback host without a password — so the first `docker compose up -d` prints a refusal and exits. Set a password once, then bring it back up:
+
+```bash
+docker compose run --rm tiro sh -c '[ -f /data/config.yaml ] || \
+  printf "library_path: /data\n" > /data/config.yaml; \
+  uv run tiro --config /data/config.yaml set-password'
+docker compose up -d
+```
+
+(`tiro set-password` refuses to run against a config.yaml that doesn't exist yet, hence creating a minimal one first — this sidesteps the fully-interactive `tiro init` wizard, which isn't a great fit for a one-shot container command. `set-password` itself prompts for the password twice via a real terminal.)
+
+Alternatively, `TIRO_AUTH_PASSWORD_HASH` can be set in the container's environment to a pre-computed bcrypt hash (not a plaintext password) to pre-seed auth without the interactive `set-password` step — the trade-off is that the hash then shows up in `docker inspect`, so the `set-password` flow above remains the recommended path for anything beyond quick, disposable setups.
+
+`config.yaml` lives at `/data/config.yaml` — inside the named `tiro-data` volume, alongside the library — so the password survives container recreation, not just restarts. Once it's up, open `http://localhost:8000` and log in.
+
+The compose file sets `restart: "no"` rather than `unless-stopped`: verified in practice, Docker's restart backoff respawns the refusing container several times a second (it exits fast, so the backoff never has time to slow down), which floods the log without ever helping. `restart: "no"` just exits once with the refusal message; switch it to `unless-stopped` yourself once a password is set and you want the service to survive host reboots unattended.
+
+**Configuration via environment variables:** every `TiroConfig` field (see `config.example.yaml` for the full list and defaults) can be set with a `TIRO_<FIELD_NAME>` environment variable — env wins over `config.yaml`, which wins over built-in defaults. Booleans accept `1`/`true`/`yes`/`on` (case-insensitive); anything else is falsy. A few commonly-set ones for Docker:
+
+| Env var | Overlays | Example |
+|---|---|---|
+| `TIRO_ANTHROPIC_API_KEY` | `anthropic_api_key` | `sk-ant-...` |
+| `TIRO_OPENAI_API_KEY` | `openai_api_key` | `sk-...` (TTS) |
+| `TIRO_LIBRARY_PATH` | `library_path` | `/data` (already set by the image) |
+| `TIRO_HOST` | `host` | `0.0.0.0` (already set by the image) |
+| `TIRO_PORT` | `port` | `8000` |
+| `TIRO_IMAP_ENABLED` | `imap_enabled` | `true` |
+
+Uncomment `TIRO_ANTHROPIC_API_KEY` / `TIRO_OPENAI_API_KEY` in `deploy/docker/docker-compose.yml`'s `environment:` block to pass your keys through without writing them into `config.yaml`.
+
+---
+
 ## Security & your data
 
 Tiro is local-first, but "local" doesn't mean "unprotected" — especially once you turn on `--lan` to read from your phone. Here's what's in place:
@@ -430,7 +472,7 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.2.0 alpha to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.3.0 alpha to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 2 — Highlights & notes (0.4):** anchored highlights and markdown notes stored as human-readable sidecar files next to your articles — Tiro becomes a place to think, not just to save.

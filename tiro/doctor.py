@@ -37,6 +37,10 @@ def scan(config: TiroConfig) -> dict:
             "SELECT COUNT(*) AS n FROM entities WHERE id NOT IN "
             "(SELECT entity_id FROM article_entities WHERE entity_id IS NOT NULL)"
         ).fetchone()["n"]
+        unreferenced_authors = conn.execute(
+            "SELECT COUNT(*) AS n FROM authors WHERE id NOT IN "
+            "(SELECT author_id FROM article_authors WHERE author_id IS NOT NULL)"
+        ).fetchone()["n"]
     finally:
         conn.close()
 
@@ -94,6 +98,7 @@ def scan(config: TiroConfig) -> dict:
         "audio_files_without_row": audio_files_without_row,
         "unreferenced_tags": unreferenced_tags,
         "unreferenced_entities": unreferenced_entities,
+        "unreferenced_authors": unreferenced_authors,
         "expired_sessions": expired_sessions,
     }
     structural_keys = (
@@ -103,7 +108,8 @@ def scan(config: TiroConfig) -> dict:
     )
     report["structurally_consistent"] = not any(report[k] for k in structural_keys)
     report["clean"] = report["structurally_consistent"] and \
-        unreferenced_tags == 0 and unreferenced_entities == 0 and expired_sessions == 0
+        unreferenced_tags == 0 and unreferenced_entities == 0 and \
+        unreferenced_authors == 0 and expired_sessions == 0
     return report
 
 
@@ -262,6 +268,12 @@ def fix(config: TiroConfig) -> dict:
         )
         if cur.rowcount:
             actions.append(f"vacuumed {cur.rowcount} unreferenced entit(y/ies)")
+        cur = conn.execute(
+            "DELETE FROM authors WHERE id NOT IN "
+            "(SELECT author_id FROM article_authors WHERE author_id IS NOT NULL)"
+        )
+        if cur.rowcount:
+            actions.append(f"vacuumed {cur.rowcount} unreferenced author(s)")
         cur = conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')")
         if cur.rowcount:
             actions.append(f"purged {cur.rowcount} expired session(s)")

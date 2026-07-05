@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "57"
+STATIC_VERSION = "58"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -348,6 +348,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_articles import router as articles_router
     from tiro.api.routes_audio import router as audio_router
     from tiro.api.routes_auth import router as auth_router
+    from tiro.api.routes_authors import router as authors_router
     from tiro.api.routes_backup import router as backup_router
     from tiro.api.routes_classify import router as classify_router
     from tiro.api.routes_decay import router as decay_router
@@ -362,6 +363,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
     from tiro.api.routes_tokens import router as tokens_router
+    from tiro.api.routes_views import router as views_router
 
     app.include_router(auth_router)
     protected = [
@@ -369,6 +371,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         digest_email_router, search_router, classify_router, decay_router,
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
+        authors_router, views_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -456,5 +459,9 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.get("/graph", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def graph_page(request: Request):
         return templates.TemplateResponse(request, "graph.html", _theme_context(request.app.state.config))
+
+    @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def sources_page(request: Request):
+        return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
 
     return app

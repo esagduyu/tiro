@@ -61,6 +61,11 @@ def test_scan_detects_all_classes(initialized_library):
             "VALUES ('deadbeef', datetime('now', '-1 day'))"
         )
         conn.execute("INSERT INTO tags (name) VALUES ('never-used')")
+        # unreferenced author: no article_authors row points at it
+        conn.execute(
+            "INSERT INTO authors (uid, name, canonical_key)"
+            " VALUES ('01AUTHORORPHAN00000000000', 'Nobody Author', 'nobody author')"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -76,6 +81,7 @@ def test_scan_detects_all_classes(initialized_library):
     assert "424242.mp3" in report["audio_files_without_row"]
     assert report["expired_sessions"] == 1
     assert report["unreferenced_tags"] >= 1
+    assert report["unreferenced_authors"] >= 1
 
 
 def test_fix_repairs_everything(initialized_library):
@@ -110,6 +116,11 @@ def test_fix_repairs_everything(initialized_library):
         # unreferenced entity: no article_entities row points at it
         conn.execute(
             "INSERT INTO entities (name, entity_type) VALUES ('Nobody Inc', 'company')"
+        )
+        # unreferenced author: no article_authors row points at it
+        conn.execute(
+            "INSERT INTO authors (uid, name, canonical_key)"
+            " VALUES ('01AUTHORORPHAN00000000000', 'Nobody Author', 'nobody author')"
         )
         conn.commit()
     finally:

@@ -45,6 +45,15 @@
         <div class="filter-loading">Loading filters...</div>
     </div>
     <div class="filter-panel-footer">
+        <button id="filter-save-view-btn" class="filter-save-view-btn" style="display: none;">Save view&hellip;</button>
+        <div id="filter-save-view-form" class="filter-save-view-form" style="display: none;">
+            <input type="text" id="filter-save-view-input" class="filter-save-view-input"
+                   placeholder="View name" maxlength="100" autocomplete="off">
+            <div class="filter-save-view-form-actions">
+                <button id="filter-save-view-submit" class="filter-save-view-submit">Save</button>
+                <button id="filter-save-view-cancel" class="filter-save-view-cancel">Cancel</button>
+            </div>
+        </div>
         <button id="filter-clear-all" class="filter-clear-btn">Clear all</button>
     </div>
 </aside>

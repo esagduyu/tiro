@@ -27,10 +27,15 @@ SECTION_PATTERNS = [
 MAX_ARTICLES_FOR_DIGEST = 50  # cap to avoid enormous prompts
 
 
-def _gather_articles(config: TiroConfig, unread_only: bool = False) -> tuple[list[dict], list[str], list[dict]]:
-    """Gather recent articles, VIP source names, and recent ratings from the database.
+def _gather_articles(
+    config: TiroConfig, unread_only: bool = False
+) -> tuple[list[dict], list[str], list[str], list[dict]]:
+    """Gather recent articles, VIP source names, VIP author names, and recent
+    ratings from the database.
 
-    Returns (articles, vip_sources, recent_ratings).
+    An article counts as VIP if its source is VIP OR any linked author is VIP.
+
+    Returns (articles, vip_sources, vip_authors, recent_ratings).
     """
     conn = get_connection(config.db_path)
     try:
@@ -49,7 +54,7 @@ def _gather_articles(config: TiroConfig, unread_only: bool = False) -> tuple[lis
         """, (MAX_ARTICLES_FOR_DIGEST,)).fetchall()
 
         if not rows:
-            return [], [], []
+            return [], [], [], []
 
         article_ids = [row["id"] for row in rows]
 
@@ -74,17 +79,26 @@ def _gather_articles(config: TiroConfig, unread_only: bool = False) -> tuple[lis
         for row in entity_rows:
             entities_by_article.setdefault(row["article_id"], []).append(row["name"])
 
+        # Batch-fetch which of these articles have a VIP author linked.
+        author_vip_rows = conn.execute(f"""
+            SELECT DISTINCT aa.article_id
+            FROM article_authors aa JOIN authors au ON au.id = aa.author_id
+            WHERE aa.article_id IN ({placeholders}) AND au.is_vip = 1
+        """, article_ids).fetchall()
+        vip_author_article_ids = {row["article_id"] for row in author_vip_rows}
+
         articles = []
         recent_ratings = []
 
         for row in rows:
             aid = row["id"]
+            is_vip = bool(row["is_vip"]) or aid in vip_author_article_ids
 
             articles.append({
                 "id": aid,
                 "title": row["title"],
                 "source": row["source_name"] or "Unknown",
-                "is_vip": bool(row["is_vip"]),
+                "is_vip": is_vip,
                 "tags": tags_by_article.get(aid, []),
                 "entities": entities_by_article.get(aid, []),
                 "summary": row["summary"] or "",
@@ -107,7 +121,13 @@ def _gather_articles(config: TiroConfig, unread_only: bool = False) -> tuple[lis
         ).fetchall()
         vip_sources = [r["name"] for r in vip_rows]
 
-        return articles, vip_sources, recent_ratings
+        # Get VIP authors
+        vip_author_rows = conn.execute(
+            "SELECT name FROM authors WHERE is_vip = 1"
+        ).fetchall()
+        vip_authors = [r["name"] for r in vip_author_rows]
+
+        return articles, vip_sources, vip_authors, recent_ratings
     finally:
         conn.close()
 
@@ -229,13 +249,13 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
 
     Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
     """
-    articles, vip_sources, recent_ratings = _gather_articles(config, unread_only=unread_only)
+    articles, vip_sources, vip_authors, recent_ratings = _gather_articles(config, unread_only=unread_only)
 
     if not articles:
         raise ValueError("No articles in library — save some articles first")
 
     # Build prompt
-    prompt = daily_digest_prompt(vip_sources, recent_ratings, articles)
+    prompt = daily_digest_prompt(vip_sources, recent_ratings, articles, vip_authors)
     article_ids = [a["id"] for a in articles]
 
     logger.info(

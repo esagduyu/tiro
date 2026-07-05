@@ -23,6 +23,7 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
+from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import canonical_key, new_ulid
@@ -108,6 +109,7 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                         local_article_id = _insert_article(
                             conn, config, art, source_id, body_md, keep_both=True
                         )
+                        link_article_author(conn, local_article_id, art.get("author"))
                         counts["kept_both"] += 1
                 else:
                     src = _bundle_source_for(sources_by_id, art, source_name)
@@ -115,6 +117,7 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                     local_article_id = _insert_article(
                         conn, config, art, source_id, body_md, keep_both=False
                     )
+                    link_article_author(conn, local_article_id, art.get("author"))
                     counts["imported"] += 1
 
                 # Rebuild junctions from the bundle for this article.
@@ -260,6 +263,15 @@ def _overwrite_article(conn: sqlite3.Connection, config: TiroConfig, existing: s
         conn.execute(
             "UPDATE articles SET vector_status = 'pending' WHERE id = ?", (existing["id"],)
         )
+    # article_authors junction follows the same absent-field guard as
+    # _OVERWRITE_FIELDS above: only touch it when the bundle actually
+    # carries an 'author' key. When it does, the bundle's value wins
+    # outright — drop the existing link(s) and relink to the bundle's
+    # author (article_authors has no UNIQUE(article_id), so old links must
+    # be cleared explicitly rather than relying on INSERT OR IGNORE).
+    if "author" in art:
+        conn.execute("DELETE FROM article_authors WHERE article_id = ?", (existing["id"],))
+        link_article_author(conn, existing["id"], art["author"])
     md_path = config.articles_dir / existing["markdown_path"]
     md_path.write_text(body_md)
 

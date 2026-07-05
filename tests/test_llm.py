@@ -13,6 +13,7 @@ def test_templates_load_and_have_placeholders():
     for name, needle in [
         ("extract_metadata", "{title}"),
         ("daily_digest", "{"),
+        ("daily_digest", "{vip_authors_line}"),
         ("ingenuity_analysis", "{"),
         ("learned_preferences", "{"),
         ("connection_notes", "{"),

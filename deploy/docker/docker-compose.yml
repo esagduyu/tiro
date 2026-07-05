@@ -1,0 +1,70 @@
+# Tiro — Docker Compose deployment.
+#
+# Quick start:
+#   cd deploy/docker
+#   docker compose build
+#   docker compose up -d
+#
+# FIRST RUN — Tiro refuses to bind to a non-loopback host without a password
+# (this is a deliberate Phase 0 security invariant, not a bug — see
+# CLAUDE.md "Load-bearing conventions" / README "Security & your data").
+# Since this container binds 0.0.0.0 (TIRO_HOST=0.0.0.0 baked into the
+# image, see ../../Dockerfile), the FIRST `docker compose up -d` will print
+# a refusal and exit (verified: see the `restart` note below). Set a
+# password once, then bring it up for real:
+#
+#   docker compose run --rm tiro sh -c '[ -f /data/config.yaml ] || \
+#     printf "library_path: /data\n" > /data/config.yaml; \
+#     uv run tiro --config /data/config.yaml set-password'
+#   docker compose up -d
+#
+# (`set-password` refuses to run against a config.yaml that doesn't exist
+# yet — verified — hence creating a minimal one first, rather than running
+# the fully-interactive `tiro init` here. config.yaml then lives at
+# /data/config.yaml — inside the tiro-data volume, not the container's own
+# writable layer — precisely so it's still there for the long-lived `tiro`
+# service container afterwards. See ../../Dockerfile's CMD comment.)
+#
+# Alternative: pre-seed the tiro-data volume with a config.yaml that already
+# has `auth_password_hash` set (e.g. copied from an existing local install)
+# instead of running `set-password` interactively.
+#
+# NOTE on `restart`: the password-refusal path exits fast (a couple of
+# print()s + sys.exit(1), no server start) — cheap per-attempt — but
+# verified against `unless-stopped` in practice, Docker's restart backoff
+# still respawns it several times a second before giving up, spamming the
+# log with the same refusal. Since a password is required exactly once
+# (config.yaml persists in the tiro-data volume after that), this is set to
+# `restart: "no"` below: the container exits once with the refusal message,
+# and stays exited until you `docker compose up -d` again after setting the
+# password. Switch to `unless-stopped` yourself once a password is set, if
+# you want the service to survive host reboots unattended.
+
+services:
+  tiro:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: tiro:local
+    container_name: tiro
+    ports:
+      - "8000:8000"
+    environment:
+      # Uncomment to pass your Anthropic API key through instead of baking
+      # it into config.yaml (see tiro/config.py env overlay: TIRO_* vars,
+      # applied before the ANTHROPIC_API_KEY/OPENAI_API_KEY env-sync step).
+      # - TIRO_ANTHROPIC_API_KEY=sk-ant-...
+      # - TIRO_OPENAI_API_KEY=sk-...
+      TIRO_LIBRARY_PATH: /data
+      TIRO_HOST: "0.0.0.0"
+    volumes:
+      - tiro-data:/data
+      # To pre-seed a config.yaml with a password already set (skipping the
+      # `set-password` step above), drop it directly into the named volume
+      # at /data/config.yaml before first `up`, e.g.:
+      #   docker compose run --rm -v $(pwd)/config.yaml:/tmp/c.yaml:ro \
+      #     tiro cp /tmp/c.yaml /data/config.yaml
+    restart: "no"
+
+volumes:
+  tiro-data:

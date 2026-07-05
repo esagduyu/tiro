@@ -131,6 +131,33 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     last_used_at TIMESTAMP
 );
 
+-- Authors (deduped by canonical_key across article.author spellings)
+CREATE TABLE IF NOT EXISTS authors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
+    name TEXT NOT NULL,
+    canonical_key TEXT NOT NULL,
+    is_vip BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS article_authors (
+    article_id INTEGER REFERENCES articles(id),
+    author_id INTEGER REFERENCES authors(id),
+    PRIMARY KEY (article_id, author_id)
+);
+
+-- Saved views (named filter+sort presets)
+CREATE TABLE IF NOT EXISTS saved_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
+    name TEXT NOT NULL,
+    filter_json TEXT NOT NULL,
+    sort_mode TEXT DEFAULT 'unread',
+    position INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -144,6 +171,10 @@ CREATE INDEX IF NOT EXISTS idx_article_tags_tag ON article_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_article_entities_entity ON article_entities(entity_id);
 CREATE INDEX IF NOT EXISTS idx_article_relations_related ON article_relations(related_article_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_canonical ON authors(canonical_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_uid ON authors(uid);
+CREATE INDEX IF NOT EXISTS idx_article_authors_author ON article_authors(author_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_views_uid ON saved_views(uid);
 """
 
 

@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import frontmatter
 
+from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.ingestion.extractors import extract_metadata
@@ -168,6 +169,7 @@ def process_article(
                 ),
             )
             article_id = cursor.lastrowid
+            link_article_author(conn, article_id, author)
             conn.commit()
         except Exception:
             md_path.unlink(missing_ok=True)

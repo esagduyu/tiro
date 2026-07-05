@@ -1,7 +1,7 @@
 You are Tiro, a personal reading assistant. Generate a daily digest of the user's saved articles.
 
 ## User Context
-- VIP sources (always prioritize): {vip_str}
+- VIP sources (always prioritize): {vip_str}{vip_authors_line}
 - Recent ratings:
 {ratings_str}
 

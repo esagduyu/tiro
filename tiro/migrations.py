@@ -196,6 +196,75 @@ def _m006_phase0_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
 
 
+def _m007_authors_views(conn: sqlite3.Connection) -> None:
+    """Authors, article_authors, saved_views (Phase 1 M1.2 first commit).
+
+    New-table contract second practice (see module docstring / _m006): tables
+    created idempotently here AND mirrored in database.SCHEMA for fresh
+    installs. Backfills authors from articles.author, deduping spellings by
+    canonical_key (first-seen spelling wins)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
+            name TEXT NOT NULL,
+            canonical_key TEXT NOT NULL,
+            is_vip BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_canonical ON authors(canonical_key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_uid ON authors(uid)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS article_authors (
+            article_id INTEGER REFERENCES articles(id),
+            author_id INTEGER REFERENCES authors(id),
+            PRIMARY KEY (article_id, author_id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_article_authors_author ON article_authors(author_id)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS saved_views (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
+            name TEXT NOT NULL,
+            filter_json TEXT NOT NULL,
+            sort_mode TEXT DEFAULT 'unread',
+            position INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_views_uid ON saved_views(uid)")
+
+    # Ultra-legacy safety net: synthetic minimal test tables (predating even
+    # the hackathon schema) may lack an author column entirely.
+    if not _has_column(conn, "articles", "author"):
+        return
+
+    for row in conn.execute(
+        "SELECT id, TRIM(author) AS author FROM articles"
+        " WHERE author IS NOT NULL AND TRIM(author) != ''"
+    ).fetchall():
+        key = canonical_key(row["author"])
+        existing = conn.execute(
+            "SELECT id FROM authors WHERE canonical_key = ?", (key,)
+        ).fetchone()
+        if existing:
+            author_id = existing["id"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO authors (uid, name, canonical_key) VALUES (?, ?, ?)",
+                (new_ulid(), row["author"], key),
+            )
+            author_id = cur.lastrowid
+        conn.execute(
+            "INSERT OR IGNORE INTO article_authors (article_id, author_id) VALUES (?, ?)",
+            (row["id"], author_id),
+        )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -203,6 +272,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (4, "display_date + hot-path indexes", _m004_indexes),
     (5, "entity canonical_key + duplicate merge", _m005_entity_canonical),
     (6, "phase-0 tables (sessions/api_tokens) for pre-auth DBs", _m006_phase0_tables),
+    (7, "authors + article_authors + saved_views", _m007_authors_views),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)
