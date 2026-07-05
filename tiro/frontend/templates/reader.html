@@ -103,5 +103,8 @@
     <div id="analysis-body" style="display: none;"></div>
 </div>
 <div id="analysis-overlay" class="analysis-overlay"></div>
-<script src="/static/reader.js?v={{ static_v }}"></script>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/reader.js?v={{ static_v }}"></script>
 {% endblock %}
