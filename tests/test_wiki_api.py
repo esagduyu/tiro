@@ -379,6 +379,92 @@ def test_mcp_get_wiki_page_traversal_slug_returns_message_not_exception(
     assert "No wiki pages exist yet" in result
 
 
+# --- GET /api/graph: nodes expose has_page/page_slug/page_status (Task 8) ----
+#
+# routes_graph.py maps entity nodes -> "entities/{wiki_slugify(name)}" and tag
+# nodes -> "concepts/{wiki_slugify(name)}", the same slug convention as
+# tiro.wiki.mark_pages_stale, and looks the resulting slug up against a
+# single wiki_pages query rather than per-node queries.
+
+
+def _graph_node(response_json, label):
+    nodes = response_json["data"]["nodes"]
+    matches = [n for n in nodes if n["label"] == label]
+    assert matches, f"no graph node with label {label!r} in {nodes!r}"
+    return matches[0]
+
+
+def test_graph_entity_node_with_wiki_page_reports_slug_and_status(
+    authenticated_client, configured_library
+):
+    config = configured_library
+    source_id = _seed_source(config)
+    article_id, uid = _seed_article(config, source_id, "a1", title="Article One")
+    _link_entity(config, article_id, "Anthropic", entity_type="company")
+
+    write_page(
+        config,
+        slug="entities/anthropic",
+        kind="entity",
+        title="Anthropic",
+        entity_type="company",
+        article_uids=[uid],
+        body="Anthropic makes Claude. [[a1|source]]",
+        generated_by="test",
+        status="stale",
+    )
+
+    r = authenticated_client.get("/api/graph?min_articles=1")
+    assert r.status_code == 200
+    node = _graph_node(r.json(), "Anthropic")
+    assert node["has_page"] is True
+    assert node["page_slug"] == "entities/anthropic"
+    assert node["page_status"] == "stale"
+
+
+def test_graph_tag_node_with_wiki_page_reports_slug_and_status(
+    authenticated_client, configured_library
+):
+    config = configured_library
+    source_id = _seed_source(config)
+    article_id, uid = _seed_article(config, source_id, "a1", title="Article One")
+    _link_tag(config, article_id, "AI")
+
+    write_page(
+        config,
+        slug="concepts/ai",
+        kind="concept",
+        title="AI",
+        entity_type=None,
+        article_uids=[uid],
+        body="AI is a topic. [[a1|source]]",
+        generated_by="test",
+    )
+
+    r = authenticated_client.get("/api/graph?min_articles=1")
+    assert r.status_code == 200
+    node = _graph_node(r.json(), "AI")
+    assert node["has_page"] is True
+    assert node["page_slug"] == "concepts/ai"
+    assert node["page_status"] == "fresh"
+
+
+def test_graph_node_without_wiki_page_reports_has_page_false(
+    authenticated_client, configured_library
+):
+    config = configured_library
+    source_id = _seed_source(config)
+    article_id, _uid = _seed_article(config, source_id, "a1", title="Article One")
+    _link_entity(config, article_id, "Pageless Co", entity_type="company")
+
+    r = authenticated_client.get("/api/graph?min_articles=1")
+    assert r.status_code == 200
+    node = _graph_node(r.json(), "Pageless Co")
+    assert node["has_page"] is False
+    assert node["page_slug"] is None
+    assert node["page_status"] is None
+
+
 def test_mcp_get_wiki_page_available_slugs_capped_at_20(initialized_library, monkeypatch):
     config = initialized_library
     conn = get_connection(config.db_path)

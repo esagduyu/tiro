@@ -123,6 +123,53 @@
     .graph-node-panel-item {
         padding: 0.25rem 0;
     }
+    .graph-node-panel-page-section {
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--tiro-border);
+        font-size: 0.9rem;
+    }
+    .graph-page-open-link {
+        color: var(--tiro-accent);
+        text-decoration: none;
+        font-weight: 600;
+    }
+    .graph-page-open-link:hover {
+        text-decoration: underline;
+    }
+    .graph-page-stale-badge {
+        display: inline-block;
+        margin-left: 0.5rem;
+        padding: 0.1rem 0.45rem;
+        border-radius: 3px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--tiro-gold-hover);
+        background: var(--tiro-bg-surface);
+        border: 1px solid var(--tiro-gold);
+    }
+    .graph-generate-page-btn {
+        background: var(--tiro-accent);
+        color: #fff;
+        border: none;
+        border-radius: 5px;
+        padding: 0.4rem 0.9rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .graph-generate-page-btn:hover:not(:disabled) {
+        background: var(--tiro-accent-hover);
+    }
+    .graph-generate-page-btn:disabled {
+        opacity: 0.7;
+        cursor: default;
+    }
+    .graph-generate-page-error {
+        margin-top: 0.4rem;
+        font-size: 0.8rem;
+        color: var(--tiro-tier-must-read, #B5334D);
+    }
     .graph-loading {
         display: flex;
         align-items: center;
@@ -192,6 +239,7 @@
         <h3 id="node-panel-title"></h3>
         <button id="node-panel-close" class="graph-node-panel-close">&times;</button>
     </div>
+    <div id="node-panel-page-section" class="graph-node-panel-page-section"></div>
     <div id="node-panel-list" class="graph-node-panel-list"></div>
 </div>
 
@@ -206,6 +254,7 @@
     var nodeCountEl = document.getElementById('graph-node-count');
     var nodePanel = document.getElementById('node-panel');
     var nodePanelTitle = document.getElementById('node-panel-title');
+    var nodePanelPageSection = document.getElementById('node-panel-page-section');
     var nodePanelList = document.getElementById('node-panel-list');
     var nodePanelClose = document.getElementById('node-panel-close');
     var loadingEl = document.getElementById('graph-loading');
@@ -229,6 +278,73 @@
 
     function nodeRadius(d) {
         return Math.max(5, Math.sqrt(d.count) * 4);
+    }
+
+    // Renders the wiki-page affordance above the node panel's article list:
+    // an "Open page" link (+ stale badge) when the node already has a page,
+    // otherwise a "Generate page" button that POSTs /api/wiki/generate and
+    // navigates to the new page on success.
+    function renderPageSection(d, nodeType, nodeDbId) {
+        if (d.has_page && d.page_slug) {
+            var staleBadge = d.page_status === 'stale'
+                ? '<span class="graph-page-stale-badge">Stale</span>'
+                : '';
+            nodePanelPageSection.innerHTML =
+                '<div id="open-page-link-container">' +
+                '<a id="open-page-link" class="graph-page-open-link" href="/wiki/' +
+                escapeHtml(d.page_slug) + '">Open page →</a>' +
+                staleBadge +
+                '</div>';
+            return;
+        }
+
+        nodePanelPageSection.innerHTML =
+            '<button id="generate-page-btn" type="button" class="graph-generate-page-btn">Generate page</button>' +
+            '<div id="generate-page-error" class="graph-generate-page-error" style="display: none;"></div>';
+
+        var btn = document.getElementById('generate-page-btn');
+        var errEl = document.getElementById('generate-page-error');
+
+        btn.addEventListener('click', function() {
+            btn.disabled = true;
+            btn.textContent = 'Generating…';
+            errEl.style.display = 'none';
+            errEl.textContent = '';
+
+            fetch('/api/wiki/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    node_type: nodeType,
+                    node_id: parseInt(nodeDbId, 10)
+                })
+            })
+                .then(function(res) {
+                    return res.json().then(function(json) {
+                        return { status: res.status, json: json };
+                    });
+                })
+                .then(function(result) {
+                    if (result.status === 200 && result.json.success) {
+                        window.location.href = '/wiki/' + result.json.data.slug;
+                        return;
+                    }
+                    if (result.status === 409) {
+                        errEl.textContent = 'Already generating…';
+                    } else {
+                        errEl.textContent = (result.json && result.json.detail) || 'Generation failed.';
+                    }
+                    errEl.style.display = '';
+                    btn.disabled = false;
+                    btn.textContent = 'Generate page';
+                })
+                .catch(function() {
+                    errEl.textContent = 'Generation failed.';
+                    errEl.style.display = '';
+                    btn.disabled = false;
+                    btn.textContent = 'Generate page';
+                });
+        });
     }
 
     function setContainerHeight() {
@@ -413,6 +529,7 @@
             var nodeDbId = parts[1];
 
             nodePanelTitle.textContent = d.label + ' (' + d.type + ') \u2014 ' + d.count + ' article' + (d.count !== 1 ? 's' : '');
+            renderPageSection(d, nodeType, nodeDbId);
             nodePanelList.innerHTML = '<div class="graph-loading" style="padding: 1rem 0;"><div class="digest-spinner"></div> Loading articles...</div>';
             nodePanel.style.display = '';
 

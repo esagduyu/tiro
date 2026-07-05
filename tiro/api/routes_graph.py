@@ -6,6 +6,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Request
 
 from tiro.database import get_connection
+from tiro.wiki import wiki_slugify
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,17 @@ async def get_graph(request: Request, min_articles: int = 2):
             if count >= min_articles
         }
 
+        # Wiki page lookup: a single query over wiki_pages, keyed by slug, so
+        # per-node has_page/page_slug/page_status is a dict lookup rather
+        # than N queries. Slug mapping mirrors tiro.wiki.mark_pages_stale:
+        # entity nodes -> entities/{wiki_slugify(name)}, tag nodes ->
+        # concepts/{wiki_slugify(name)}. page_status is None (has_page=False)
+        # when no page exists.
+        wiki_rows = conn.execute(
+            "SELECT slug, status FROM wiki_pages"
+        ).fetchall()
+        wiki_by_slug = {r["slug"]: r["status"] for r in wiki_rows}
+
         # Build node list
         nodes = []
         for nid in valid_nodes:
@@ -74,19 +86,29 @@ async def get_graph(request: Request, min_articles: int = 2):
             raw_id = int(raw_id)
             if kind == "entity" and raw_id in entities:
                 e = entities[raw_id]
+                slug = f"entities/{wiki_slugify(e['name'])}"
+                status = wiki_by_slug.get(slug)
                 nodes.append({
                     "id": nid,
                     "label": e["name"],
                     "type": e["entity_type"],
                     "count": node_article_count[nid],
+                    "has_page": status is not None,
+                    "page_slug": slug if status is not None else None,
+                    "page_status": status,
                 })
             elif kind == "tag" and raw_id in tags:
                 t = tags[raw_id]
+                slug = f"concepts/{wiki_slugify(t['name'])}"
+                status = wiki_by_slug.get(slug)
                 nodes.append({
                     "id": nid,
                     "label": t["name"],
                     "type": "tag",
                     "count": node_article_count[nid],
+                    "has_page": status is not None,
+                    "page_slug": slug if status is not None else None,
+                    "page_status": status,
                 })
 
         # Build edges: count co-occurrences between valid node pairs

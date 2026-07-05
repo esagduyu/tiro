@@ -107,6 +107,13 @@ def test_inbox_has_logout_affordance(authenticated_client):
     assert 'id="logout-btn"' in r.text
 
 
+def test_graph_page_has_wiki_node_panel_affordances(authenticated_client):
+    r = authenticated_client.get("/graph")
+    assert r.status_code == 200
+    assert 'id="generate-page-btn"' in r.text
+    assert 'id="open-page-link-container"' in r.text
+
+
 def test_mcp_config_env_override(monkeypatch, tmp_path):
     cfg = tmp_path / "elsewhere.yaml"
     cfg.write_text(f'library_path: "{tmp_path / "lib"}"\n')
