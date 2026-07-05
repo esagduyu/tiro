@@ -222,3 +222,41 @@ def test_wiki_dir_reserved(client, initialized_library):
     """Lifespan (run via the `client` fixture's TestClient context manager)
     creates wiki/ alongside the other library directories."""
     assert (initialized_library.library / "wiki").is_dir()
+
+
+def test_m007_creates_author_and_view_tables(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"authors", "article_authors", "saved_views"} <= names
+    conn.close()
+
+
+def test_m007_backfills_authors_from_articles(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    for i, author in enumerate(["Matt Levine", "matt levine", "  Matt Levine ", None, ""]):
+        conn.execute(
+            "INSERT INTO articles (uid, source_id, title, slug, markdown_path, author)"
+            " VALUES (?, 1, ?, ?, ?, ?)",
+            (f"01A{i}".ljust(26, "0"), f"t{i}", f"s{i}", f"f{i}.md", author),
+        )
+    conn.execute("DELETE FROM authors")
+    conn.execute("DELETE FROM article_authors")
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+
+    conn = get_connection(db)
+    authors = conn.execute("SELECT name, canonical_key FROM authors").fetchall()
+    assert len(authors) == 1  # three spellings collapse to one
+    assert authors[0]["canonical_key"] == "matt levine"
+    links = conn.execute("SELECT COUNT(*) FROM article_authors").fetchone()[0]
+    assert links == 3  # null/empty authors produce no rows
+    conn.close()
