@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Tiro ⁊ Wiki{% endblock %}
+{% block nav_wiki %}active{% endblock %}
+
+{% block content %}
+<section class="wiki-view">
+    <div class="wiki-header">
+        <h2>Wiki</h2>
+        <p class="wiki-header-sub">Derived reference pages for the people, organizations, and topics in your library.</p>
+    </div>
+
+    <div id="wiki-status" class="settings-status">
+        <div class="settings-loading">
+            <div class="digest-spinner"></div>
+            <p>Loading wiki pages...</p>
+        </div>
+    </div>
+
+    <div id="wiki-content" style="display: none;">
+        <section id="wiki-section-entity" class="wiki-kind-section" style="display: none;">
+            <h3 class="wiki-kind-heading">Entities</h3>
+            <table class="sources-table wiki-table">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th class="sources-col-count">Sources</th>
+                        <th>Status</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="wiki-tbody-entity"></tbody>
+            </table>
+        </section>
+
+        <section id="wiki-section-concept" class="wiki-kind-section" style="display: none;">
+            <h3 class="wiki-kind-heading">Concepts</h3>
+            <table class="sources-table wiki-table">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th class="sources-col-count">Sources</th>
+                        <th>Status</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="wiki-tbody-concept"></tbody>
+            </table>
+        </section>
+    </div>
+
+    <div id="wiki-empty" class="empty-state" style="display: none;">
+        <h2>No wiki pages yet</h2>
+        <p>Wiki pages are generated on demand from the entities and topics in your library. Visit the <a href="/graph">Graph</a>, click a node, and generate its first page.</p>
+    </div>
+</section>
+
+<script src="/static/wiki.js?v={{ static_v }}"></script>
+{% endblock %}

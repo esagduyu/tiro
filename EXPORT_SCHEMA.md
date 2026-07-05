@@ -21,6 +21,15 @@ tiro-export-<random>.zip
 except via `articles[*].markdown_path` (bare filename, matches the `articles/`
 entry) — there is no manifest cross-linking `wiki/` pages.
 
+**`tiro import` (`tiro/importer.py`) does not import `wiki/`.** A bundle
+carries `wiki/` when the source library has synthesis pages, but `import_bundle`
+only reverses `articles`/`sources`/`tags`/`entities`/junctions — the same way
+it skips `digests`/`reading_stats`/`audio`/`relations` (regenerable caches or
+this-library activity). Wiki page merge across libraries is out of scope for
+Phase 1b wave W1. Snapshots/restore (`tiro/backup.py`), which replace the
+whole library rather than merging into an existing one, DO round-trip
+`wiki/` faithfully since they copy the directory wholesale.
+
 ## metadata.json keys
 
 Top-level: `exported_at` (ISO 8601 timestamp), `tiro_version` (string), `filters`

@@ -26,6 +26,36 @@ def test_export_includes_wiki_pages_when_present(test_config):
         zip_path.unlink()
 
 
+def test_export_includes_wiki_subdir_pages_with_preserved_arcname(test_config):
+    """Wiki pages live under kind subdirectories (wiki/entities/*.md,
+    wiki/concepts/*.md) -- export must recurse (rglob, not glob) and keep
+    the subpath in the zip arcname, not flatten everything to wiki/*.md."""
+    from tiro.database import init_db, migrate_db
+
+    test_config.articles_dir.mkdir(parents=True, exist_ok=True)
+    init_db(test_config.db_path)
+    migrate_db(test_config.db_path)
+
+    entities_dir = test_config.wiki_dir / "entities"
+    entities_dir.mkdir(parents=True, exist_ok=True)
+    (entities_dir / "anthropic.md").write_text("# Anthropic\n\nSynthesis page.\n")
+    # Bookkeeping files at the wiki root must also ride along.
+    (test_config.wiki_dir / "_schema.md").write_text("schema")
+    (test_config.wiki_dir / "index.md").write_text("index")
+    (test_config.wiki_dir / "log.md").write_text("log")
+
+    zip_path = export_library(test_config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert "wiki/entities/anthropic.md" in names
+            assert "wiki/_schema.md" in names
+            assert "wiki/index.md" in names
+            assert "wiki/log.md" in names
+    finally:
+        zip_path.unlink()
+
+
 def test_export_omits_wiki_dir_when_absent(test_config):
     """No wiki/ directory (pre-Phase-1b library) — export must not fail or
     fabricate an empty wiki/ entry."""

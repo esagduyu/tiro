@@ -265,6 +265,39 @@ def _m007_authors_views(conn: sqlite3.Connection) -> None:
         )
 
 
+def _m008_wiki_tables(conn: sqlite3.Connection) -> None:
+    """Wiki derived-index tables (Phase 1b W1 first commit): wiki_pages and
+    wiki_page_articles.
+
+    New-table contract third practice (see module docstring / _m006/_m007):
+    tables only, no backfill — files-win reconcile owns population later and
+    a fresh 008 DB has no wiki files yet."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wiki_pages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
+            slug TEXT UNIQUE NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            entity_type TEXT,
+            status TEXT DEFAULT 'fresh',
+            source_count INTEGER DEFAULT 0,
+            updated_at TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_uid ON wiki_pages(uid)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wiki_page_articles (
+            page_id INTEGER REFERENCES wiki_pages(id),
+            article_id INTEGER REFERENCES articles(id),
+            PRIMARY KEY (page_id, article_id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wiki_page_articles_article ON wiki_page_articles(article_id)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -273,6 +306,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (5, "entity canonical_key + duplicate merge", _m005_entity_canonical),
     (6, "phase-0 tables (sessions/api_tokens) for pre-auth DBs", _m006_phase0_tables),
     (7, "authors + article_authors + saved_views", _m007_authors_views),
+    (8, "wiki derived-index tables", _m008_wiki_tables),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

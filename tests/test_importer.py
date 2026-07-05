@@ -157,6 +157,44 @@ def test_cli_import(initialized_library, tmp_path, capsys):
         bundle_path.unlink()
 
 
+def test_import_marks_existing_wiki_page_stale(initialized_library, tmp_path):
+    """Import is an ingest path like web/email ingestion -- an imported
+    article that links to a tag/entity with an existing wiki page must
+    stale-mark that page, mirroring processor.py's mark_pages_stale hook."""
+    from tiro.wiki import write_page
+
+    config = initialized_library
+    _seed(config, rating=1)  # links article 1 to tag 'ai'
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        write_page(
+            target,
+            slug="concepts/ai",
+            kind="concept",
+            title="Ai",
+            entity_type=None,
+            article_uids=[],
+            body="AI body.",
+            generated_by=None,
+        )
+
+        result = import_bundle(target, bundle)
+        assert result["imported"] == 1
+
+        conn = get_connection(target.db_path)
+        try:
+            row = conn.execute(
+                "SELECT status FROM wiki_pages WHERE slug = 'concepts/ai'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row["status"] == "stale"
+    finally:
+        bundle.unlink()
+
+
 def test_import_leaves_doctor_clean(initialized_library, tmp_path):
     """Roadmap acceptance: doctor reports zero structural inconsistencies
     after a keep-both import. Imported articles land with

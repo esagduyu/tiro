@@ -499,3 +499,67 @@ def test_fix_heals_failed_rows_without_vector(initialized_library):
     report = scan(initialized_library)
     assert report["clean"] is True, report
     assert get_collection().get(ids=[f"article_{aid}"])["ids"] == [f"article_{aid}"]
+
+
+def test_scan_detects_wiki_index_drift(initialized_library):
+    """A wiki page whose file was hand-deleted leaves an orphan derived row
+    -- exactly the mismatch wiki_index_drift is meant to surface."""
+    from tiro.doctor import scan
+    from tiro.wiki import write_page
+
+    config = initialized_library
+    write_page(
+        config, slug="entities/anthropic", kind="entity", title="Anthropic",
+        entity_type="company", article_uids=[], body="Anthropic body.",
+        generated_by=None,
+    )
+    (config.wiki_dir / "entities" / "anthropic.md").unlink()
+
+    report = scan(config)
+    assert report["wiki_index_drift"] >= 1
+    # Housekeeping only: does not affect structural consistency / exit code.
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is False
+
+
+def test_fix_reconciles_wiki_index_without_touching_surviving_files(initialized_library):
+    """--fix runs reconcile_wiki_index() to heal the derived-row mismatch,
+    but must NEVER write or delete a wiki page file itself -- files are the
+    source of truth. Proven by hashing a surviving page's bytes before and
+    after fix()."""
+    from tiro.doctor import fix, scan
+    from tiro.wiki import write_page
+
+    config = initialized_library
+    write_page(
+        config, slug="entities/anthropic", kind="entity", title="Anthropic",
+        entity_type="company", article_uids=[], body="Anthropic body.",
+        generated_by=None,
+    )
+    write_page(
+        config, slug="concepts/testing", kind="concept", title="Testing",
+        entity_type=None, article_uids=[], body="Testing body.",
+        generated_by=None,
+    )
+    survivor_path = config.wiki_dir / "concepts" / "testing.md"
+    survivor_before = survivor_path.read_bytes()
+
+    # Hand-delete one page file -- orphans its derived wiki_pages row.
+    (config.wiki_dir / "entities" / "anthropic.md").unlink()
+
+    result = fix(config)
+    assert any("reconciled wiki index" in a for a in result["actions"]), result["actions"]
+
+    report = scan(config)
+    assert report["wiki_index_drift"] == 0
+
+    # Surviving file byte-exact, untouched by the fix.
+    assert survivor_path.read_bytes() == survivor_before
+    # Orphaned row for the deleted file is gone post-reconcile (files win).
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM wiki_pages WHERE slug = 'entities/anthropic'"
+        ).fetchone()["n"] == 0
+    finally:
+        conn.close()

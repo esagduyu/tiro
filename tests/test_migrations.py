@@ -234,6 +234,70 @@ def test_m007_creates_author_and_view_tables(tmp_path):
     conn.close()
 
 
+def test_m008_creates_wiki_tables(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"wiki_pages", "wiki_page_articles"} <= names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(wiki_pages)").fetchall()}
+    assert "idx_wiki_pages_uid" in index_names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(wiki_page_articles)").fetchall()}
+    assert "idx_wiki_page_articles_article" in index_names
+    conn.close()
+
+
+def test_m008_legacy_db_at_version_7_gains_wiki_tables(tmp_path):
+    """A DB stamped at user_version 7 (pre-wiki) must gain wiki_pages and
+    wiki_page_articles via run_migrations, with no backfill (files-win
+    reconcile owns population later; a fresh 008 DB has no wiki files)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("DROP TABLE wiki_page_articles")
+    conn.execute("DROP TABLE wiki_pages")
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    applied = run_migrations(db)
+    assert any("wiki" in a for a in applied)
+
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"wiki_pages", "wiki_page_articles"} <= names
+    assert conn.execute("SELECT COUNT(*) FROM wiki_pages").fetchone()[0] == 0
+    conn.close()
+
+
+def test_m008_wiki_migration_is_idempotent(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+    assert run_migrations(db) == []  # re-run: nothing pending
+
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO wiki_pages (slug, kind, title) VALUES ('slug-1', 'entity', 'Title')"
+    )
+    conn.commit()
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)  # re-running the migration must not raise or wipe data
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM wiki_pages").fetchone()[0] == 1
+    conn.close()
+
+
 def test_m007_backfills_authors_from_articles(tmp_path):
     db = tmp_path / "tiro.db"
     init_db(db)

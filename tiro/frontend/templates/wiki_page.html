@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Tiro ⁊ Wiki{% endblock %}
+{% block nav_wiki %}active{% endblock %}
+
+{% block content %}
+<article id="wiki-page" class="reader wiki-page-view" data-slug="{{ wiki_slug }}">
+    <div id="wiki-page-loading" class="reader-loading">Loading wiki page...</div>
+    <div id="wiki-page-error" class="reader-error" style="display: none;">
+        <p>Could not load this wiki page.</p>
+        <a href="/wiki">&larr; Back to wiki</a>
+    </div>
+    <div id="wiki-page-content" style="display: none;">
+        <nav class="reader-nav">
+            <a href="/wiki" class="back-link">&larr; Back to wiki</a>
+            <div class="reader-actions">
+                <button id="wiki-regenerate-btn" class="analysis-btn" title="Regenerate this page">&#8635;</button>
+            </div>
+        </nav>
+        <header class="reader-header">
+            <h1 id="wiki-page-title"></h1>
+            <div class="reader-meta">
+                <span id="wiki-page-kind"></span>
+                <span class="meta-sep">&middot;</span>
+                <span id="wiki-page-status" class="wiki-status-badge"></span>
+                <span class="meta-sep">&middot;</span>
+                <span id="wiki-page-sources"></span>
+                <span class="meta-sep">&middot;</span>
+                <span id="wiki-page-updated"></span>
+            </div>
+        </header>
+        <div id="wiki-regenerate-error" class="wiki-regenerate-error" style="display: none;"></div>
+        <div id="wiki-page-body" class="reader-body"></div>
+    </div>
+</article>
+
+<script src="/static/wiki.js?v={{ static_v }}"></script>
+{% endblock %}

@@ -97,8 +97,9 @@ def export_library(
         # the user's library — include them when present.
         wiki_dir = config.wiki_dir
         if wiki_dir.exists():
-            for page in sorted(wiki_dir.glob("*.md")):
-                zf.write(page, f"wiki/{page.name}")
+            for page in sorted(wiki_dir.rglob("*.md")):
+                rel = page.relative_to(wiki_dir)
+                zf.write(page, f"wiki/{rel.as_posix()}")
 
         # Add metadata.json
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))

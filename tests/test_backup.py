@@ -62,6 +62,42 @@ def test_snapshot_contains_core_members(initialized_library, tmp_path):
     assert manifest["include_audio"] is False
 
 
+def test_snapshot_contains_wiki_subdir_pages_with_preserved_arcname(initialized_library, tmp_path):
+    """Wiki pages live under kind subdirectories (wiki/entities/*.md) --
+    create_snapshot must recurse (rglob, not glob) and keep the subpath in
+    the tar arcname."""
+    config = initialized_library
+    entities_dir = config.wiki_dir / "entities"
+    entities_dir.mkdir(parents=True, exist_ok=True)
+    (entities_dir / "anthropic.md").write_text("# Anthropic\n\nbody")
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    names = _read_snapshot_names(snap)
+    assert "wiki/entities/anthropic.md" in names
+
+
+def test_restore_recreates_wiki_subdir_pages(initialized_library, tmp_path):
+    """A wiki page nested under a kind subdirectory must round-trip through
+    a full snapshot -> restore cycle byte-exact (restore's generic
+    `dest = library / member.name` + `mkdir(parents=True)` already handles
+    arbitrary depth -- this pins that behavior for the rglob'd wiki tree
+    specifically)."""
+    from tiro.backup import restore_snapshot
+
+    config = initialized_library
+    entities_dir = config.wiki_dir / "entities"
+    entities_dir.mkdir(parents=True, exist_ok=True)
+    original_bytes = b"# Anthropic\n\nbody"
+    (entities_dir / "anthropic.md").write_bytes(original_bytes)
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    restore_snapshot(config, snap)
+
+    restored = config.wiki_dir / "entities" / "anthropic.md"
+    assert restored.exists()
+    assert restored.read_bytes() == original_bytes
+
+
 def test_snapshot_strips_secrets(initialized_library, tmp_path):
     config = initialized_library
     config.anthropic_api_key = "sk-ant-SECRET"

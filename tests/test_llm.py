@@ -17,9 +17,82 @@ def test_templates_load_and_have_placeholders():
         ("ingenuity_analysis", "{"),
         ("learned_preferences", "{"),
         ("connection_notes", "{"),
+        ("wiki_page", "{schema_instructions}"),
+        ("wiki_page", "{kind}"),
+        ("wiki_page", "{title}"),
+        ("wiki_page", "{entity_type_line}"),
+        ("wiki_page", "{prior_page_section}"),
+        ("wiki_page", "{articles_block}"),
+        ("wiki_page", "{pinned_note_line}"),
     ]:
         tpl = load_template(name)
         assert needle in tpl, name
+
+
+def test_wiki_schema_default_loads_as_md():
+    from tiro.intelligence.prompts import load_template
+
+    text = load_template("wiki_schema_default", ext="md")
+    assert len(text.strip()) > 0
+    assert "citation" in text.lower()
+
+
+def test_wiki_page_prompt_composition_optional_sections():
+    from tiro.intelligence.prompts import wiki_page_prompt
+
+    articles = [
+        {
+            "stem": "articles/anthropic-raises",
+            "title": "Anthropic Raises Round",
+            "summary": "Anthropic closed a new funding round.",
+            "rating_label": "loved",
+            "is_vip": True,
+            "relevance_weight": 1.0,
+        }
+    ]
+
+    # Absent optional sections: no entity_type, no prior_body, no pinned_note.
+    # entity_type_line/prior_page_section/pinned_note_line must collapse to
+    # "" so the composed prompt is byte-identical to one with those args
+    # omitted entirely (the established vip_authors_line pattern).
+    bare = wiki_page_prompt(
+        schema_instructions="Be concise.",
+        kind="entity",
+        title="Anthropic",
+        entity_type=None,
+        prior_body=None,
+        articles=articles,
+        pinned_note=None,
+    )
+    assert "Entity type:" not in bare
+    assert "Prior Page Body" not in bare
+    assert "Pinned Note" not in bare
+    assert "articles/anthropic-raises" in bare
+    assert "VIP source" in bare
+    assert "loved" in bare
+
+    # Present optional sections: all three collapse-to-"" placeholders now
+    # carry real content.
+    full = wiki_page_prompt(
+        schema_instructions="Be concise.",
+        kind="entity",
+        title="Anthropic",
+        entity_type="company",
+        prior_body="Anthropic is an AI safety company.",
+        articles=articles,
+        pinned_note="Always mention the founding year.",
+    )
+    assert "Entity type: company" in full
+    assert "Prior Page Body" in full
+    assert "Anthropic is an AI safety company." in full
+    assert "Pinned Note" in full
+    assert "Always mention the founding year." in full
+
+    # The bare prompt is a strict byte-subset relationship: removing the
+    # optional sections from `full` isn't tested directly, but both must at
+    # least both contain the shared schema/articles content unmodified.
+    assert "Be concise." in bare and "Be concise." in full
+    assert "articles/anthropic-raises" in full
 
 
 def test_strip_json_fences():

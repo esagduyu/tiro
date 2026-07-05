@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "58"
+STATIC_VERSION = "59"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -230,6 +230,20 @@ async def lifespan(app: FastAPI):
     init_db(config.db_path)
     migrate_db(config.db_path)
 
+    # Reconcile the wiki derived index (Phase 1b) from what's on disk (files
+    # win). Heals metadata drift that doctor's slug-presence-only check
+    # can't see -- e.g. hand-edited frontmatter fields, or files dropped in
+    # out-of-band -- without waiting for a manual `tiro doctor --fix`.
+    # Cheap at wiki-library scale (one rglob + per-file frontmatter parse);
+    # best-effort like every other startup step here, since a wiki index
+    # hiccup must never block the server from coming up.
+    try:
+        from tiro.wiki import reconcile_wiki_index
+
+        reconcile_wiki_index(config)
+    except Exception as e:
+        logger.error("Startup wiki reconcile failed (non-fatal): %s", e)
+
     # Initialize ChromaDB with configured embedding model
     init_vectorstore(config.chroma_dir, config.default_embedding_model)
 
@@ -364,6 +378,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     from tiro.api.routes_stats import router as stats_router
     from tiro.api.routes_tokens import router as tokens_router
     from tiro.api.routes_views import router as views_router
+    from tiro.api.routes_wiki import router as wiki_router
 
     app.include_router(auth_router)
     protected = [
@@ -371,7 +386,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         digest_email_router, search_router, classify_router, decay_router,
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
-        authors_router, views_router,
+        authors_router, views_router, wiki_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -463,5 +478,15 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def sources_page(request: Request):
         return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+
+    @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def wiki_list_page(request: Request):
+        return templates.TemplateResponse(request, "wiki.html", _theme_context(request.app.state.config))
+
+    @app.get("/wiki/{slug:path}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def wiki_page_view(request: Request, slug: str):
+        return templates.TemplateResponse(
+            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request.app.state.config)}
+        )
 
     return app

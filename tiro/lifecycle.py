@@ -72,6 +72,28 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
             (article_id, article_id),
         )
         conn.execute("DELETE FROM audio WHERE article_id = ?", (article_id,))
+
+        # Wiki (Phase 1b): wiki_page_articles.article_id REFERENCES articles(id)
+        # with foreign_keys=ON, so any page citing this article would make the
+        # DELETE FROM articles below raise IntegrityError unless the junction
+        # is cleared first. Collect the affected page ids BEFORE clearing the
+        # junction (afterwards there's no way to tell which pages cited this
+        # article), then flip those pages stale -- a deleted article's
+        # citations must degrade the page's trust status, not just silently
+        # disappear from source_count.
+        page_ids = [
+            row["page_id"]
+            for row in conn.execute(
+                "SELECT DISTINCT page_id FROM wiki_page_articles WHERE article_id = ?",
+                (article_id,),
+            ).fetchall()
+        ]
+        conn.execute("DELETE FROM wiki_page_articles WHERE article_id = ?", (article_id,))
+        if page_ids:
+            from tiro.wiki import mark_page_ids_stale
+
+            mark_page_ids_stale(config, conn, page_ids)
+
         cursor = conn.execute("DELETE FROM articles WHERE id = ?", (article_id,))
         conn.commit()
         return cursor.rowcount == 1

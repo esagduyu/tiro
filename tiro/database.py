@@ -158,6 +158,28 @@ CREATE TABLE IF NOT EXISTS saved_views (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Wiki derived-index tables (Phase 1b W1): pages synthesized from the
+-- library's articles, one row per entity/topic/source; source_count and
+-- status track staleness. Population is owned by files-win reconcile, not
+-- this schema (tables only, no backfill).
+CREATE TABLE IF NOT EXISTS wiki_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
+    slug TEXT UNIQUE NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    entity_type TEXT,
+    status TEXT DEFAULT 'fresh',
+    source_count INTEGER DEFAULT 0,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS wiki_page_articles (
+    page_id INTEGER REFERENCES wiki_pages(id),
+    article_id INTEGER REFERENCES articles(id),
+    PRIMARY KEY (page_id, article_id)
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -175,6 +197,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_canonical ON authors(canonical_key
 CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_uid ON authors(uid);
 CREATE INDEX IF NOT EXISTS idx_article_authors_author ON article_authors(author_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_views_uid ON saved_views(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_uid ON wiki_pages(uid);
+CREATE INDEX IF NOT EXISTS idx_wiki_page_articles_article ON wiki_page_articles(article_id);
 """
 
 

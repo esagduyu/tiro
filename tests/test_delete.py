@@ -142,6 +142,86 @@ def test_delete_clears_inbound_relations(authenticated_client, configured_librar
         conn.close()
 
 
+def test_delete_cited_article_no_integrity_error(authenticated_client, configured_library):
+    """A wiki page citing the deleted article must not FK-crash the delete,
+    must lose its junction row, and must flip stale (both DB row and file) --
+    the page file itself must never be removed."""
+    import frontmatter
+
+    from tiro.lifecycle import delete_article
+    from tiro.wiki import page_path, write_page
+
+    article_id = _ingest_one(authenticated_client)
+    conn = get_connection(configured_library.db_path)
+    try:
+        article_uid = conn.execute(
+            "SELECT uid FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()["uid"]
+    finally:
+        conn.close()
+
+    write_page(
+        configured_library,
+        slug="entities/acme",
+        kind="entity",
+        title="Acme",
+        entity_type="company",
+        article_uids=[article_uid],
+        body="Acme body citing the article.",
+        generated_by=None,
+    )
+
+    assert delete_article(configured_library, article_id) is True
+
+    conn = get_connection(configured_library.db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM wiki_page_articles WHERE article_id = ?", (article_id,)
+        ).fetchone() is None
+        page = conn.execute(
+            "SELECT status FROM wiki_pages WHERE slug = 'entities/acme'"
+        ).fetchone()
+        assert page is not None
+        assert page["status"] == "stale"
+    finally:
+        conn.close()
+
+    path = page_path(configured_library, "entities/acme")
+    assert path.exists()
+    assert frontmatter.load(str(path)).metadata["status"] == "stale"
+
+
+def test_delete_source_with_cited_article(authenticated_client, configured_library):
+    """Source delete loops delete_article per article -- must not 500 when
+    one of the source's articles is cited by a wiki page."""
+    from tiro.wiki import write_page
+
+    article_id = _ingest_one(authenticated_client)
+    conn = get_connection(configured_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT uid, source_id FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        article_uid, source_id = row["uid"], row["source_id"]
+    finally:
+        conn.close()
+
+    write_page(
+        configured_library,
+        slug="entities/acme2",
+        kind="entity",
+        title="Acme2",
+        entity_type="company",
+        article_uids=[article_uid],
+        body="Acme2 body citing the article.",
+        generated_by=None,
+    )
+
+    r = authenticated_client.delete(f"/api/sources/{source_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["deleted_articles"] == 1
+
+
 def test_delete_endpoint(authenticated_client, configured_library):
     from tiro.vectorstore import get_collection
 

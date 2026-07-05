@@ -14,6 +14,7 @@ from pathlib import Path
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.vectorstore import get_collection, retry_pending_vectors
+from tiro.wiki import _RESERVED_FILENAMES, reconcile_wiki_index
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ def scan(config: TiroConfig) -> dict:
             "SELECT COUNT(*) AS n FROM authors WHERE id NOT IN "
             "(SELECT author_id FROM article_authors WHERE author_id IS NOT NULL)"
         ).fetchone()["n"]
+        wiki_page_slugs = {
+            row["slug"] for row in conn.execute("SELECT slug FROM wiki_pages").fetchall()
+        }
     finally:
         conn.close()
 
@@ -86,6 +90,21 @@ def scan(config: TiroConfig) -> dict:
     ]
     audio_files_without_row = sorted(audio_disk - audio_known)
 
+    # Wiki index drift: derived wiki_pages rows vs. files actually on disk,
+    # matched by slug (relative path minus .md). Cheap comparison, not a
+    # full reconcile -- excludes the bookkeeping files (_schema.md/index.md/
+    # log.md) the same way reconcile_wiki_index() does, since those never
+    # get a derived row. Counts BOTH directions: a file with no row, and a
+    # row with no file (e.g. a hand-deleted page).
+    wiki_files = set()
+    if config.wiki_dir.exists():
+        wiki_files = {
+            p.relative_to(config.wiki_dir).with_suffix("").as_posix()
+            for p in config.wiki_dir.rglob("*.md")
+            if p.name not in _RESERVED_FILENAMES
+        }
+    wiki_index_drift = len(wiki_files ^ wiki_page_slugs)
+
     report = {
         "total_articles": len(rows),
         "orphaned_markdown": orphaned_markdown,
@@ -100,6 +119,7 @@ def scan(config: TiroConfig) -> dict:
         "unreferenced_entities": unreferenced_entities,
         "unreferenced_authors": unreferenced_authors,
         "expired_sessions": expired_sessions,
+        "wiki_index_drift": wiki_index_drift,
     }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",
@@ -109,7 +129,8 @@ def scan(config: TiroConfig) -> dict:
     report["structurally_consistent"] = not any(report[k] for k in structural_keys)
     report["clean"] = report["structurally_consistent"] and \
         unreferenced_tags == 0 and unreferenced_entities == 0 and \
-        unreferenced_authors == 0 and expired_sessions == 0
+        unreferenced_authors == 0 and expired_sessions == 0 and \
+        wiki_index_drift == 0
     return report
 
 
@@ -283,6 +304,18 @@ def fix(config: TiroConfig) -> dict:
     for name in report["audio_files_without_row"]:
         (config.library / "audio" / name).unlink(missing_ok=True)
         actions.append(f"deleted orphaned audio file {name}")
+
+    # (f) wiki index drift -> rebuild the derived wiki_pages/wiki_page_articles
+    # rows from what's on disk (files win). NEVER writes or deletes page
+    # files -- reconcile_wiki_index() only touches the derived SQLite tables.
+    if report["wiki_index_drift"]:
+        wiki_result = reconcile_wiki_index(config)
+        actions.append(
+            f"reconciled wiki index: {wiki_result['pages']} page(s) indexed "
+            f"({wiki_result['skipped']} skipped, "
+            f"{wiki_result['unresolved_articles']} unresolved article ref(s), "
+            f"{wiki_result['duplicate_uids']} duplicate uid(s))"
+        )
 
     report["actions"] = actions
     return report

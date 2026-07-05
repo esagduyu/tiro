@@ -15,10 +15,17 @@ def test_root_redirects_to_inbox(client):
 
 
 def test_html_pages_redirect_unauthenticated(client):
-    for path in ["/inbox", "/digest", "/stats", "/settings", "/graph", "/sources"]:
+    for path in ["/inbox", "/digest", "/stats", "/settings", "/graph", "/sources", "/wiki"]:
         r = client.get(path, follow_redirects=False)
         assert r.status_code == 302, f"{path} -> {r.status_code}"
         assert r.headers["location"] == "/login"
+
+
+def test_wiki_item_page_redirects_unauthenticated(client):
+    # {slug:path} route -- exercise it with an actual slash in the slug.
+    r = client.get("/wiki/entities/anthropic", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
 
 
 def test_articles_list_empty_library(authenticated_client):
@@ -105,6 +112,13 @@ def test_inbox_has_logout_affordance(authenticated_client):
     r = authenticated_client.get("/inbox")
     assert r.status_code == 200
     assert 'id="logout-btn"' in r.text
+
+
+def test_graph_page_has_wiki_node_panel_affordances(authenticated_client):
+    r = authenticated_client.get("/graph")
+    assert r.status_code == 200
+    assert 'id="generate-page-btn"' in r.text
+    assert 'id="open-page-link-container"' in r.text
 
 
 def test_mcp_config_env_override(monkeypatch, tmp_path):

@@ -10,9 +10,15 @@ in the placeholders.
 from importlib.resources import files
 
 
-def load_template(name: str) -> str:
-    """Read a prompt template's raw text by name (without the .txt suffix)."""
-    return (files("tiro.intelligence") / "templates" / f"{name}.txt").read_text(encoding="utf-8")
+def load_template(name: str, ext: str = "txt") -> str:
+    """Read a prompt template's raw text by name (without the extension).
+
+    `ext` defaults to "txt" (the prompt-skeleton convention); pass "md" for
+    user-facing documents like `wiki_schema_default.md`.
+    """
+    return (files("tiro.intelligence") / "templates" / f"{name}.{ext}").read_text(
+        encoding="utf-8"
+    )
 
 
 def extract_metadata_prompt(title: str, content: str) -> str:
@@ -143,6 +149,73 @@ def learned_preferences_prompt(
         disliked_str=_format_rated(disliked_articles),
         vip_str=vip_str,
         unrated_str=_format_unrated(unrated_articles),
+    )
+
+
+def wiki_page_prompt(
+    schema_instructions: str,
+    kind: str,
+    title: str,
+    entity_type: str | None,
+    prior_body: str | None,
+    articles: list[dict],
+    pinned_note: str | None,
+) -> str:
+    """Build the wiki page generation/update prompt for Claude (light tier).
+
+    Args:
+        schema_instructions: Verbatim contents of the user-editable
+            `wiki/_schema.md` maintenance instructions.
+        kind: "entity" or "concept".
+        title: The page's title (entity/tag name).
+        entity_type: Entity type (e.g. "company", "person") for entity pages;
+            None for concept pages or when unknown.
+        prior_body: The page's existing markdown body when updating an
+            existing page; None (or empty) for a brand-new page.
+        articles: List of dicts with keys: stem, title, summary, rating_label,
+            is_vip, relevance_weight. `stem` is the citation stem (markdown
+            path without `.md`) the model must cite via `[[stem|label]]`.
+        pinned_note: The user's pinned note to preserve/incorporate, if any.
+    """
+    entity_type_line = f"\n- Entity type: {entity_type}" if entity_type else ""
+
+    prior_page_section = (
+        f"\n## Prior Page Body (update this in place — merge, don't proliferate)\n"
+        f"{prior_body}\n"
+        if prior_body
+        else ""
+    )
+
+    pinned_note_line = (
+        f"\n## User's Pinned Note (must incorporate)\n{pinned_note}\n" if pinned_note else ""
+    )
+
+    article_lines = []
+    for a in articles:
+        trust_bits = []
+        if a.get("is_vip"):
+            trust_bits.append("VIP source")
+        rating_label = a.get("rating_label")
+        if rating_label:
+            trust_bits.append(rating_label)
+        weight = a.get("relevance_weight", 1.0)
+        if weight is not None and weight < 1.0:
+            trust_bits.append(f"decayed (relevance {weight:.2f})")
+        trust_line = ", ".join(trust_bits) if trust_bits else "no rating signal"
+        article_lines.append(
+            f"- Stem: `{a['stem']}` | Title: \"{a['title']}\" | Trust: {trust_line}\n"
+            f"  Summary: {a['summary'] or 'No summary available.'}"
+        )
+    articles_block = "\n".join(article_lines)
+
+    return load_template("wiki_page").format(
+        schema_instructions=schema_instructions,
+        kind=kind,
+        title=title,
+        entity_type_line=entity_type_line,
+        prior_page_section=prior_page_section,
+        articles_block=articles_block,
+        pinned_note_line=pinned_note_line,
     )
 
 

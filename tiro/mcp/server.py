@@ -13,6 +13,7 @@ from tiro.config import TiroConfig, load_config
 from tiro.database import get_connection, init_db, migrate_db
 from tiro.queries import build_article_filters
 from tiro.vectorstore import get_collection, init_vectorstore
+from tiro.wiki import read_page
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +467,66 @@ def get_articles_by_tag(tag: str) -> str:
 def get_articles_by_source(source: str) -> str:
     """Get all articles from a specific source. Matches by source name or domain."""
     return search_articles(source=source, max_results=50)
+
+
+@mcp.tool()
+def list_wiki_pages() -> str:
+    """List the library's wiki pages -- AI-generated notes on entities (people, companies, orgs) and concepts (topics/tags) that recur across your articles. Each entry shows its slug (use with get_wiki_page), kind, title, status (fresh/stale/conflicted), and how many articles it cites."""
+    config = _get_config()
+    conn = get_connection(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT slug, kind, title, status, source_count FROM wiki_pages "
+            "ORDER BY kind, title COLLATE NOCASE"
+        ).fetchall()
+        if not rows:
+            return (
+                "No wiki pages yet. Wiki pages are generated from entities and "
+                "tags that recur across your articles -- save more articles or "
+                "generate one from the Tiro web UI."
+            )
+        lines = ["## Wiki Pages\n"]
+        for r in rows:
+            lines.append(
+                f"- **{r['title']}** (slug: {r['slug']}) [{r['kind']}] -- "
+                f"{r['status']}, {r['source_count']} sources"
+            )
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def get_wiki_page(slug: str) -> str:
+    """Get a wiki page's full content by slug (e.g. "entities/anthropic" or "concepts/context-engineering") -- use list_wiki_pages to discover available slugs. Returns a frontmatter summary (title, kind, status, source count, updated) followed by the page body."""
+    config = _get_config()
+
+    try:
+        page = read_page(config, slug)
+    except ValueError:
+        page = None
+
+    if page is None:
+        conn = get_connection(config.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT slug FROM wiki_pages ORDER BY kind, title COLLATE NOCASE LIMIT 20"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return f"No wiki page found for '{slug}'. No wiki pages exist yet."
+        available = ", ".join(r["slug"] for r in rows)
+        return f"No wiki page found for '{slug}'. Available slugs: {available}"
+
+    return (
+        f"# {page['title']}\n\n"
+        f"**Kind:** {page['kind']}\n"
+        f"**Status:** {page['status']}\n"
+        f"**Sources:** {page['source_count']}\n"
+        f"**Updated:** {page['updated_at'] or 'Unknown'}\n\n"
+        f"{page['body']}"
+    )
 
 
 @mcp.tool()

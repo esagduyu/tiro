@@ -516,7 +516,7 @@ def cmd_doctor(args):
                     print(f"  - {item}")
         housekeeping_found = False
         for key in ("unreferenced_tags", "unreferenced_entities",
-                    "unreferenced_authors", "expired_sessions"):
+                    "unreferenced_authors", "expired_sessions", "wiki_index_drift"):
             if report[key]:
                 housekeeping_found = True
                 print(f"{key}: {report[key]}")
