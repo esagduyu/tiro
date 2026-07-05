@@ -286,3 +286,115 @@ def test_regenerate_concurrent_duplicate_returns_409(
 
     r = authenticated_client.post("/api/wiki/entities/anthropic/regenerate")
     assert r.status_code == 409
+
+
+# --- MCP tools: list_wiki_pages, get_wiki_page --------------------------------
+#
+# These are plain module-level functions decorated with @mcp.tool() (FastMCP
+# doesn't wrap them), so they're callable directly -- same precedent as
+# test_queries.py::test_mcp_filter_sql_finds_null_tier_and_null_method_article.
+# Unlike that test's _build_filter_sql (no config access), list_wiki_pages/
+# get_wiki_page call _get_config() internally, so we point the module's
+# global _config at an already-initialized library (no password -> the token
+# gate no-ops) instead of going through load_config()/init_db().
+
+
+def _mcp_config(monkeypatch, config):
+    import tiro.mcp.server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "_config", config)
+    return mcp_server
+
+
+def test_mcp_list_wiki_pages_empty(initialized_library, monkeypatch):
+    mcp_server = _mcp_config(monkeypatch, initialized_library)
+    result = mcp_server.list_wiki_pages()
+    assert "No wiki pages yet" in result
+
+
+def test_mcp_list_wiki_pages_populated(initialized_library, monkeypatch):
+    config = initialized_library
+    write_page(
+        config, slug="entities/anthropic", kind="entity", title="Anthropic",
+        entity_type="company", article_uids=[], body="body", generated_by="test",
+    )
+    write_page(
+        config, slug="concepts/context-engineering", kind="concept",
+        title="Context Engineering", entity_type=None, article_uids=[],
+        body="body", generated_by="test",
+    )
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.list_wiki_pages()
+    assert "entities/anthropic" in result and "Anthropic" in result
+    assert "concepts/context-engineering" in result and "Context Engineering" in result
+    assert "entity" in result and "concept" in result
+    assert "fresh" in result
+
+
+def test_mcp_get_wiki_page_existing(initialized_library, monkeypatch):
+    config = initialized_library
+    source_id = _seed_source(config)
+    _article_id, uid = _seed_article(config, source_id, "a1", title="Article One")
+    write_page(
+        config, slug="entities/anthropic", kind="entity", title="Anthropic",
+        entity_type="company", article_uids=[uid],
+        body="Anthropic makes Claude.", generated_by="test",
+    )
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_wiki_page("entities/anthropic")
+    assert "# Anthropic" in result
+    assert "**Kind:** entity" in result
+    assert "**Status:** fresh" in result
+    assert "**Sources:** 1" in result
+    assert "Anthropic makes Claude." in result
+
+
+def test_mcp_get_wiki_page_unknown_slug_lists_available(initialized_library, monkeypatch):
+    config = initialized_library
+    write_page(
+        config, slug="entities/anthropic", kind="entity", title="Anthropic",
+        entity_type="company", article_uids=[], body="body", generated_by="test",
+    )
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_wiki_page("entities/does-not-exist")
+    assert "No wiki page found" in result
+    assert "entities/anthropic" in result
+
+
+def test_mcp_get_wiki_page_no_pages_at_all_message(initialized_library, monkeypatch):
+    mcp_server = _mcp_config(monkeypatch, initialized_library)
+    result = mcp_server.get_wiki_page("entities/does-not-exist")
+    assert "No wiki pages exist yet" in result
+
+
+def test_mcp_get_wiki_page_traversal_slug_returns_message_not_exception(
+    initialized_library, monkeypatch
+):
+    # page_path() raises ValueError on a traversal-shaped slug; the MCP tool
+    # must turn that into a friendly not-found message, not let it propagate
+    # (MCP tools return messages, never exceptions).
+    mcp_server = _mcp_config(monkeypatch, initialized_library)
+    result = mcp_server.get_wiki_page("entities/../../etc")
+    assert "No wiki page found" in result
+    assert "No wiki pages exist yet" in result
+
+
+def test_mcp_get_wiki_page_available_slugs_capped_at_20(initialized_library, monkeypatch):
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    try:
+        for i in range(25):
+            conn.execute(
+                "INSERT INTO wiki_pages (slug, kind, title, source_count) "
+                "VALUES (?, 'concept', ?, 0)",
+                (f"concepts/topic-{i:02d}", f"Topic {i:02d}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_wiki_page("concepts/does-not-exist")
+    assert "No wiki page found" in result
+    listed = result.split("Available slugs: ", 1)[1]
+    assert len(listed.split(", ")) == 20
