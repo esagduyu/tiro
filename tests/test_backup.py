@@ -2,6 +2,7 @@
 
 import json
 import tarfile
+from pathlib import Path
 
 import zstandard
 
@@ -89,3 +90,99 @@ def test_default_output_location(initialized_library):
     snap = create_snapshot(config)
     assert snap.parent == config.library / "backups" / "manual"
     assert snap.name.startswith("tiro-") and snap.name.endswith(".tar.zst")
+
+
+def test_restore_round_trip(initialized_library, tmp_path):
+    """Roadmap acceptance criterion: snapshot -> mutate -> restore -> identical."""
+    import hashlib
+
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+    from tiro.lifecycle import delete_article
+
+    config = initialized_library
+    _seed_article(config, "art-1", "T1")
+    _seed_article(config, "art-2", "T2")
+    original_hash = hashlib.sha256(
+        (config.articles_dir / "art-1.md").read_bytes()
+    ).hexdigest()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+
+    delete_article(config, 1)  # mutate after snapshot
+    assert not (config.articles_dir / "art-1.md").exists()
+
+    result = restore_snapshot(config, snap)
+
+    conn = get_connection(config.db_path)
+    titles = {r["title"] for r in conn.execute("SELECT title FROM articles").fetchall()}
+    conn.close()
+    assert titles == {"T1", "T2"}
+    assert hashlib.sha256(
+        (config.articles_dir / "art-1.md").read_bytes()
+    ).hexdigest() == original_hash
+    assert result["articles"] == 2
+    # displaced library preserved as a sibling .bak
+    assert Path(result["displaced_library"]).exists()
+
+
+def test_restore_marks_missing_vectors_pending(initialized_library, tmp_path):
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+
+    config = initialized_library
+    _seed_article(config)
+    conn = get_connection(config.db_path)
+    conn.execute("UPDATE articles SET vector_status = 'indexed'")
+    conn.commit()
+    conn.close()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")  # 0 vectors in chroma
+    result = restore_snapshot(config, snap)
+    assert result["vectors_pending"] == 1
+
+    conn = get_connection(config.db_path)
+    status = conn.execute("SELECT vector_status FROM articles").fetchone()[0]
+    conn.close()
+    assert status == "pending"
+
+
+def test_restore_cleans_audio_rows_without_files(initialized_library, tmp_path):
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+
+    config = initialized_library
+    _seed_article(config)
+    conn = get_connection(config.db_path)
+    conn.execute(
+        "INSERT INTO audio (article_id, file_path, voice, model, generated_at)"
+        " VALUES (1, '1.mp3', 'nova', 'tts-1', '2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+    # No MP3 on disk and snapshot without --include-audio
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    result = restore_snapshot(config, snap)
+    assert result["audio_rows_cleaned"] == 1
+
+
+def test_restore_rejects_traversal_members(initialized_library, tmp_path):
+    """A malicious snapshot must not write outside the library."""
+    import io
+
+    import pytest
+
+    from tiro.backup import _open_tar_zst_write, restore_snapshot
+
+    evil = tmp_path / "evil.tar.zst"
+    with _open_tar_zst_write(evil) as tar:
+        info = tarfile.TarInfo(name="manifest.json")
+        payload = json.dumps({"format_version": 1}).encode()
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        info2 = tarfile.TarInfo(name="articles/../../outside.md")
+        info2.size = 4
+        tar.addfile(info2, io.BytesIO(b"evil"))
+    with pytest.raises(ValueError, match="unsafe path"):
+        restore_snapshot(initialized_library, evil)
+    assert not (tmp_path / "outside.md").exists()

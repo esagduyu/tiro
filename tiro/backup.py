@@ -166,3 +166,141 @@ def create_snapshot(
 
     logger.info("Snapshot written: %s (%d articles)", output_path, article_count)
     return output_path
+
+
+def _safe_members(tar: tarfile.TarFile):
+    """Yield members, rejecting absolute paths / traversal (CVE-class guard).
+    Explicit loop instead of extractall(filter='data'): that keyword needs
+    Python 3.11.4+, and the floor is 3.11.0."""
+    for member in tar:
+        name = member.name
+        if name.startswith(("/", "\\")) or ".." in Path(name).parts:
+            raise ValueError(f"unsafe path in snapshot: {name!r}")
+        if member.issym() or member.islnk():
+            raise ValueError(f"unsafe link member in snapshot: {name!r}")
+        yield member
+
+
+def restore_snapshot(config: TiroConfig, snapshot_path: Path) -> dict:
+    """Replace the live library with a snapshot's contents.
+
+    The current library directory is moved aside to a sibling
+    `<name>.bak.<ts>` (never deleted). ChromaDB is rebuilt from
+    embeddings.jsonl; articles without a restored vector are set to
+    vector_status='pending' (retry loop re-embeds). Audio rows whose MP3 is
+    not present after restore are deleted (cache reconciliation — digest and
+    analysis caches live inside the restored tiro.db and are consistent by
+    construction). Run with the server stopped.
+    """
+    snapshot_path = Path(snapshot_path)
+    # Pass 1: validate manifest before touching anything
+    manifest = None
+    with _open_tar_zst_read(snapshot_path) as tar:
+        for member in _safe_members(tar):
+            if member.name == "manifest.json":
+                manifest = json.loads(tar.extractfile(member).read())
+                break
+    if manifest is None:
+        raise ValueError("not a Tiro snapshot: manifest.json missing")
+    if manifest.get("format_version") != SNAPSHOT_FORMAT_VERSION:
+        raise ValueError(
+            f"unsupported snapshot format_version {manifest.get('format_version')!r}"
+        )
+
+    # Displace the live library (keep it — this IS the pre-restore backup)
+    library = config.library
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    displaced = library.parent / f"{library.name}.bak.{ts}"
+    if library.exists():
+        shutil.move(str(library), str(displaced))
+    library.mkdir(parents=True, exist_ok=True)
+
+    # Pass 2: extract (streaming tar needs a fresh open)
+    embeddings_path = library / "embeddings.jsonl"
+    with _open_tar_zst_read(snapshot_path) as tar:
+        for member in _safe_members(tar):
+            if member.name == "manifest.json" or not member.isfile():
+                continue
+            if member.name == "tiro.db":
+                dest = config.db_path
+            elif member.name == "config-snapshot.yaml":
+                continue  # reference copy only; never touches live config.yaml
+            elif member.name == "embeddings.jsonl":
+                dest = embeddings_path
+            else:
+                dest = library / member.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with tar.extractfile(member) as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out)
+
+    # Snapshot may predate current schema
+    from tiro.database import migrate_db
+
+    migrate_db(config.db_path)
+
+    # Rebuild ChromaDB from the portable dump
+    from tiro.vectorstore import init_vectorstore
+
+    collection = init_vectorstore(config.chroma_dir, config.default_embedding_model)
+    vectors_restored = 0
+    restored_ids: set[str] = set()
+    if embeddings_path.exists():
+        batch_ids, batch_emb, batch_meta, batch_doc = [], [], [], []
+
+        def _flush():
+            nonlocal vectors_restored
+            if batch_ids:
+                collection.upsert(
+                    ids=list(batch_ids), embeddings=list(batch_emb),
+                    metadatas=list(batch_meta), documents=list(batch_doc),
+                )
+                vectors_restored += len(batch_ids)
+                batch_ids.clear()
+                batch_emb.clear()
+                batch_meta.clear()
+                batch_doc.clear()
+
+        for line in embeddings_path.read_text().splitlines():
+            rec = json.loads(line)
+            restored_ids.add(rec["id"])
+            batch_ids.append(rec["id"])
+            batch_emb.append(rec["embedding"])
+            batch_meta.append(rec["metadata"])
+            batch_doc.append(rec["document"])
+            if len(batch_ids) >= 100:
+                _flush()
+        _flush()
+        embeddings_path.unlink()
+
+    conn = get_connection(config.db_path)
+    try:
+        rows = conn.execute("SELECT id FROM articles").fetchall()
+        article_count = len(rows)
+        vectors_pending = 0
+        for row in rows:
+            if f"article_{row['id']}" not in restored_ids:
+                conn.execute(
+                    "UPDATE articles SET vector_status = 'pending' WHERE id = ?",
+                    (row["id"],),
+                )
+                vectors_pending += 1
+        audio_rows_cleaned = 0
+        for row in conn.execute("SELECT article_id, file_path FROM audio").fetchall():
+            if not (library / "audio" / row["file_path"]).exists():
+                conn.execute("DELETE FROM audio WHERE article_id = ?", (row["article_id"],))
+                audio_rows_cleaned += 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info(
+        "Restored %d articles from %s (vectors: %d restored, %d pending; displaced: %s)",
+        article_count, snapshot_path, vectors_restored, vectors_pending, displaced,
+    )
+    return {
+        "articles": article_count,
+        "vectors_restored": vectors_restored,
+        "vectors_pending": vectors_pending,
+        "audio_rows_cleaned": audio_rows_cleaned,
+        "displaced_library": str(displaced),
+    }

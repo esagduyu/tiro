@@ -209,6 +209,45 @@ def cmd_export(args):
     print(f"Library exported to {output}")
 
 
+def cmd_backup(args):
+    """Write a full library snapshot (tar.zst)."""
+    from tiro.backup import create_snapshot
+    from tiro.config import load_config
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    output = Path(args.output) if args.output else None
+    snap = create_snapshot(config, output, include_audio=args.include_audio)
+    print(f"Snapshot written: {snap}")
+
+
+def cmd_restore(args):
+    """Replace the library from a snapshot."""
+    from tiro.backup import restore_snapshot
+    from tiro.config import load_config
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    snapshot = Path(args.snapshot)
+    if not snapshot.exists():
+        print(f"Snapshot not found: {snapshot}")
+        sys.exit(1)
+    if not args.yes:
+        answer = input(
+            f"Replace the library at {config.library} with {snapshot.name}?\n"
+            "The current library is moved aside (not deleted). "
+            "Stop the server first. [y/N] "
+        )
+        if answer.strip().lower() != "y":
+            print("Aborted.")
+            sys.exit(1)
+    result = restore_snapshot(config, snapshot)
+    print(
+        f"Restored {result['articles']} articles "
+        f"({result['vectors_restored']} vectors restored, "
+        f"{result['vectors_pending']} pending re-embed). "
+        f"Previous library: {result['displaced_library']}"
+    )
+
+
 def _interactive_email_setup(config_path: Path):
     """Interactive email setup flow — shared by cmd_init and cmd_setup_email."""
     print()
@@ -654,6 +693,14 @@ def main():
     export_parser.add_argument("--rating-min", type=int, help="Minimum rating (-1, 1, or 2)")
     export_parser.add_argument("--date-from", help="Filter articles ingested after this date (YYYY-MM-DD)")
 
+    backup_parser = subparsers.add_parser("backup", help="Write a full library snapshot (tar.zst)")
+    backup_parser.add_argument("--output", help="Snapshot path (default: {library}/backups/manual/)")
+    backup_parser.add_argument("--include-audio", action="store_true", help="Include cached MP3s")
+
+    restore_parser = subparsers.add_parser("restore", help="Replace the library from a snapshot")
+    restore_parser.add_argument("snapshot", help="Path to a .tar.zst snapshot")
+    restore_parser.add_argument("--yes", action="store_true", help="Skip confirmation")
+
     import_parser = subparsers.add_parser("import-emails", help="Bulk import .eml files")
     import_parser.add_argument("directory", type=Path, help="Directory containing .eml files")
 
@@ -703,6 +750,10 @@ def main():
         cmd_run(args)
     elif args.command == "export":
         cmd_export(args)
+    elif args.command == "backup":
+        cmd_backup(args)
+    elif args.command == "restore":
+        cmd_restore(args)
     elif args.command == "import-emails":
         cmd_import_emails(args)
     elif args.command == "delete":
