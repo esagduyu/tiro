@@ -324,3 +324,94 @@ def test_m007_backfills_authors_from_articles(tmp_path):
     links = conn.execute("SELECT COUNT(*) FROM article_authors").fetchone()[0]
     assert links == 3  # null/empty authors produce no rows
     conn.close()
+
+
+def test_m009_creates_highlights_notes_tables(tmp_path):
+    """Fresh DB path: init_db() runs SCHEMA directly (no migration involved)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"highlights", "notes"} <= names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(highlights)").fetchall()}
+    assert "idx_highlights_article" in index_names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(notes)").fetchall()}
+    assert "idx_notes_article" in index_names
+    conn.close()
+
+
+def test_m009_legacy_db_at_version_8_gains_highlights_notes_tables(tmp_path):
+    """A DB stamped at user_version 8 (pre-highlights) must gain highlights
+    and notes via run_migrations, with no backfill (sidecar files are the
+    source of truth; a fresh 009 DB has no sidecar files yet)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("DROP TABLE notes")
+    conn.execute("DROP TABLE highlights")
+    conn.execute("PRAGMA user_version = 8")
+    conn.commit()
+    conn.close()
+
+    applied = run_migrations(db)
+    assert any("highlights" in a for a in applied)
+
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"highlights", "notes"} <= names
+    assert conn.execute("SELECT COUNT(*) FROM highlights").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 0
+    conn.close()
+
+
+def test_m009_highlights_notes_migration_is_idempotent(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("PRAGMA user_version = 8")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+    assert run_migrations(db) == []  # re-run: nothing pending
+
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 't', 'sl', 'f.md')"
+    )
+    conn.execute(
+        "INSERT INTO highlights (uid, article_id, quote_text) VALUES ('01H1', 1, 'hi')"
+    )
+    conn.commit()
+    conn.execute("PRAGMA user_version = 8")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)  # re-running the migration must not raise or wipe data
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM highlights").fetchone()[0] == 1
+    conn.close()
+
+
+def test_m009_highlights_notes_schema_columns(tmp_path):
+    """Column-level check against the brief's exact schema (both convergence
+    paths use the same CREATE TABLE, so checking the fresh path suffices)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    highlight_cols = {r[1] for r in conn.execute("PRAGMA table_info(highlights)").fetchall()}
+    assert highlight_cols == {
+        "id", "uid", "article_id", "quote_text", "prefix_context", "suffix_context",
+        "text_position_start", "text_position_end", "content_hash", "color",
+        "created_at", "updated_at",
+    }
+    note_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert note_cols == {
+        "id", "uid", "article_id", "highlight_id", "body_markdown",
+        "created_at", "updated_at",
+    }
+    conn.close()
