@@ -397,6 +397,54 @@ def test_m009_highlights_notes_migration_is_idempotent(tmp_path):
     conn.close()
 
 
+def test_m009_fresh_schema_and_legacy_migration_produce_identical_tables(tmp_path):
+    """Cross-path schema equality (Finding 2): the SCHEMA path (fresh DB) and
+    the migrate_db/_m009 path (legacy DB upgraded from user_version 8) are
+    two independently-maintained copies of the same CREATE TABLE DDL — this
+    proves they actually stay in sync, not just that both produce tables
+    named the same thing. Compares PRAGMA table_xinfo (column name/type/
+    notnull/default — the fields that matter for schema equality; cid/pk/
+    hidden are position/quirk metadata, not compared) and each table's index
+    list for both `highlights` and `notes`."""
+    fresh_db = tmp_path / "fresh.db"
+    init_db(fresh_db)
+
+    legacy_db = tmp_path / "legacy.db"
+    init_db(legacy_db)
+    conn = get_connection(legacy_db)
+    conn.execute("DROP TABLE notes")
+    conn.execute("DROP TABLE highlights")
+    conn.execute("PRAGMA user_version = 8")
+    conn.commit()
+    conn.close()
+    run_migrations(legacy_db)
+
+    def xinfo(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            # (name, type, notnull, dflt_value) per column, order-independent.
+            return {(r["name"], r["type"], r["notnull"], r["dflt_value"]) for r in rows}
+        finally:
+            conn.close()
+
+    def index_list(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA index_list({table})").fetchall()
+            return {(r["name"], r["unique"]) for r in rows}
+        finally:
+            conn.close()
+
+    for table in ("highlights", "notes"):
+        assert xinfo(fresh_db, table) == xinfo(legacy_db, table), (
+            f"{table} column schema diverges between SCHEMA and migration paths"
+        )
+        assert index_list(fresh_db, table) == index_list(legacy_db, table), (
+            f"{table} index list diverges between SCHEMA and migration paths"
+        )
+
+
 def test_m009_highlights_notes_schema_columns(tmp_path):
     """Column-level check against the brief's exact schema (both convergence
     paths use the same CREATE TABLE, so checking the fresh path suffices)."""

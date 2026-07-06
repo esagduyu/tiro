@@ -75,9 +75,23 @@ def test_make_anchor_rejects_negative_start():
         make_anchor("hello", -1, 3)
 
 
+def test_make_anchor_rejects_negative_end():
+    with pytest.raises(ValueError):
+        make_anchor("hello", 0, -1)
+
+
 def test_make_anchor_rejects_end_past_text_length():
     with pytest.raises(ValueError):
         make_anchor("hello", 0, 999)
+
+
+def test_make_anchor_default_context_chars_is_32():
+    text = "x" * 100 + "TARGET" + "y" * 100
+    start = text.index("TARGET")
+    end = start + len("TARGET")
+    anchor = make_anchor(text, start, end)  # no context_chars passed
+    assert anchor["prefix"] == "x" * 32
+    assert anchor["suffix"] == "y" * 32
 
 
 def test_make_anchor_unicode_emoji_and_nbsp():
@@ -164,9 +178,14 @@ def test_reconcile_missing_when_quote_unfindable_but_hash_matches():
     assert result == {"status": "missing", "position_start": None, "position_end": None}
 
 
-def test_reconcile_no_stored_hash_and_quote_unfindable_is_missing():
-    """No content_hash on the anchor at all (e.g. legacy data) — can't prove
-    the doc changed, so default to missing rather than hash_mismatch."""
+def test_reconcile_no_stored_hash_and_quote_unfindable_is_hash_mismatch():
+    """No content_hash on the anchor at all (e.g. legacy data) — with no
+    provenance to compare against we can't POSITIVELY confirm the document
+    is unchanged, so this is treated as hash_mismatch (can't-verify ==
+    treated-as-changed), NOT "missing". (Finding 1: this is a deliberate
+    semantics change — a None hash used to default to "missing"; that
+    silently assumed innocence when it should assume nothing. "missing" is
+    now reserved for the case where a hash IS stored and it matches.)"""
     text = "abc def ghi"
     anchor = {
         "quote": "zzz not present zzz",
@@ -177,7 +196,7 @@ def test_reconcile_no_stored_hash_and_quote_unfindable_is_missing():
         "content_hash": None,
     }
     result = reconcile_anchor(text, anchor)
-    assert result["status"] == "missing"
+    assert result["status"] == "hash_mismatch"
 
 
 # --- duplicate-quote disambiguation ---------------------------------------
@@ -232,6 +251,72 @@ def test_reconcile_duplicate_quotes_equal_context_resolved_by_proximity():
     result = reconcile_anchor(text, anchor)
     assert result["status"] == "shifted"
     assert result["position_start"] == second
+
+
+# --- context-priority ordering (Finding 1) -----------------------------------
+
+
+def test_reconcile_context_match_wins_over_stale_offset_with_unrelated_identical_string():
+    """The reviewer's failure case: an unrelated occurrence of the quote text
+    sits at the anchor's stale stored offset, while the TRUE occurrence
+    (identifiable by its prefix/suffix context) has moved elsewhere. Context
+    search must have priority over the stored offsets — the correct result
+    is "shifted" to the context-matched location, NOT "exact" at the stale
+    offset (which would be wrong: that occurrence has no relation to the
+    original highlight)."""
+    quote = "APPLE"
+    stored_prefix = "context. "
+    stored_suffix = " fruit"
+
+    # An unrelated "APPLE" with mismatched surrounding text — this is what
+    # now occupies the anchor's old stored offset.
+    fake_segment = "xxxx" + quote + "yyyy"
+    # The real occurrence: same prefix/suffix context the anchor recorded.
+    true_segment = stored_prefix + quote + stored_suffix
+
+    edited = fake_segment + "----padding-string-here----" + true_segment
+    fake_start = edited.index(quote)
+    true_start = edited.index(quote, fake_start + 1)
+    assert fake_start != true_start  # sanity: two distinct occurrences
+
+    anchor = {
+        "quote": quote,
+        "prefix": stored_prefix,
+        "suffix": stored_suffix,
+        # Stale: pretend the highlight used to sit at the fake occurrence.
+        "position_start": fake_start,
+        "position_end": fake_start + len(quote),
+        "content_hash": content_hash(edited),
+    }
+    result = reconcile_anchor(edited, anchor)
+    assert result["status"] == "shifted"
+    assert result["position_start"] == true_start
+    assert result["position_end"] == true_start + len(quote)
+
+
+def test_reconcile_position_fallback_is_exact_when_no_context_matches_anywhere():
+    """No occurrence's context matches at all (the anchor's stored
+    prefix/suffix don't appear anywhere in the document) — every candidate
+    ties at the lowest score, so the proximity tiebreak decides. When the
+    quote is genuinely unchanged at the stored offset, proximity correctly
+    recovers "exact" even though no context corroborated it (spec note:
+    this ordering yields "exact" in the pure position-fallback case too)."""
+    text = "AAA TOKEN BBB TOKEN CCC"
+    first = text.index("TOKEN")
+    anchor = {
+        "quote": "TOKEN",
+        "prefix": "NOPE-NOT-REAL",
+        "suffix": "ALSO-NOT-REAL",
+        "position_start": first,
+        "position_end": first + len("TOKEN"),
+        "content_hash": content_hash(text),
+    }
+    result = reconcile_anchor(text, anchor)
+    assert result == {
+        "status": "exact",
+        "position_start": first,
+        "position_end": first + len("TOKEN"),
+    }
 
 
 # --- edge positions ---------------------------------------------------------
