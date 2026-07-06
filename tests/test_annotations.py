@@ -860,3 +860,74 @@ def test_startup_reconciles_hand_written_annotation_sidecars(configured_library)
         assert note["body_markdown"] == "hand written article note"
     finally:
         conn.close()
+
+
+# --- MCP tool: get_highlights (Phase 2 M2.1 Task 4) --------------------------
+#
+# Same precedent as test_wiki_api.py's list_wiki_pages/get_wiki_page tests:
+# get_highlights is a plain module-level @mcp.tool()-decorated function
+# (FastMCP doesn't wrap it), callable directly once the module's global
+# _config points at an already-initialized library.
+
+
+def _mcp_config(monkeypatch, config):
+    import tiro.mcp.server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "_config", config)
+    return mcp_server
+
+
+def test_mcp_get_highlights_empty(db_config, monkeypatch):
+    mcp_server = _mcp_config(monkeypatch, db_config)
+    assert mcp_server.get_highlights() == "No highlights found."
+
+
+def test_mcp_get_highlights_lists_quote_article_and_note(db_config, monkeypatch):
+    config = db_config
+    article_id, _ = _seed_article(config, stem="art-1", title="Article One")
+    highlight_id, h_uid = _seed_highlight(config, article_id, quote="hello world", color="green")
+    _seed_note(config, article_id, highlight_id=highlight_id, body="my note")
+
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_highlights()
+    assert "hello world" in result
+    assert "Article One" in result
+    assert "green" in result
+    assert "my note" in result
+    assert f"article ID: {article_id}" in result
+
+
+def test_mcp_get_highlights_filters_by_article_id(db_config, monkeypatch):
+    config = db_config
+    a1, _ = _seed_article(config, stem="art-1", title="Article One")
+    a2, _ = _seed_article(config, stem="art-2", title="Article Two")
+    _seed_highlight(config, a1, quote="from one")
+    _seed_highlight(config, a2, quote="from two")
+
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_highlights(article_id=a2)
+    assert "from two" in result
+    assert "from one" not in result
+
+
+def test_mcp_get_highlights_filters_by_color(db_config, monkeypatch):
+    config = db_config
+    article_id, _ = _seed_article(config)
+    _seed_highlight(config, article_id, quote="yellow one", color="yellow")
+    _seed_highlight(config, article_id, quote="blue one", color="blue", uid="H-BLUE")
+
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_highlights(color="blue")
+    assert "blue one" in result
+    assert "yellow one" not in result
+
+
+def test_mcp_get_highlights_respects_limit(db_config, monkeypatch):
+    config = db_config
+    article_id, _ = _seed_article(config)
+    for i in range(3):
+        _seed_highlight(config, article_id, quote=f"quote {i}", uid=f"H-{i}")
+
+    mcp_server = _mcp_config(monkeypatch, config)
+    result = mcp_server.get_highlights(limit=1)
+    assert result.count("quote ") == 1

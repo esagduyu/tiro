@@ -383,4 +383,282 @@ def test_overwrite_without_author_key_leaves_junction_untouched(initialized_libr
         conn.close()
     finally:
         bundle.unlink()
-        stripped.unlink()
+
+
+# --- Highlights + notes sidecar merge (Phase 2 M2.1 Task 4) ------------------
+
+
+def _add_highlight(config, article_id, article_uid, *, h_uid=None, quote="hello", note=None):
+    """Add one highlight (SQLite row + sidecar line) to an already-seeded
+    article. Mirrors routes_annotations.py's sidecar-first convention."""
+    from tiro.annotations import read_annotations, sidecar_stem, write_annotations
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    h_uid = h_uid or new_ulid()
+    conn = get_connection(config.db_path)
+    row = conn.execute(
+        "SELECT markdown_path FROM articles WHERE id = ?", (article_id,)
+    ).fetchone()
+    stem = sidecar_stem(row)
+    conn.execute(
+        """INSERT INTO highlights
+           (uid, article_id, quote_text, prefix_context, suffix_context,
+            text_position_start, text_position_end, content_hash, color,
+            created_at, updated_at)
+           VALUES (?, ?, ?, 'pre', 'suf', 0, 5, 'hash', 'yellow',
+                   '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (h_uid, article_id, quote),
+    )
+    if note:
+        conn.execute(
+            "INSERT INTO notes (uid, article_id, highlight_id, body_markdown, created_at, updated_at)"
+            " SELECT ?, ?, id, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z' FROM highlights WHERE uid = ?",
+            (new_ulid(), article_id, note, h_uid),
+        )
+    conn.commit()
+    conn.close()
+
+    lines = read_annotations(config, stem)
+    lines.append({
+        "uid": h_uid, "article_uid": article_uid, "quote": quote,
+        "prefix": "pre", "suffix": "suf", "position_start": 0, "position_end": 5,
+        "content_hash": "hash", "color": "yellow", "note_markdown": note,
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+    })
+    write_annotations(config, stem, lines)
+    return h_uid
+
+
+def _add_article_note(config, article_id, *, body="article note"):
+    from tiro.annotations import sidecar_stem, write_note
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    row = conn.execute(
+        "SELECT markdown_path FROM articles WHERE id = ?", (article_id,)
+    ).fetchone()
+    stem = sidecar_stem(row)
+    conn.execute(
+        "INSERT INTO notes (uid, article_id, highlight_id, body_markdown, created_at, updated_at)"
+        " VALUES (?, ?, NULL, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (new_ulid(), article_id, body),
+    )
+    conn.commit()
+    conn.close()
+    write_note(config, stem, body)
+
+
+def test_round_trip_imports_highlight_and_note_into_empty_library(initialized_library, tmp_path):
+    from tiro.annotations import read_annotations, read_note
+
+    config = initialized_library
+    _seed(config)
+    h_uid = _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", note="hl note")
+    _add_article_note(config, 1, body="article note")
+
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        result = import_bundle(target, bundle)
+        assert result["imported"] == 1
+
+        conn = get_connection(target.db_path)
+        try:
+            hrow = conn.execute("SELECT * FROM highlights WHERE uid = ?", (h_uid,)).fetchone()
+            assert hrow is not None and hrow["quote_text"] == "hello"
+            note_row = conn.execute(
+                "SELECT body_markdown FROM notes WHERE highlight_id = ?", (hrow["id"],)
+            ).fetchone()
+            assert note_row["body_markdown"] == "hl note"
+        finally:
+            conn.close()
+
+        lines = read_annotations(target, "art-1")
+        assert len(lines) == 1 and lines[0]["uid"] == h_uid
+        assert read_note(target, "art-1") == "article note"
+    finally:
+        bundle.unlink()
+
+
+def test_import_skip_merges_new_uid_lines_keeps_existing_untouched(initialized_library, tmp_path):
+    """conflicts='skip': article row untouched, but sidecars still merge --
+    existing local lines survive as-is, new bundle uids get appended."""
+    from tiro.annotations import read_annotations
+
+    config = initialized_library
+    _seed(config, rating=1)
+    local_h_uid = _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="local one")
+    bundle = export_library(config)  # bundle now carries local_h_uid too
+    try:
+        # A second highlight added to the bundle's copy AFTER the export was
+        # taken — simulate by adding one more highlight to the local library
+        # and re-exporting.
+        new_h_uid = _add_highlight(
+            config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="new one"
+        )
+        bundle2 = export_library(config)
+
+        # Roll the local library "back" to only have the first highlight —
+        # simulate a peer whose copy is missing the second one.
+        conn = get_connection(config.db_path)
+        conn.execute("DELETE FROM highlights WHERE uid = ?", (new_h_uid,))
+        conn.commit()
+        conn.close()
+        from tiro.annotations import write_annotations
+
+        write_annotations(
+            config, "art-1",
+            [ln for ln in read_annotations(config, "art-1") if ln["uid"] != new_h_uid],
+        )
+
+        result = import_bundle(config, bundle2, conflicts="skip")
+        assert result["skipped"] == 1
+
+        lines = read_annotations(config, "art-1")
+        uids = {ln["uid"] for ln in lines}
+        assert local_h_uid in uids and new_h_uid in uids
+        assert len(lines) == 2
+
+        # import_bundle's trailing reconcile_annotations() rebuilds the row
+        # for the merged-in line automatically.
+        conn = get_connection(config.db_path)
+        try:
+            assert conn.execute(
+                "SELECT 1 FROM highlights WHERE uid = ?", (new_h_uid,)
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    finally:
+        bundle.unlink()
+        bundle2.unlink()
+
+
+def test_import_overwrite_replaces_sidecars_wholesale(initialized_library, tmp_path):
+    """conflicts='overwrite': the bundle's sidecars win outright -- a local
+    highlight absent from the bundle must be gone, not merged."""
+    from tiro.annotations import read_annotations, read_note
+
+    config = initialized_library
+    _seed(config, rating=1)
+    _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="from bundle")
+    _add_article_note(config, 1, body="bundle note")
+    bundle = export_library(config)
+    try:
+        # Local library now diverges: an extra local-only highlight/note not
+        # in the bundle, plus a changed article-level note.
+        _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="local-only")
+        from tiro.annotations import write_note
+
+        write_note(config, "art-1", "locally changed note")
+
+        result = import_bundle(config, bundle, conflicts="overwrite")
+        assert result["overwritten"] == 1
+
+        lines = read_annotations(config, "art-1")
+        assert len(lines) == 1
+        assert lines[0]["quote"] == "from bundle"
+        assert read_note(config, "art-1") == "bundle note"
+    finally:
+        bundle.unlink()
+
+
+def test_import_keep_both_mints_fresh_uids_under_new_stem(initialized_library, tmp_path):
+    """conflicts='keep-both': the new copy's sidecars must NOT reuse the
+    original article's highlight uids (which remain live under the
+    original stem) -- fresh uids, new stem."""
+    from tiro.annotations import read_annotations
+
+    config = initialized_library
+    _seed(config)
+    orig_h_uid = _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="dup me")
+    bundle = export_library(config)
+    try:
+        result = import_bundle(config, bundle, conflicts="keep-both")
+        assert result["kept_both"] == 1
+
+        conn = get_connection(config.db_path)
+        try:
+            new_article = conn.execute(
+                "SELECT id FROM articles WHERE slug = 'art-1-imported'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert new_article is not None
+
+        new_lines = read_annotations(config, "art-1-imported")
+        assert len(new_lines) == 1
+        assert new_lines[0]["quote"] == "dup me"
+        assert new_lines[0]["uid"] != orig_h_uid  # fresh uid, no collision
+
+        # Original stem's own sidecar is untouched.
+        orig_lines = read_annotations(config, "art-1")
+        assert len(orig_lines) == 1 and orig_lines[0]["uid"] == orig_h_uid
+    finally:
+        bundle.unlink()
+
+
+def test_import_article_without_sidecars_is_noop(initialized_library, tmp_path):
+    """An article with no highlights/notes at all must not gain empty
+    sidecar files after import."""
+    from tiro.annotations import annotations_dir, notes_dir
+
+    config = initialized_library
+    _seed(config)
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        result = import_bundle(target, bundle)
+        assert result["imported"] == 1
+        assert not (annotations_dir(target) / "art-1.jsonl").exists()
+        assert not (notes_dir(target) / "art-1.md").exists()
+    finally:
+        bundle.unlink()
+
+
+def test_import_reconciles_sidecars_into_rows_after_run(initialized_library, tmp_path):
+    """The final reconcile_annotations() call must actually rebuild rows
+    from whatever sidecar merging left on disk -- checked end-to-end via the
+    skip-mode merge (which appends a bundle line to the local file without
+    inserting a row itself)."""
+    from tiro.annotations import reconcile_annotations, write_annotations
+
+    config = initialized_library
+    _seed(config, rating=1)
+    _add_highlight(config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="one")
+    bundle = export_library(config)
+    try:
+        extra_uid = _add_highlight(
+            config, 1, "01AAAAAAAAAAAAAAAAAAAAAAAA", quote="two"
+        )
+        bundle2 = export_library(config)
+        conn = get_connection(config.db_path)
+        conn.execute("DELETE FROM highlights WHERE uid = ?", (extra_uid,))
+        conn.commit()
+        conn.close()
+        from tiro.annotations import read_annotations
+
+        write_annotations(
+            config, "art-1",
+            [ln for ln in read_annotations(config, "art-1") if ln["uid"] != extra_uid],
+        )
+
+        result = import_bundle(config, bundle2, conflicts="skip")
+        assert result["skipped"] == 1
+
+        conn = get_connection(config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM highlights WHERE uid = ?", (extra_uid,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None  # reconcile_annotations rebuilt it from the file
+
+        # Idempotent: reconciling again changes nothing further.
+        counts = reconcile_annotations(config)
+        assert counts["highlights_inserted"] == 0
+    finally:
+        bundle.unlink()
+        bundle2.unlink()

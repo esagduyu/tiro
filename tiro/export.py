@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tiro import __version__
+from tiro.annotations import annotations_dir, notes_dir
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 
@@ -54,6 +55,8 @@ def export_library(
         digests = _get_digests(conn)
         reading_stats = _get_reading_stats(conn)
         audio = _get_audio_metadata(conn, article_ids)
+        highlights = _get_highlights(conn, article_ids)
+        notes = _get_notes(conn, article_ids)
 
     finally:
         conn.close()
@@ -78,6 +81,8 @@ def export_library(
         "digests": digests,
         "reading_stats": reading_stats,
         "audio": audio,
+        "highlights": highlights,
+        "notes": notes,
     }
 
     # Create the zip
@@ -100,6 +105,24 @@ def export_library(
             for page in sorted(wiki_dir.rglob("*.md")):
                 rel = page.relative_to(wiki_dir)
                 zf.write(page, f"wiki/{rel.as_posix()}")
+
+        # Highlights + notes sidecars (Phase 2 M2.1): files-as-truth, same
+        # rglob-and-ride-along pattern as wiki/ above -- but scoped to ONLY
+        # the exported articles' stems, since (unlike wiki/, which has no
+        # per-article filter concept) a sidecar belongs to exactly one
+        # article and a filtered export must not leak sidecars for articles
+        # it excluded.
+        exported_stems = {Path(a["markdown_path"]).stem for a in articles}
+        ann_dir = annotations_dir(config)
+        if ann_dir.exists():
+            for f in sorted(ann_dir.glob("*.jsonl")):
+                if f.stem in exported_stems:
+                    zf.write(f, f"annotations/{f.name}")
+        nt_dir = notes_dir(config)
+        if nt_dir.exists():
+            for f in sorted(nt_dir.glob("*.md")):
+                if f.stem in exported_stems:
+                    zf.write(f, f"notes/{f.name}")
 
         # Add metadata.json
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))
@@ -299,6 +322,45 @@ def _get_reading_stats(conn) -> list[dict]:
     return [dict(r) for r in conn.execute("SELECT * FROM reading_stats ORDER BY date").fetchall()]
 
 
+def _get_highlights(conn, article_ids: list[int]) -> list[dict]:
+    """Fetch highlight rows for the filtered articles, plus the owning
+    article's `uid` (so an importer can re-key without a numeric-id lookup
+    across databases -- same rationale as the `source_*` join in
+    `_get_articles`)."""
+    if not article_ids:
+        return []
+
+    placeholders = ",".join("?" * len(article_ids))
+    rows = conn.execute(
+        f"""SELECT h.*, a.uid AS article_uid
+            FROM highlights h
+            JOIN articles a ON h.article_id = a.id
+            WHERE h.article_id IN ({placeholders})
+            ORDER BY h.article_id, h.id""",
+        article_ids,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _get_notes(conn, article_ids: list[int]) -> list[dict]:
+    """Fetch note rows (both kinds -- article-level has `highlight_id IS
+    NULL`, highlight-anchored does not) for the filtered articles, plus the
+    owning article's `uid`."""
+    if not article_ids:
+        return []
+
+    placeholders = ",".join("?" * len(article_ids))
+    rows = conn.execute(
+        f"""SELECT n.*, a.uid AS article_uid
+            FROM notes n
+            JOIN articles a ON n.article_id = a.id
+            WHERE n.article_id IN ({placeholders})
+            ORDER BY n.article_id, n.id""",
+        article_ids,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _get_audio_metadata(conn, article_ids: list[int]) -> list[dict]:
     """Fetch audio metadata for the filtered articles, excluding file_path."""
     if not article_ids:
@@ -326,7 +388,9 @@ This bundle was exported from [Tiro](https://github.com/esagduyu/tiro), a local-
 
 - **articles/**: {article_count} markdown files with YAML frontmatter (title, author, tags, entities, summary, etc.)
 - **wiki/**: LLM-maintained synthesis pages (Phase 1b), present only if the library has any
-- **metadata.json**: Full structured data including articles, sources, tags, entities, ratings, article relations, digests, reading stats, and audio metadata
+- **annotations/**: `{{stem}}.jsonl` highlight sidecars (Phase 2 M2.1), one per article that has highlights, scoped to exported articles only
+- **notes/**: `{{stem}}.md` article-level note sidecars (Phase 2 M2.1), one per article that has a note, scoped to exported articles only
+- **metadata.json**: Full structured data including articles, sources, tags, entities, ratings, article relations, digests, reading stats, audio metadata, highlights, and notes
 - **README.md**: This file
 
 ## Markdown File Format
@@ -368,11 +432,13 @@ reading_time: 10 min
   "article_entities": [ {{ "article_id": 1, "entity_id": 1 }} ],
   "digests": [ {{ "date": "2026-07-01", "digest_type": "ranked", "content": "## ...", "article_ids": "[1,2]", "created_at": "..." }} ],
   "reading_stats": [ {{ "date": "2026-07-01", "articles_saved": 3, "articles_read": 1, "articles_rated": 0, "total_reading_time_min": 12 }} ],
-  "audio": [ {{ "article_id": 1, "voice": "nova", "model": "tts-1", "duration_seconds": 180.5, "file_size_bytes": 204800, "generated_at": "..." }} ]
+  "audio": [ {{ "article_id": 1, "voice": "nova", "model": "tts-1", "duration_seconds": 180.5, "file_size_bytes": 204800, "generated_at": "..." }} ],
+  "highlights": [ {{ "id": 1, "uid": "...", "article_id": 1, "article_uid": "...", "quote_text": "...", "color": "yellow", "text_position_start": 0, "text_position_end": 11, ... }} ],
+  "notes": [ {{ "id": 1, "uid": "...", "article_id": 1, "article_uid": "...", "highlight_id": null, "body_markdown": "...", ... }} ]
 }}
 ```
 
-Note: `ingenuity_analysis` is not a separate top-level key — it rides along inside each article record in `articles[*].ingenuity_analysis` (JSON string or null). `digests` and `reading_stats` are whole-library (not scoped to the export's article filters); `audio` is scoped to the filtered articles and deliberately omits the internal `file_path`.
+Note: `ingenuity_analysis` is not a separate top-level key — it rides along inside each article record in `articles[*].ingenuity_analysis` (JSON string or null). `digests` and `reading_stats` are whole-library (not scoped to the export's article filters); `audio`/`highlights`/`notes` are scoped to the filtered articles. `audio` deliberately omits the internal `file_path`. `highlights`/`notes` are the derived-table fallback for an importer that can't read the `annotations/`/`notes/` sidecar files directly (see those directories above) — a `notes` row with `highlight_id` set is a highlight-anchored note, `highlight_id: null` is the one article-level note.
 
 ## Re-importing
 

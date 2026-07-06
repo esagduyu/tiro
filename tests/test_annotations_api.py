@@ -278,6 +278,29 @@ def test_patch_highlight_unknown_uid_404(authenticated_client):
     assert r.status_code == 404
 
 
+def test_patch_highlight_orphaned_article_404s_not_500(authenticated_client, configured_library):
+    """Defense-in-depth (Task 4 review item): delete_article's cascade makes
+    a highlight outliving its article impossible going forward, but
+    _get_highlight_or_404 must still 404 cleanly -- not 500 -- if the
+    article row is ever missing. Hand-crafted here (FK checks disabled) to
+    simulate the impossible-by-construction state."""
+    config = configured_library
+    article_id, _ = _seed_article(config)
+    _write_markdown(config, "article-1")
+    uid = _create_highlight(authenticated_client, article_id)
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DELETE FROM articles WHERE id = ?", (article_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = authenticated_client.patch(f"/api/highlights/{uid}", json={"color": "blue"})
+    assert r.status_code == 404
+
+
 # --- DELETE /api/highlights/{uid} --------------------------------------------
 
 

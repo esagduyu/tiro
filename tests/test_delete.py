@@ -239,3 +239,98 @@ def test_delete_endpoint_404(authenticated_client):
 
 def test_delete_endpoint_requires_auth(auth_client):
     assert auth_client.delete("/api/articles/1").status_code == 401
+
+
+# --- Highlights + notes cascade (Phase 2 M2.1 Task 4) ------------------------
+
+
+def test_delete_removes_highlight_and_note_rows_and_sidecars(authenticated_client, configured_library):
+    """delete_article must clean notes rows (both kinds), highlights rows,
+    and BOTH sidecar files -- computed from markdown_path before the article
+    row disappears."""
+    from tiro.annotations import annotations_dir, notes_dir
+
+    config = configured_library
+    article_id = _ingest_one(authenticated_client)
+
+    r = authenticated_client.post(
+        f"/api/articles/{article_id}/highlights",
+        json={"position_start": 0, "position_end": 5},
+    )
+    assert r.status_code == 200, r.text
+    uid = r.json()["data"]["uid"]
+    r2 = authenticated_client.patch(f"/api/highlights/{uid}", json={"note_markdown": "hl note"})
+    assert r2.status_code == 200, r2.text
+    r3 = authenticated_client.put(
+        f"/api/articles/{article_id}/note", json={"body_markdown": "article note"}
+    )
+    assert r3.status_code == 200, r3.text
+
+    conn = get_connection(config.db_path)
+    try:
+        stem = conn.execute(
+            "SELECT markdown_path FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()["markdown_path"].rsplit(".", 1)[0]
+    finally:
+        conn.close()
+
+    ann_file = annotations_dir(config) / f"{stem}.jsonl"
+    note_file = notes_dir(config) / f"{stem}.md"
+    assert ann_file.exists()
+    assert note_file.exists()
+
+    from tiro.lifecycle import delete_article
+
+    assert delete_article(config, article_id) is True
+
+    assert not ann_file.exists()
+    assert not note_file.exists()
+
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM highlights WHERE article_id = ?", (article_id,)
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM notes WHERE article_id = ?", (article_id,)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_delete_source_cascade_cleans_annotation_sidecars(authenticated_client, configured_library):
+    """Source delete loops delete_article per article -- highlight/note
+    sidecars for every one of the source's articles must be cleaned too."""
+    from tiro.annotations import annotations_dir
+
+    config = configured_library
+    article_id = _ingest_one(authenticated_client)
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT source_id, markdown_path FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        source_id = row["source_id"]
+        stem = row["markdown_path"].rsplit(".", 1)[0]
+    finally:
+        conn.close()
+
+    r = authenticated_client.post(
+        f"/api/articles/{article_id}/highlights",
+        json={"position_start": 0, "position_end": 5},
+    )
+    assert r.status_code == 200, r.text
+
+    ann_file = annotations_dir(config) / f"{stem}.jsonl"
+    assert ann_file.exists()
+
+    r2 = authenticated_client.delete(f"/api/sources/{source_id}")
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["data"]["deleted_articles"] == 1
+
+    assert not ann_file.exists()
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute("SELECT 1 FROM highlights").fetchone() is None
+    finally:
+        conn.close()

@@ -29,7 +29,7 @@ Storage Layer (all local)
   └── config.yaml (user configuration)
 ```
 
-**MCP server:** `tiro/mcp/server.py` exposes the library to Claude Desktop and Claude Code via 10 tools (see below). Client config needs `TIRO_API_TOKEN` (when a password is set) and `TIRO_CONFIG` (absolute config path) in its env block.
+**MCP server:** `tiro/mcp/server.py` exposes the library to Claude Desktop and Claude Code via 11 tools (see below). Client config needs `TIRO_API_TOKEN` (when a password is set) and `TIRO_CONFIG` (absolute config path) in its env block.
 
 ## Tech Stack
 

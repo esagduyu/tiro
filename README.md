@@ -221,7 +221,7 @@ FastAPI Backend
   ├── TTS Engine (OpenAI TTS streaming + speechSynthesis fallback)
   ├── Query Layer (ChromaDB semantic search + SQLite metadata)
   ├── Knowledge Graph (d3.js force-directed visualization)
-  └── MCP Server (10 tools for Claude integration)
+  └── MCP Server (11 tools for Claude integration)
   ↕
 Storage Layer (all local)
   ├── articles/*.md      (markdown files with YAML frontmatter)
@@ -304,6 +304,7 @@ Once you've set a password (see [Security & your data](#security--your-data)), t
 | `list_filters()` | Available filter facets with counts (tiers, sources, tags, ratings) |
 | `list_wiki_pages()` | List AI-generated wiki pages (entities/concepts), with slug, status, and source count |
 | `get_wiki_page(slug)` | Full content of a wiki page by slug |
+| `get_highlights(article_id, color, limit)` | List saved highlights (with any anchored note), optionally filtered by article or color |
 | `save_url(url)` | Save a web page to your library |
 | `save_email(file_path)` | Save an .eml newsletter to your library |
 

@@ -137,13 +137,21 @@ def _get_highlight_or_404(conn, uid: str):
     """Fetch a highlight row plus its owning article row by highlight uid.
     `highlights.uid` is UNIQUE (migration 009), so this lookup unambiguously
     resolves the one article/stem a given uid belongs to -- cross-article
-    isolation falls out of this rather than needing separate enforcement."""
+    isolation falls out of this rather than needing separate enforcement.
+
+    Defense-in-depth: `delete_article()`'s cascade (Phase 2 M2.1 Task 4)
+    makes a highlight outliving its article impossible going forward, but a
+    missing article row must still 404 cleanly here rather than crash on
+    `article["uid"]` a few lines down in the caller (graceful error handling
+    everywhere, per CLAUDE.md)."""
     row = conn.execute("SELECT * FROM highlights WHERE uid = ?", (uid,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Highlight not found")
     article = conn.execute(
         "SELECT id, uid, markdown_path FROM articles WHERE id = ?", (row["article_id"],)
     ).fetchone()
+    if article is None:
+        raise HTTPException(status_code=404, detail="Highlight not found")
     return row, article
 
 

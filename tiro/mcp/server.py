@@ -530,6 +530,51 @@ def get_wiki_page(slug: str) -> str:
 
 
 @mcp.tool()
+def get_highlights(article_id: int | None = None, color: str | None = None, limit: int = 50) -> str:
+    """List saved highlights (with any anchored note), newest first. Pass article_id to see highlights on one specific article, or color (yellow/green/blue/pink) to filter by highlight color. Leave both blank to review recent highlights across the whole library."""
+    config = _get_config()
+    conn = get_connection(config.db_path)
+    try:
+        clauses = []
+        params: list = []
+        if article_id is not None:
+            clauses.append("h.article_id = ?")
+            params.append(article_id)
+        if color is not None:
+            clauses.append("h.color = ?")
+            params.append(color)
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        rows = conn.execute(
+            f"""SELECT h.uid, h.quote_text, h.color, h.created_at,
+                       a.id AS article_id, a.title AS article_title,
+                       n.body_markdown AS note_markdown
+                FROM highlights h
+                JOIN articles a ON h.article_id = a.id
+                LEFT JOIN notes n ON n.highlight_id = h.id
+                {where_sql}
+                ORDER BY h.created_at DESC
+                LIMIT ?""",
+            [*params, limit],
+        ).fetchall()
+
+        if not rows:
+            return "No highlights found."
+
+        lines = [f"## Highlights ({len(rows)})\n"]
+        for r in rows:
+            note = f"\n  Note: {r['note_markdown']}" if r["note_markdown"] else ""
+            lines.append(
+                f'- "{r["quote_text"]}" [{r["color"]}] -- **{r["article_title"]}** '
+                f"(article ID: {r['article_id']})\n"
+                f"  Highlighted: {r['created_at']}{note}\n"
+            )
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 async def save_url(url: str) -> str:
     """Save a web page to the Tiro reading library by URL. Fetches the page, extracts content, generates tags/summary with AI, and stores it."""
     config = _get_config()

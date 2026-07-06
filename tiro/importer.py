@@ -7,6 +7,22 @@ are not imported (regenerable caches, this-library activity, or fileless).
 No stats increments, no AI calls; imported articles get
 vector_status='pending' and the retry loop embeds them.
 
+Highlights + notes sidecars (Phase 2 M2.1 Task 4) ARE imported, per-article,
+keyed by each highlight's `uid` -- unlike the rest of this module, which is
+SQL-only, sidecar merging writes FILES directly (files-win, same convention
+as `tiro/api/routes_annotations.py`'s CRUD writes and `tiro/wiki.py`'s
+reconcile). `conflicts` governs the merge the same way it governs the
+article row: "skip" keeps every existing local sidecar line untouched and
+only appends bundle lines whose uid isn't already present locally;
+"overwrite" replaces both of the local article's sidecar files wholesale
+with the bundle's; "keep-both" copies the bundle's lines under the new
+duplicate article's own fresh stem, minting fresh uids so they can never
+collide with the uids the ORIGINAL local article's own highlights already
+use. A bundle article with neither sidecar file (and no `highlights`/`notes`
+metadata rows for it either) is a no-op. After every article in the run has
+been processed, `reconcile_annotations()` runs ONCE to rebuild the derived
+`highlights`/`notes` SQLite rows from whatever ended up on disk.
+
 Bundles CARRY a `wiki/` directory (Phase 1b) when the source library has
 synthesis pages, but this module does NOT import it -- `wiki/` page files
 are silently ignored the same way digests/reading_stats are. Wiki page
@@ -34,6 +50,16 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
+from tiro.annotations import (
+    annotations_dir,
+    delete_note,
+    read_annotations,
+    read_note,
+    reconcile_annotations,
+    sidecar_stem,
+    write_annotations,
+    write_note,
+)
 from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -83,6 +109,22 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
             for row in meta.get("article_entities", []):
                 entities_for_article.setdefault(row["article_id"], []).append(row["entity_id"])
 
+            # Highlights/notes metadata fallback (used only when the bundle
+            # article has no annotations/notes sidecar FILE -- see
+            # _bundle_sidecar_lines): bundle article_id -> its highlight
+            # rows, bundle highlight id -> its anchored note body, bundle
+            # article_id -> its one article-level note body.
+            highlights_by_article: dict[int, list[dict]] = {}
+            for h in meta.get("highlights", []):
+                highlights_by_article.setdefault(h["article_id"], []).append(h)
+            notes_by_highlight_id: dict[int, str] = {}
+            article_notes_by_article: dict[int, str] = {}
+            for n in meta.get("notes", []):
+                if n.get("highlight_id") is not None:
+                    notes_by_highlight_id[n["highlight_id"]] = n.get("body_markdown")
+                else:
+                    article_notes_by_article[n["article_id"]] = n.get("body_markdown")
+
             for art in meta.get("articles", []):
                 bundle_article_id = art["id"]
                 arcname = f"articles/{Path(art['markdown_path']).name}"
@@ -101,11 +143,28 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                 if existing is not None:
                     if conflicts == "skip":
                         counts["skipped"] += 1
+                        # Article row itself is left untouched, but sidecars
+                        # still merge additively (brief: "skip = keep
+                        # existing lines, add new-uid lines") -- a skipped
+                        # article isn't the same thing as a skipped
+                        # highlight/note.
+                        _merge_bundle_sidecars(
+                            conn, config, zf, zip_names, art,
+                            highlights_by_article, notes_by_highlight_id,
+                            article_notes_by_article,
+                            local_article_id=existing["id"],
+                            local_uid=existing["uid"],
+                            local_stem=sidecar_stem(existing),
+                            mode="skip",
+                        )
                         continue
                     elif conflicts == "overwrite":
                         _overwrite_article(conn, config, existing, art, body_md)
                         counts["overwritten"] += 1
                         local_article_id = existing["id"]
+                        local_uid = existing["uid"]
+                        local_stem = sidecar_stem(existing)  # overwrite keeps slug/markdown_path
+                        sidecar_mode = "overwrite"
                         # Overwrite means the bundle's state wins: clear
                         # existing junction links so locally-added tags/
                         # entities not present in the bundle don't survive.
@@ -123,6 +182,7 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                         )
                         link_article_author(conn, local_article_id, art.get("author"))
                         counts["kept_both"] += 1
+                        sidecar_mode = "keep_both"
                 else:
                     src = _bundle_source_for(sources_by_id, art, source_name)
                     source_id = _ensure_source(conn, src)
@@ -131,6 +191,22 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                     )
                     link_article_author(conn, local_article_id, art.get("author"))
                     counts["imported"] += 1
+                    sidecar_mode = "fresh"
+
+                if sidecar_mode in ("fresh", "keep_both"):
+                    local_row = conn.execute(
+                        "SELECT uid, markdown_path FROM articles WHERE id = ?",
+                        (local_article_id,),
+                    ).fetchone()
+                    local_uid = local_row["uid"]
+                    local_stem = sidecar_stem(local_row)
+
+                _merge_bundle_sidecars(
+                    conn, config, zf, zip_names, art,
+                    highlights_by_article, notes_by_highlight_id, article_notes_by_article,
+                    local_article_id=local_article_id, local_uid=local_uid,
+                    local_stem=local_stem, mode=sidecar_mode,
+                )
 
                 # Rebuild junctions from the bundle for this article.
                 for tag_id in tags_for_article.get(bundle_article_id, []):
@@ -172,6 +248,12 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
         conn.commit()
     finally:
         conn.close()
+
+    # Sidecar files were written directly per-article above (files-win, see
+    # module docstring); now that every article row this run needs exists
+    # and is committed, rebuild the derived highlights/notes SQLite rows in
+    # one pass from whatever ended up on disk.
+    reconcile_annotations(config)
 
     return counts
 
@@ -360,3 +442,217 @@ def _insert_article(
     )
     (config.articles_dir / markdown_path).write_text(body_md)
     return cur.lastrowid
+
+
+# --- Highlights + notes sidecar merge (Phase 2 M2.1 Task 4) ------------------
+
+
+def _bundle_sidecar_lines(
+    zf: zipfile.ZipFile,
+    zip_names: set,
+    bundle_stem: str,
+    bundle_article_id: int,
+    highlights_by_article: dict[int, list[dict]],
+    notes_by_highlight_id: dict[int, str],
+    article_notes_by_article: dict[int, str],
+) -> tuple[list[dict], str | None]:
+    """Return `(lines, article_note_body)` for one bundle article, reading
+    the bundle's own `annotations/<stem>.jsonl` / `notes/<stem>.md` sidecars
+    when present, falling back to the `highlights`/`notes` metadata.json
+    arrays otherwise (older bundles, or a hand-edited bundle missing the
+    sidecar directories, have neither -- that's fine, both come back empty).
+    Malformed JSONL lines are skipped, never raised, mirroring
+    `tiro.annotations._parse_jsonl_lines`."""
+    ann_name = f"annotations/{bundle_stem}.jsonl"
+    lines: list[dict] = []
+    if ann_name in zip_names:
+        for raw in zf.read(ann_name).decode("utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and obj.get("uid"):
+                lines.append(obj)
+    else:
+        for h in highlights_by_article.get(bundle_article_id, []):
+            lines.append({
+                "uid": h.get("uid"),
+                "article_uid": h.get("article_uid"),
+                "quote": h.get("quote_text"),
+                "prefix": h.get("prefix_context"),
+                "suffix": h.get("suffix_context"),
+                "position_start": h.get("text_position_start"),
+                "position_end": h.get("text_position_end"),
+                "content_hash": h.get("content_hash"),
+                "color": h.get("color"),
+                "note_markdown": notes_by_highlight_id.get(h.get("id")),
+                "created_at": h.get("created_at"),
+                "updated_at": h.get("updated_at"),
+            })
+
+    note_name = f"notes/{bundle_stem}.md"
+    if note_name in zip_names:
+        article_note = zf.read(note_name).decode("utf-8")
+    else:
+        article_note = article_notes_by_article.get(bundle_article_id)
+
+    return lines, article_note
+
+
+def _dedupe_uid(conn: sqlite3.Connection, uid: str | None, *, exclude_article_id: int) -> str:
+    """If `uid` already belongs to a highlight on a DIFFERENT local article,
+    mint a fresh one -- keeps `highlights.uid`'s global UNIQUE constraint
+    safe when copying lines in from a bundle. A uid that belongs to the
+    article being merged INTO is the same identity, not a real collision."""
+    if not uid:
+        return new_ulid()
+    row = conn.execute("SELECT article_id FROM highlights WHERE uid = ?", (uid,)).fetchone()
+    if row is None or row["article_id"] == exclude_article_id:
+        return uid
+    return new_ulid()
+
+
+def _write_fresh_sidecars(
+    config: TiroConfig,
+    conn: sqlite3.Connection,
+    *,
+    local_stem: str,
+    local_uid: str,
+    lines: list[dict],
+    note_body: str | None,
+    mint_fresh_uids: bool,
+    exclude_article_id: int,
+) -> None:
+    """No pre-existing local sidecar to merge against -- used for a plain
+    new import (`mint_fresh_uids=False`, dedupe only guards against a freak
+    cross-library uid collision) and for a keep-both copy
+    (`mint_fresh_uids=True`, since the ORIGINAL conflicting local article
+    may already use these exact uids under its own stem)."""
+    if lines:
+        out_lines = []
+        for line in lines:
+            uid = (
+                new_ulid()
+                if mint_fresh_uids
+                else _dedupe_uid(conn, line.get("uid"), exclude_article_id=exclude_article_id)
+            )
+            out_lines.append({**line, "uid": uid, "article_uid": local_uid})
+        write_annotations(config, local_stem, out_lines)
+    if note_body:
+        write_note(config, local_stem, note_body)
+
+
+def _merge_skip_sidecars(
+    config: TiroConfig,
+    conn: sqlite3.Connection,
+    *,
+    local_stem: str,
+    local_uid: str,
+    lines: list[dict],
+    note_body: str | None,
+    exclude_article_id: int,
+) -> None:
+    """conflicts="skip": the article row is untouched, and existing local
+    sidecar lines/note win outright -- only bundle lines whose uid isn't
+    already present locally get appended; an existing local note is never
+    replaced by the bundle's."""
+    existing_lines = read_annotations(config, local_stem)
+    existing_uids = {ln.get("uid") for ln in existing_lines}
+    changed = False
+    for line in lines:
+        if line.get("uid") in existing_uids:
+            continue
+        uid = _dedupe_uid(conn, line.get("uid"), exclude_article_id=exclude_article_id)
+        existing_lines.append({**line, "uid": uid, "article_uid": local_uid})
+        changed = True
+    if changed:
+        write_annotations(config, local_stem, existing_lines)
+
+    if note_body and read_note(config, local_stem) is None:
+        write_note(config, local_stem, note_body)
+
+
+def _merge_overwrite_sidecars(
+    config: TiroConfig,
+    conn: sqlite3.Connection,
+    *,
+    local_stem: str,
+    local_uid: str,
+    lines: list[dict],
+    note_body: str | None,
+    exclude_article_id: int,
+) -> None:
+    """conflicts="overwrite": the bundle's state wins outright, same
+    posture as the tags/entities junction rebuild above -- both sidecar
+    files are replaced wholesale (an absent bundle sidecar means the local
+    one is removed, not left stale)."""
+    if lines:
+        out_lines = []
+        for line in lines:
+            uid = _dedupe_uid(conn, line.get("uid"), exclude_article_id=exclude_article_id)
+            out_lines.append({**line, "uid": uid, "article_uid": local_uid})
+        write_annotations(config, local_stem, out_lines)
+    else:
+        (annotations_dir(config) / f"{local_stem}.jsonl").unlink(missing_ok=True)
+
+    if note_body:
+        write_note(config, local_stem, note_body)
+    else:
+        delete_note(config, local_stem)
+
+
+def _merge_bundle_sidecars(
+    conn: sqlite3.Connection,
+    config: TiroConfig,
+    zf: zipfile.ZipFile,
+    zip_names: set,
+    art: dict,
+    highlights_by_article: dict[int, list[dict]],
+    notes_by_highlight_id: dict[int, str],
+    article_notes_by_article: dict[int, str],
+    *,
+    local_article_id: int,
+    local_uid: str,
+    local_stem: str,
+    mode: str,
+) -> None:
+    """Dispatch to the merge strategy matching `mode` ("fresh" -- a plain
+    new import, "keep_both", "skip", or "overwrite" -- mirroring the
+    `conflicts` modes 1:1 except "fresh", which has no article-row conflict
+    to resolve in the first place). No-ops entirely when the bundle article
+    has neither a sidecar file nor metadata fallback rows."""
+    bundle_stem = Path(art["markdown_path"]).stem
+    lines, note_body = _bundle_sidecar_lines(
+        zf, zip_names, bundle_stem, art["id"],
+        highlights_by_article, notes_by_highlight_id, article_notes_by_article,
+    )
+    if not lines and note_body is None:
+        return
+
+    if mode == "fresh":
+        _write_fresh_sidecars(
+            config, conn, local_stem=local_stem, local_uid=local_uid,
+            lines=lines, note_body=note_body, mint_fresh_uids=False,
+            exclude_article_id=local_article_id,
+        )
+    elif mode == "keep_both":
+        _write_fresh_sidecars(
+            config, conn, local_stem=local_stem, local_uid=local_uid,
+            lines=lines, note_body=note_body, mint_fresh_uids=True,
+            exclude_article_id=local_article_id,
+        )
+    elif mode == "skip":
+        _merge_skip_sidecars(
+            config, conn, local_stem=local_stem, local_uid=local_uid,
+            lines=lines, note_body=note_body, exclude_article_id=local_article_id,
+        )
+    elif mode == "overwrite":
+        _merge_overwrite_sidecars(
+            config, conn, local_stem=local_stem, local_uid=local_uid,
+            lines=lines, note_body=note_body, exclude_article_id=local_article_id,
+        )
+    else:
+        raise ValueError(f"unknown sidecar merge mode {mode!r}")
