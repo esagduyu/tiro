@@ -1,0 +1,219 @@
+# Changelog
+
+All notable changes to Tiro are documented here, grouped by release and domain.
+Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versions
+follow the roadmap's release targets (see PRODUCT_ROADMAP.md). Dates are the
+day the release was tagged.
+
+## [Unreleased]
+
+- Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
+  decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
+
+## [0.5.0] — 2026-07-06 · `private-remote-beta` (Phase 3)
+
+Read your library from a phone without giving up local ownership.
+
+### Added — remote access & auth
+- **QR one-time login**: `/setup/qr` renders a QR code (segno, inline SVG)
+  encoding a single-use, sha256-hashed, 15-minute token; scanning it on a
+  phone creates a normal session (`GET /login/qr`, deliberate auth-allowlist
+  entry). Tokens are never usable as API bearer tokens or session cookies;
+  expired/used tokens are purged by `tiro doctor`.
+- **Snooze**: `articles.snoozed_until` (migration 011) with
+  `PATCH /api/articles/{id}/snooze` (`until` / presets
+  tonight·tomorrow·weekend·next_week / `null` to wake). Snoozed articles are
+  hidden from the inbox only — digests, classification, decay, export, stats,
+  and MCP still see them. Inbox gains a Snoozed toggle, wake-time chips, and
+  a "Wake now" action.
+- **mDNS discovery** (opt-in, `mdns_enabled`): advertises `{hostname}.local`
+  on the LAN via python-zeroconf; the advertised name is dynamically added to
+  the Host allowlist. `tiro status` reports mDNS + remote URL.
+- **TLS flags**: `tiro run --cert/--key` (both entry points) pass through to
+  uvicorn; validation errors surface before startup.
+- **LAN-HTTP warning banner**: dismissable, shown on every page when bound to
+  a non-loopback host without TLS; startup logs the auth URL + guidance.
+- **Reverse-proxy support**: `extra_allowed_hosts` (exact-match) and
+  `trust_proxy_headers` (X-Forwarded-Proto only; X-Forwarded-Host is never
+  trusted) — both default off, set by the wizard or manually.
+
+### Added — PWA & offline
+- **Installable PWA**: `manifest.webmanifest` + generated 192/512 icons,
+  install tags on every page including login.
+- **Service worker** (`/sw.js`, version-injected from `STATIC_VERSION`):
+  cache-first for static assets, network-first with LRU-50 cache fallback for
+  article JSON, `/offline` fallback page listing cached articles (rendered
+  through the same marked→DOMPurify pipeline). Never caches authenticated
+  HTML, mutations, or auth routes. Every `STATIC_VERSION` bump invalidates
+  all SW caches.
+- **Offline save queue**: failed saves (network errors only) queue in
+  localStorage (cap 20) and drain on reconnect with per-item toasts; poison
+  entries are dropped, never retried forever.
+- **Add-to-Home-Screen hint**: one-time, mobile-viewport-only.
+- **`/setup/remote` wizard**: detects Tailscale (`tailscale status --json`,
+  never executes privileged commands), shows the tailored
+  `tailscale serve` command, saves `remote_url` (optionally allowlisting its
+  hostname live, no restart), and offers a reachability probe.
+
+### Added — triage UX
+- **Swipe triage** (pointer events, no gesture library): swipe right =
+  archive (mark read), swipe left = snooze preset sheet; direction-locked so
+  vertical scrolling is never hijacked; flick support;
+  `prefers-reduced-motion` respected.
+- **Undo everywhere**: semantic single-slot undo (5s toast + `u` key) for
+  swipe archive/snooze and keyboard rate/VIP — restores real server state
+  (unread, prior rating, unsnooze). Guarded by per-article sequence tokens
+  against out-of-order responses. Deletion keeps its confirm dialog.
+- **Triage progress**: "N to zero" pill live-updating across actions and
+  undos (single count source shared with the sidebar badge), plus an
+  inbox-zero state.
+
+### Changed
+- `PATCH /api/articles/{id}/read` accepts an optional `{"is_read": false}`
+  body and `PATCH /api/articles/{id}/rate` accepts `{"rating": null}` —
+  both backward-compatible; unmark paths never decrement reading stats.
+- Logout best-effort clears the service worker's article caches.
+- `snoozed_until` is returned by article list, detail, and search payloads.
+
+### Fixed
+- zeroconf registration deadlocked FastAPI's event loop (~21s frozen startup,
+  registration never succeeded) — fixed two-layer (`use_asyncio=False` +
+  `asyncio.to_thread`), live-verified.
+- The mDNS-advertised hostname was rejected by our own Host allowlist,
+  making discovery self-defeating — the registered name is now allowlisted
+  dynamically.
+- Undo could restore fabricated state for articles surfaced by search but
+  absent from the inbox cache; such actions now skip the undo offer.
+- Rapid consecutive ratings could corrupt the undo restore target; a stale
+  late-arriving response could clobber newer state (fixed via optimistic
+  capture + per-article sequence tokens).
+- Snoozed-timestamp parsing broke on Safari (space-separated datetimes).
+- Archiving/deleting a snoozed-unread article drifted the unread count.
+- `tiro doctor --fix` cache-write failures and misc. hardening (no-store
+  headers on QR pages, hostless remote URLs rejected).
+
+## [0.4.0] — 2026-07-06 · `reader-memory-beta` (Phase 2)
+
+Make Tiro a place to think: highlights, notes, and the signals they need.
+
+### Added — annotations (M2.1 backend, M2.2 UI)
+- **Highlights & notes with files as truth**: `annotations/{stem}.jsonl` +
+  `notes/{stem}.md` sidecars are authoritative; SQLite (`highlights`,
+  `notes`, migration 009) is a derived index reconciled files-win at startup
+  and by `tiro doctor` (with a mass-deletion guard that refuses to wipe rows
+  when sidecars go missing wholesale).
+- **W3C-style anchor model** (`tiro/anchors.py`): prefix/quote/suffix +
+  offsets + content hash in markdown space; reconciliation statuses
+  exact / shifted / hash_mismatch / missing with context-first matching.
+- **Reader annotation UI**: select text → 4-color highlight / note / copy.
+  Painting uses the CSS Custom Highlight API (the rendered DOM is never
+  mutated). Margin panel with per-highlight notes (markdown, live preview),
+  color swap, delete, re-anchor warnings; article-level note drawer.
+  Unanchorable selections fail soft.
+- **`/highlights` review view**: server-side filters (color/source/date),
+  grouped by article, keyboard `h`.
+- **Sidecar-first CRUD API** (`/api/articles/{id}/annotations`,
+  `/api/highlights`, note endpoints) — file writes precede index writes.
+- Export/backup/import round-trip annotations; `delete_article` cleans them;
+  MCP gains `get_highlights` (11th tool).
+
+### Added — telemetry, Obsidian, digest (M2.3)
+- **Reading telemetry** (opt-in, default off, strictly local): per-session
+  scroll depth, active seconds, per-section dwell → `reading_sessions`
+  (migration 010) via a sendBeacon endpoint that no-ops server-side when
+  disabled. Deliberately excluded from exports, and scrubbed from backup
+  snapshots. Settings toggle with plain-language copy.
+- **Obsidian-compatible write mode** (`obsidian_compatible_mode`): new
+  ingests gain `aliases`, `created`, and `related` wikilink frontmatter;
+  flag-off output is byte-identical (golden-tested).
+- **Digest highlight recap**: a "Highlights this week" section (ranked
+  digest variant) from the last 7 days of highlights + notes; zero
+  highlights = zero LLM calls.
+
+### Added — frontend platform (M2.0)
+- Native **ES modules** restructuring: shared `js/core.js`
+  (esc/renderMarkdown/toasts/fetch), per-page entry modules, old top-level
+  JS deleted; base.html import map keeps imported modules cache-busted.
+- **node:test harness** for pure frontend functions (CI-enforced).
+
+### Changed
+- `delete_article` now coordinates seven stores (rows, junctions, ChromaDB,
+  markdown, audio, annotation sidecars, reading sessions).
+- The `tiro` CLI honors `TIRO_CONFIG` like `run.py`/`tiro-mcp` (footgun fix).
+- Agent-CLI AI backends (claude-cli/codex-cli) scrub inherited
+  `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the child environment so
+  subscription auth is actually used.
+
+### Fixed
+- Deleting any article cited by a wiki page crashed on a foreign key (M2.1
+  final review); annotation reconcile crashed on corrupt/duplicate JSONL
+  lines — both now heal gracefully.
+- ES-module double-instantiation via versioned script tags (duplicate save
+  handler → duplicate articles) — fixed with the import map.
+- Anchor reconciliation preferred stale offsets over context matches;
+  markdown projection corrupted offsets around snake_case/math asterisks
+  (flanking guards added).
+- Escape while the selection toolbar was open navigated away from the
+  reader; highlight-filter clicks during in-flight fetches were dropped
+  (latest-wins tokens).
+- Backup snapshots leaked telemetry rows despite the local-only promise
+  (now scrubbed, restore-tested).
+
+## [0.3.5] — 2026-07-05 · `wiki-alpha` (Phase 1b)
+
+### Added
+- **Library Wiki (W1, on-demand)**: LLM-synthesized, citation-mandatory wiki
+  pages over entity/tag nodes (`{library}/wiki/**/*.md`, files as truth,
+  derived index reconciled by startup + doctor). Generation uses article
+  summaries + user-editable `_schema.md` + the page's own prior body — never
+  other wiki pages. Zero resolvable citations = generation discarded.
+  `/wiki` list + page views, graph integration, wikilinks resolved
+  client-side, `user_pinned_note` survives regeneration.
+
+## [0.3.0] — 2026-07-05 · `local-beta` (Phase 1)
+
+### Added — foundation (M1.0)
+- `llm_call()` chokepoint with capability tiers (heavy/light) and providers:
+  anthropic, openai-compatible, and opt-in experimental **claude-cli /
+  codex-cli subscription backends** (Roadmap Decision #7); fake backend for
+  tests; audit logging built into the chokepoint.
+- Versioned **schema migrations** (`PRAGMA user_version`, pre-migrate
+  backups), ULID `uid` columns on articles/entities/tags, background-task
+  **scheduler registry**, single-owner article-list SQL (`tiro/queries.py`),
+  prompts-as-data templates, `STATIC_VERSION` cache-busting, **GitHub
+  Actions CI** (ruff + pytest on 3.11/3.13).
+
+### Added — backup & portability (M1.1)
+- `tiro backup` / `tiro restore`: tar.zst snapshots with portable embeddings,
+  atomic writes, in-library-restore safety, auto-backup with retention,
+  snapshots API; export expanded (digests/stats/audio/OPML,
+  EXPORT_SCHEMA.md); `tiro import` with skip/overwrite/keep-both merging.
+
+### Added — sources, authors, views (M1.2)
+- Source delete (lifecycle-coordinated, auto-backup first), merge, rename;
+  author-level VIP (derived layer feeding decay + digest ranking); saved
+  inbox views (cap 20); `/sources` management UI; `TIRO_*` env config
+  overlay; build-it-yourself **Docker** support.
+
+## [0.2.0] — 2026-07-04 · `security-alpha` (Phase 0)
+
+### Added / Security
+- **Authentication required everywhere**: bcrypt password, session cookies,
+  API tokens (`tiro set-password`, `tiro token …`); route-walk test enforces
+  the allowlist as an invariant; MCP gated by `TIRO_API_TOKEN`.
+- Host-header validation, `Sec-Fetch-Site` CSRF checks, sanitization
+  invariant (nh3 at extraction, DOMPurify at render), vendored frontend
+  dependencies (no CDNs), no side-effectful GETs.
+- `delete_article()` lifecycle coordinator with staged ingestion rollback;
+  `tiro doctor [--fix]` four-store reconciliation; JSONL **audit log** for
+  every external API call with cost estimates (`tiro audit`); `/healthz`;
+  atomic comment-preserving config persistence (`persist_config`).
+
+## [0.1.x] — 2026-02 · hackathon build
+
+The original "Built with Opus 4.6" hackathon build (frozen at
+github.com/esagduyu/project-tiro): ingestion (web/email/IMAP), Haiku
+enrichment, Opus digests/analysis/classification, semantic search, related
+articles, knowledge graph, TTS, reading stats, export, Chrome extension,
+MCP server, keyboard-first UI, themes. Its full history is preserved in
+this repository's `main`.
