@@ -378,6 +378,21 @@ Full bundle format (metadata.json keys, markdown frontmatter, OPML semantics, id
 
 ---
 
+## Obsidian compatibility
+
+Tiro's articles are already plain markdown files with YAML frontmatter, so an [Obsidian](https://obsidian.md) vault can open them today. `obsidian_compatible_mode` (off by default in `config.yaml`) tweaks the frontmatter format on **newly ingested** articles to match Obsidian's conventions more closely:
+
+- `aliases: []` — Obsidian's standard (empty, user-fillable) alternate-titles field.
+- `created: <date>` — an ISO timestamp (from the article's published date, falling back to when it was saved).
+- `related: ["[[stem]]", ...]` — Tiro's auto-computed related articles, written as Obsidian `[[wikilinks]]` (by markdown filename stem) instead of `/articles/{id}` URLs, so they're clickable inside Obsidian's own graph and backlink views.
+- `tags:` was already a plain YAML list before this flag existed — nothing changes there.
+
+**Format-only, and existing articles are untouched.** Flipping the flag only changes how future ingests write frontmatter; it does not rewrite your library, and it does not require Obsidian to be installed — it just lays out files so Obsidian opens them cleanly if you want. There's no live sync yet: if Tiro recomputes an article's related articles later (e.g. after a fresh ingest, or `POST /api/recompute-relations`), older articles' `related:` frontmatter is **not** retroactively rewritten — only newly-written frontmatter reflects it. Full bidirectional sync (a background file watcher that reconciles edits made directly in Obsidian) is planned for a later phase (Phase 2b in `PRODUCT_ROADMAP.md`) and does not exist yet.
+
+To use Tiro and Obsidian together today, point `library_path` in `config.yaml` at a subdirectory of an existing Obsidian vault (e.g. `~/ObsidianVault/tiro/`) — **Tiro owns that subdirectory** (its SQLite database, ChromaDB vectors, and audio cache live there too, alongside the markdown), so don't point it at your vault root if you'd rather keep those out of Obsidian's way.
+
+---
+
 ## Keyboard Shortcuts
 
 ### Inbox

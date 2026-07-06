@@ -109,6 +109,9 @@ decay_threshold: 0.1
 # wiki-importance ranking (Decision #8); never leaves your machine
 # reading_telemetry_enabled: false
 
-# Obsidian-compatible write mode — format-only: writes notes/highlights in a
-# layout Obsidian can open directly
+# Obsidian-compatible write mode — format-only (bidirectional sync is a
+# later phase). When true, NEW articles' frontmatter gains Obsidian-standard
+# fields: aliases: [], created: <date>, and related: ["[[stem]]", ...]
+# wikilinks to related articles instead of /articles/{id} URLs. Existing
+# articles are untouched; tags are already a plain YAML list either way.
 # obsidian_compatible_mode: false

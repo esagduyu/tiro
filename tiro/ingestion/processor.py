@@ -56,6 +56,34 @@ def _get_or_create_source(conn, domain: str) -> int:
     return cursor.lastrowid
 
 
+def _related_wikilinks(conn, relations: list[dict]) -> list[str]:
+    """Build Obsidian `[[stem]]` wikilink strings for an article's related
+    articles, in relation order (most-similar first).
+
+    Stems follow the same convention as wiki citations (tiro/wiki_gen.py):
+    `markdown_path` with the trailing `.md` stripped. Relations whose
+    article row can't be found (shouldn't happen -- `find_related_articles`
+    already filters ChromaDB orphans) are silently skipped rather than
+    producing a dead wikilink.
+    """
+    if not relations:
+        return []
+    ids = [r["related_article_id"] for r in relations]
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, markdown_path FROM articles WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    path_by_id = {row["id"]: row["markdown_path"] for row in rows}
+    wikilinks = []
+    for rid in ids:
+        path = path_by_id.get(rid)
+        if not path:
+            continue
+        stem = path[:-3] if path.endswith(".md") else path
+        wikilinks.append(f"[[{stem}]]")
+    return wikilinks
+
+
 def _get_or_create_email_source(conn, sender_name: str, sender_email: str) -> int:
     """Find existing source by email sender or create a new one. Returns source_id."""
     row = conn.execute(
@@ -140,6 +168,18 @@ def process_article(
             "word_count": word_count,
             "reading_time": f"{reading_time_min} min",
         }
+        if config.obsidian_compatible_mode:
+            # Obsidian-vault compatibility (PRODUCT_ROADMAP.md Phase 2,
+            # format-only -- bidirectional sync is Phase 2b). `tags` above is
+            # already a plain YAML list, which is exactly the format Obsidian
+            # expects, so nothing to change there. `aliases`/`created` are
+            # Obsidian conventions with no existing Tiro equivalent, added
+            # here. `related` (wikilinks) is intentionally NOT set yet: it
+            # depends on relation computation, which runs later in this same
+            # function (after the ChromaDB add) -- see the targeted
+            # frontmatter rewrite right after store_relations() below.
+            post.metadata["aliases"] = []
+            post.metadata["created"] = pub_date.isoformat(timespec="seconds")
         md_path.write_text(frontmatter.dumps(post))
         logger.info("Saved markdown to %s", md_path)
 
@@ -291,6 +331,17 @@ def process_article(
                 if relations:
                     generate_connection_notes(summary or "", title, relations, config)
                     store_relations(article_id, relations, config)
+
+                if config.obsidian_compatible_mode:
+                    # Targeted frontmatter update, same ingest call, no
+                    # background rewriter: relations are only known at this
+                    # point (computed after the ChromaDB add, which is after
+                    # the two frontmatter writes above), so `related:` gets
+                    # its own best-effort write here. Non-fatal like the rest
+                    # of this block -- a failure here never unwinds a
+                    # successful ingest.
+                    post.metadata["related"] = _related_wikilinks(conn, relations)
+                    md_path.write_text(frontmatter.dumps(post))
             except Exception as e:
                 logger.error("Related articles failed for %d: %s", article_id, e)
         except Exception:

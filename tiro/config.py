@@ -76,7 +76,11 @@ class TiroConfig:
     # feeds the future wiki-importance ranking signal (Decision #8).
     reading_telemetry_enabled: bool = False
     # Obsidian-compatible write mode (Phase 2 M2.3): format-only toggle for
-    # how notes/highlights are written to disk.
+    # NEW-article frontmatter -- tags as a YAML list (already the format;
+    # unaffected by this flag), `aliases: []`, `created:` (ISO date), and
+    # `related:` as `[[stem]]` wikilinks instead of /articles/{id} URLs.
+    # Notes/highlights sidecars already key off the article slug regardless
+    # of this flag. Bidirectional sync is Phase 2b, not this flag.
     obsidian_compatible_mode: bool = False
     auth_password_hash: str | None = None
     config_path: str | None = None  # set by load_config; never persisted to YAML
