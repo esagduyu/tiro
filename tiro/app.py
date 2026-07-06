@@ -502,4 +502,8 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
             request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request.app.state.config)}
         )
 
+    @app.get("/highlights", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def highlights_page(request: Request):
+        return templates.TemplateResponse(request, "highlights.html", _theme_context(request.app.state.config))
+
     return app

@@ -1200,6 +1200,10 @@ function handleInboxKeydown(e) {
             e.preventDefault();
             window.location.href = "/graph";
             break;
+        case "h":
+            e.preventDefault();
+            window.location.href = "/highlights";
+            break;
         case "f":
             e.preventDefault();
             {

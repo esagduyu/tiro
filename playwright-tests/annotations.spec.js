@@ -288,4 +288,87 @@ test.describe('M2.2 reader annotation UI', () => {
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
+
+  // M2.2 Task 4: /highlights review view — renders a created highlight,
+  // server-side color filtering, and click-through back to the reader.
+  test('/highlights: shows created highlight, color filter narrows via server, click-through to reader', async ({ page }) => {
+    const consoleErrors = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+    await loginOrSetup(page);
+    await saveAndOpenTestArticle(page);
+
+    // Create a blue highlight (distinct from the yellow/green ones the
+    // earlier tests in this file create) so this test's filter assertions
+    // aren't confused by highlights left over from a prior run against the
+    // same scratch article.
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.getElementById('reader-body').dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true })
+      );
+    });
+    const toolbar = page.locator('#annotate-toolbar.open');
+    await expect(toolbar).toHaveCount(1, { timeout: 5000 });
+
+    const blueBtn = page.locator('.annotate-color-btn[data-color="blue"]');
+    const [createResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes('/highlights') && res.request().method() === 'POST'
+      ),
+      blueBtn.click(),
+    ]);
+    const created = await createResponse.json();
+    const uid = created.data.uid;
+    const articleId = page.url().match(/\/articles\/(\d+)/)[1];
+
+    // Navigate via the sidebar "Highlights" link (also exercises the nav
+    // wiring, not just the route directly).
+    await page.locator('a[href="/highlights"]').first().click();
+    await expect(page).toHaveURL(/\/highlights/);
+
+    const row = page.locator(`.hl-list-row[data-uid="${uid}"]`);
+    await expect(row).toBeVisible({ timeout: 10000 });
+    await expect(row.locator('.highlight-quote')).toContainText('This domain is for use in documentation examples');
+
+    // --- Color filter is server-side: assert the actual request params,
+    // not just the resulting DOM (a client-side-only filter would also
+    // pass a DOM-only check). ---
+    const [blueRes] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/highlights?') && res.url().includes('color=blue')),
+      page.locator('.hl-filter-chip[data-color="blue"]').click(),
+    ]);
+    expect(blueRes.status()).toBe(200);
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toBeVisible();
+
+    const [pinkRes] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/highlights?') && res.url().includes('color=pink')),
+      page.locator('.hl-filter-chip[data-color="pink"]').click(),
+    ]);
+    expect(pinkRes.status()).toBe(200);
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toHaveCount(0);
+
+    // Clearing filters brings it back.
+    const [clearRes] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/highlights?') && !res.url().includes('color=')),
+      page.locator('#highlights-filter-clear').click(),
+    ]);
+    expect(clearRes.status()).toBe(200);
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toBeVisible();
+
+    // --- Click-through lands in the reader ---
+    await page.locator(`.hl-list-row[data-uid="${uid}"]`).click();
+    await expect(page).toHaveURL(new RegExp(`/articles/${articleId}`));
+    await page.waitForSelector('#reader-body p', { timeout: 10000 });
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
 });

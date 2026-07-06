@@ -727,6 +727,10 @@ function setupReaderKeyboard(articleId) {
                 e.preventDefault();
                 window.location.href = "/graph";
                 break;
+            case "h":
+                e.preventDefault();
+                window.location.href = "/highlights";
+                break;
             case "?":
                 e.preventDefault();
                 showShortcuts("reader");
@@ -1103,9 +1107,29 @@ async function loadAnnotations(articleId) {
         // than issuing a second fetch.
         articleNoteState = json.data.note || null;
         renderHighlightsPanel();
+        consumeFlashHandoff();
     } catch (err) {
         console.error("Failed to load annotations:", err);
     }
+}
+
+/**
+ * M2.2 Task 4: /highlights review view hands off a click-through via
+ * `sessionStorage['tiro:flash-highlight']` (set to the highlight's uid,
+ * removed here so a later reload/navigation doesn't re-flash it). Reuses
+ * T3's `flashHighlightRange` verbatim — no new scroll/flash mechanism — so
+ * if the uid isn't a currently-painted Range (unanchored highlight, or a
+ * stale/foreign uid), it already no-ops gracefully.
+ */
+function consumeFlashHandoff() {
+    let uid;
+    try {
+        uid = sessionStorage.getItem("tiro:flash-highlight");
+        if (uid) sessionStorage.removeItem("tiro:flash-highlight");
+    } catch (err) {
+        return; // sessionStorage unavailable — nothing to consume
+    }
+    if (uid) flashHighlightRange(uid);
 }
 
 /**

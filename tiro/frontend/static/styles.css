@@ -3953,3 +3953,164 @@ main {
     font-size: 0.72rem;
     opacity: 0.7;
 }
+
+/* --- Highlights review view (/highlights) (M2.2 Task 4) ---
+   Rows/color-dots reuse the existing .highlight-row/.highlight-color-dot/
+   .highlight-quote classes (M2.2 Task 3, above) — only page-level chrome
+   (filter bar, article grouping, load-more) is new here. */
+
+.highlights-view {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.highlights-view-header h2 {
+    margin: 0 0 0.35rem;
+}
+
+.highlights-view-sub {
+    margin: 0 0 1.25rem;
+    color: var(--tiro-muted);
+    font-size: 0.85rem;
+}
+
+.highlights-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid var(--tiro-border);
+}
+
+.highlights-filter-colors {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.hl-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 14px;
+    background: none;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-family: inherit;
+    color: var(--tiro-fg-secondary);
+    transition: all 0.15s;
+}
+
+.hl-filter-chip:hover {
+    background: var(--tiro-bg-hover);
+}
+
+.hl-filter-chip.active {
+    background: var(--tiro-bg-surface);
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+    font-weight: 500;
+}
+
+.highlights-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.highlights-source-select {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 5px;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-fg);
+    font-size: 0.8rem;
+    font-family: inherit;
+}
+
+.highlights-date-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--tiro-muted);
+}
+
+.highlights-date-label input[type="date"] {
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 5px;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-fg);
+    font-size: 0.78rem;
+    font-family: inherit;
+}
+
+.highlights-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
+}
+
+.highlights-group-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.highlights-group-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--tiro-fg);
+}
+
+.highlights-group-title a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.highlights-group-title a:hover {
+    text-decoration: underline;
+}
+
+.highlights-group-source {
+    font-size: 0.78rem;
+    color: var(--tiro-muted);
+}
+
+.hl-list-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.hl-list-meta {
+    font-size: 0.72rem;
+    color: var(--tiro-muted);
+    margin-left: 1.35rem;
+}
+
+.hl-list-note {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    margin-left: 1.35rem;
+    font-size: 0.78rem;
+    color: var(--tiro-fg-secondary);
+}
+
+.hl-list-note-icon {
+    flex-shrink: 0;
+}
+
+.highlights-load-more-wrap {
+    display: flex;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
