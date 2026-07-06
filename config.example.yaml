@@ -22,6 +22,13 @@ port: 8000
 # (Phase 3 M3.1) or manually. Informational only today (shown by `tiro status`).
 # remote_url: "https://100.x.x.x:8000"
 
+# Reverse-proxy / remote-access hardening — set these when running behind
+# Tailscale Serve or another reverse proxy. extra_allowed_hosts joins the
+# Host-header allowlist verbatim (no wildcards); trust_proxy_headers makes
+# the QR-login link honor the proxy's X-Forwarded-Proto (scheme only).
+# extra_allowed_hosts: []          # e.g. ["myhost.tailnet-name.ts.net"]
+# trust_proxy_headers: false
+
 # Authentication
 # Set your password with `tiro set-password` or via the first-run /login
 # screen — both store a bcrypt hash here. Do NOT hand-edit this value.

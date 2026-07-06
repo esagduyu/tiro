@@ -3473,6 +3473,18 @@ main {
     font-size: 0.78rem;
 }
 
+/* Remote access wizard (M3.1 Task 4): "tailscale serve --bg N" command +
+   its copy button, shown inline within a .status-detail line. */
+.remote-serve-command {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+}
+.remote-serve-command .settings-configure-btn {
+    padding: 0.15rem 0.6rem;
+}
+
 .settings-actions {
     display: flex;
     gap: 0.5rem;

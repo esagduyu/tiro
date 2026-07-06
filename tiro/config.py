@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -92,6 +92,23 @@ class TiroConfig:
     # informational today (surfaced by `tiro status`), not yet enforced or
     # validated by the server.
     remote_url: str | None = None
+    # Reverse-proxy / remote-access hardening (Phase 3 M3.1 Task 4). Entries
+    # in extra_allowed_hosts join the Host-header allowlist verbatim
+    # (case-insensitive; a bare entry additionally matches with this
+    # server's own port appended, mirroring how the static localhost/
+    # 127.0.0.1/config.host entries in tiro/app.py's create_app already
+    # carry both a bare and a `:port` form) -- e.g. a Tailscale MagicDNS
+    # name or a reverse proxy's public hostname. No wildcards: a wildcard
+    # would let any subdomain bypass the DNS-rebinding defense this
+    # allowlist exists for. Set by the /setup/remote wizard (M3.1) or by
+    # hand; env override TIRO_EXTRA_ALLOWED_HOSTS is comma-separated.
+    # trust_proxy_headers additionally makes `_login_qr_target` (tiro/app.py)
+    # honor X-Forwarded-Proto (scheme only, never X-Forwarded-Host) when
+    # running behind a TLS-terminating proxy that forwards plain HTTP
+    # locally (e.g. Tailscale Serve) -- default False leaves every existing
+    # deployment's behavior untouched.
+    extra_allowed_hosts: list[str] = field(default_factory=list)
+    trust_proxy_headers: bool = False
     auth_password_hash: str | None = None
     config_path: str | None = None  # set by load_config; never persisted to YAML
 
@@ -126,26 +143,30 @@ def _apply_env_overlay(config: "TiroConfig") -> None:
 
     Type coercion is driven by the field's declared type: bool via a
     casefolded membership test against {"1","true","yes","on"} (anything
-    else, including ""), int via int(), float via float(), everything else
-    (str, and Optional[str] fields) verbatim. Never logs values — several
-    fields hold secrets (API keys, SMTP/IMAP passwords, the auth hash).
+    else, including ""), int via int(), float via float(), list[str]
+    (extra_allowed_hosts, M3.1 Task 4) via a comma-split with whitespace
+    stripped and empty entries dropped, everything else (str, and
+    Optional[str] fields) verbatim. Never logs values — several fields
+    hold secrets (API keys, SMTP/IMAP passwords, the auth hash).
     """
-    for field in fields(config):
-        if field.name == "config_path":
+    for fld in fields(config):
+        if fld.name == "config_path":
             continue
-        env_name = f"TIRO_{field.name.upper()}"
+        env_name = f"TIRO_{fld.name.upper()}"
         if env_name not in os.environ:
             continue
         raw = os.environ[env_name]
-        if field.type is bool:
+        if fld.type is bool:
             value: object = raw.strip().casefold() in _ENV_TRUTHY
-        elif field.type is int:
+        elif fld.type is int:
             value = int(raw)
-        elif field.type is float:
+        elif fld.type is float:
             value = float(raw)
+        elif fld.type == list[str]:
+            value = [h.strip() for h in raw.split(",") if h.strip()]
         else:
             value = raw
-        setattr(config, field.name, value)
+        setattr(config, fld.name, value)
 
 
 def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:

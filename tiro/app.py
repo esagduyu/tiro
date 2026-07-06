@@ -81,15 +81,38 @@ def _qr_svg(data: str) -> str:
 
 def _login_qr_target(request: Request, token: str) -> str:
     """URL a phone should hit to redeem a QR login token. Deliberately uses
-    the raw `Host` request header (not `request.url.netloc`) and the
-    request's own scheme (honors LAN http / any future https) — by design,
+    the raw `Host` request header (not `request.url.netloc`) — by design,
     this embeds whatever host the USER'S browser reached the server through
     (LAN IP, Tailscale hostname, ...), matching how Phase 3 LAN access
     works. The Host-header validation middleware (see `_validate_host`
     below) has already rejected unrecognized hosts by the time this runs,
-    so no additional validation is needed here."""
+    so no additional validation is needed on the host half here.
+
+    Scheme (M3.1 Task 4): defaults to `request.url.scheme`, i.e. whatever
+    scheme this ASGI request actually arrived as — unchanged behavior when
+    `trust_proxy_headers` is off (the default). When a reverse proxy (e.g.
+    Tailscale Serve) terminates TLS and forwards plain HTTP to this server,
+    `request.url.scheme` is "http" even though the phone's browser actually
+    reached it over https — an operator who has explicitly opted into
+    `trust_proxy_headers` gets the scheme corrected from the FIRST
+    comma-separated value of `X-Forwarded-Proto`, and only when that value
+    is literally "http" or "https" (garbage/empty is ignored, falling back
+    to the request's own scheme). `X-Forwarded-Host` is deliberately NEVER
+    consulted, trusted flag or not: Host validation (`_validate_host`)
+    stays anchored to the real `Host` header the ASGI server received,
+    which the allowlist covers explicitly (via `extra_allowed_hosts` for
+    proxy hostnames) — trusting a client-suppliable Forwarded-Host would
+    reopen exactly the DNS-rebinding hole that middleware exists to close.
+    """
+    config = request.app.state.config
+    scheme = request.url.scheme
+    if config.trust_proxy_headers:
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        first = forwarded_proto.split(",")[0].strip().lower()
+        if first in ("http", "https"):
+            scheme = first
     host = request.headers.get("host", "")
-    return f"{request.url.scheme}://{host}/login/qr?token={token}"
+    return f"{scheme}://{host}/login/qr?token={token}"
 
 
 _DIR_SIZE_CACHE_TTL = 30  # seconds
@@ -436,6 +459,23 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     # re-read via `getattr(app.state, ...)` below, not closed over.
     app.state.mdns_name = None
 
+    # Extra allowed Host-header entries (M3.1 Task 4): static config
+    # (extra_allowed_hosts in config.yaml/env) joins the allowlist at
+    # create_app time -- unlike mdns_name above, this isn't discovered
+    # asynchronously during the lifespan (zeroconf registration), so there's
+    # no reason to defer it the way mdns_name is deferred. It's still read
+    # DYNAMICALLY from app.state by `_validate_host` below (not closed over
+    # as a local set), because `POST /api/remote/config`
+    # (tiro/api/routes_remote.py) can append a newly-chosen hostname to this
+    # set at runtime -- the wizard's "also allow this hostname" checkbox --
+    # and that must take effect immediately, without a server restart. That
+    # live-update requirement is what pushes an otherwise-static value onto
+    # the same "read app.state fresh on every request" pattern lan_ips and
+    # mdns_name already use, rather than a plain closed-over local variable.
+    app.state.extra_allowed_hosts = {
+        h.strip().lower() for h in config.extra_allowed_hosts if h.strip()
+    }
+
     # insecure_lan_http (M3.0 Task 4): drives base.html's dismissable warning
     # banner via `_theme_context`. True only when the effective bind host is
     # non-loopback AND no TLS is active — LAN-over-HTTPS (--cert/--key) and
@@ -494,15 +534,35 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         # Host headers are case-insensitive (RFC 9110 §4.2.3); mDNS names
         # arrive lowercase in practice but normalize both sides to be safe.
         mdns_name = getattr(app.state, "mdns_name", None)
+        host_lower = host.lower()
         mdns_match = False
         if mdns_name:
             expected = f"{mdns_name.lower()}.local"
-            host_lower = host.lower()
             mdns_match = host_lower == expected or host_lower == f"{expected}:{config.port}"
+        # Extra allowed hosts (M3.1 Task 4): static config.yaml/env entries,
+        # possibly appended-to at runtime by POST /api/remote/config -- read
+        # dynamically from app.state (see the create_app-time comment
+        # above), never captured by this closure. Matched EXACTLY as given,
+        # case-insensitively: a bare entry (no ":port") additionally matches
+        # with this server's own port appended, mirroring how the static
+        # localhost/127.0.0.1/config.host entries in `allowed_hosts` above
+        # already carry both a bare and a `:port` form; an entry the user
+        # already gave WITH its own port (e.g. a reverse proxy on a
+        # non-standard port) is matched only in that exact form. No
+        # wildcards -- "*.example.com" is not supported, by design: a
+        # wildcard would let any subdomain bypass the DNS-rebinding defense
+        # this middleware exists for.
+        extra_hosts = getattr(app.state, "extra_allowed_hosts", None) or set()
+        extra_match = any(
+            host_lower == entry
+            or (":" not in entry and host_lower == f"{entry}:{config.port}")
+            for entry in extra_hosts
+        )
         if (
             host not in allowed_hosts
             and not any(host == f"{ip}:{config.port}" for ip in lan_ips)
             and not mdns_match
+            and not extra_match
         ):
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -526,6 +586,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_filters import router as filters_router
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_ingest import router as ingest_router
+    from tiro.api.routes_remote import router as remote_router
     from tiro.api.routes_search import router as search_router
     from tiro.api.routes_sessions import router as sessions_router
     from tiro.api.routes_settings import router as settings_router
@@ -542,7 +603,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
-        sessions_router,
+        sessions_router, remote_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -808,6 +869,15 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         sync)."""
         auth._check_csrf(request)
         return await _qr_setup_response(request)
+
+    @app.get("/setup/remote", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def remote_setup_page(request: Request):
+        """Tailscale/reverse-proxy wizard page (M3.1 Task 4). All actual work
+        (detection, saving, testing) happens client-side against
+        tiro/api/routes_remote.py's endpoints — this route just renders the
+        static shell, same "thin page route, JS does the fetching" pattern
+        as /settings."""
+        return templates.TemplateResponse(request, "remote_setup.html", _theme_context(request))
 
     @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_list_page(request: Request):
