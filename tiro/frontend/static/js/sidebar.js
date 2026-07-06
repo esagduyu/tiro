@@ -23,7 +23,7 @@
  * way back in Task 4.
  */
 
-import { esc, timeAgo } from "./core.js";
+import { esc } from "./core.js";
 
 /* ---- Theme management ---- */
 
