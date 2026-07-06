@@ -1,11 +1,17 @@
 """The shared filter builder must express every facet the API and MCP use."""
 
-from tiro.queries import SORT_SQL, build_article_filters
+from tiro.queries import ARTICLE_COLUMNS, SORT_SQL, build_article_filters
 
 
 def test_empty_filters():
     where, params = build_article_filters()
     assert where == "" and params == []
+
+
+def test_article_columns_includes_snoozed_until():
+    # M3.2 Task 1: snoozed_until must be surfaced in every ARTICLE_COLUMNS
+    # consumer (GET /api/articles list) so the inbox toggle/chip can read it.
+    assert "a.snoozed_until" in ARTICLE_COLUMNS
 
 
 def test_include_snoozed_defaults_permissive():

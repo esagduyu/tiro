@@ -13,7 +13,8 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
     """Search articles by semantic similarity using ChromaDB.
 
     Returns a list of dicts with: id, title, source_name, domain, is_vip,
-    summary, reading_time_min, ingested_at, similarity_score, tags.
+    summary, reading_time_min, ingested_at, similarity_score, tags,
+    snoozed_until.
     """
     collection = get_collection()
     count = collection.count()
@@ -45,9 +46,15 @@ def search_articles(query: str, config: TiroConfig, limit: int = 10) -> list[dic
     conn = get_connection(config.db_path)
     try:
         placeholders = ",".join("?" * len(article_ids))
+        # snoozed_until (Finding 5, M3.2 final review): repo convention is
+        # this column appears in every article-returning query (list,
+        # detail, AND search) -- was omitted here, so a snoozed article
+        # surfaced by search rendered without its "Snoozed until..." chip
+        # and isCurrentlySnoozed()/countsAsUnread() silently saw it as
+        # never-snoozed.
         rows = conn.execute(
             f"""SELECT a.id, a.title, a.summary, a.reading_time_min, a.ingested_at,
-                       a.is_read, a.rating, a.ai_tier,
+                       a.is_read, a.rating, a.ai_tier, a.snoozed_until,
                        s.name AS source_name, s.domain, s.is_vip, s.id AS source_id,
                        s.source_type
                 FROM articles a

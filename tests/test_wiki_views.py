@@ -58,7 +58,7 @@ def test_wiki_page_view_loads_wiki_js(authenticated_client):
     assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
-def test_static_version_is_64():
+def test_static_version_is_65():
     from tiro.app import STATIC_VERSION
 
     # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout), then
@@ -67,10 +67,12 @@ def test_static_version_is_64():
     # then 61 -> 62 in M2.3 Task 2 (reader telemetry tracker added to
     # reader.js), then 62 -> 63 in M3.0 Task 4 (LAN-over-HTTP warning
     # banner: sidebar.js/base.html/styles.css), then 63 -> 64 in M3.1
-    # Task 5 (PWA + remote-wizard closeout) — see
+    # Task 5 (PWA + remote-wizard closeout), then 64 -> 65 in M3.2 Task 5
+    # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage
+    # pill, inbox-zero, logout SW-cache hardening) — see
     # tests/test_static_version.py for the import-map pin that owns the
     # details of what changed at the 60 bump specifically.
-    assert STATIC_VERSION == "64"
+    assert STATIC_VERSION == "65"
 
 
 # --- Sidebar nav link ----------------------------------------------------------

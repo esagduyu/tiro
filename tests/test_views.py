@@ -248,5 +248,8 @@ def test_static_version_bumped_for_saved_views_ui():
     # LAN-over-HTTP warning banner landed in sidebar.js/base.html/styles.css
     # under the old "62" pin), then 63 -> 64 in M3.1 Task 5 (PWA closeout:
     # manifest/SW/offline-queue/A2HS/remote-wizard work landed across
-    # M3.1 Tasks 1-4 under the old "63" pin).
-    assert STATIC_VERSION == "64"
+    # M3.1 Tasks 1-4 under the old "63" pin), then 64 -> 65 in M3.2 Task 5
+    # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage pill,
+    # inbox-zero, logout SW-cache hardening landed across M3.2 Tasks 1-4
+    # under the old "64" pin).
+    assert STATIC_VERSION == "65"

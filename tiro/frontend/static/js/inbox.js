@@ -1,9 +1,13 @@
 /* Tiro — inbox (article list) module (M2.0 split of app.js, Task 2).
  *
  * Owns the /inbox page only: article list rendering + sort, search, tier
- * toolbar (classify/discard/archived/VIP-only), the filter panel + active
- * filter pills, pagination, inbox keyboard navigation, and single/bulk
- * delete. Loaded as `<script type="module">` from inbox.html only.
+ * toolbar (classify/discard/archived/snoozed/VIP-only), the filter panel +
+ * active filter pills, pagination, inbox keyboard navigation, single/bulk
+ * delete, (M3.2 Task 1) the per-card overflow menu + snooze preset sheet +
+ * wake-time chip, and (M3.2 Task 3) swipe triage (js/swipe.js pointer
+ * wiring: right → archive, left → snooze sheet) plus the single-slot undo
+ * binder (js/undo.js + 5s toast + `u` key). Loaded as
+ * `<script type="module">` from inbox.html only.
  *
  * Digest logic (previously interleaved in the same app.js file) now lives
  * in its own js/digest.js module — see that file's header for why the split
@@ -22,16 +26,20 @@
  * See .superpowers/sdd/task-2-report.md for the full audit.
  */
 
-import { esc, formatDate, showToast } from "./core.js";
+import { esc, num, formatDate, showToast } from "./core.js";
 import {
     showShortcuts, hideShortcuts, openSaveModal, closeSaveModal,
     loadSavedViews as refreshSidebarViews,
+    updateUnreadBadge, getUnreadCount, adjustUnreadCount,
 } from "./sidebar.js";
+import { createSwipeState, swipeEvent } from "./swipe.js";
+import { createUndoManager, pushUndoable, takeUndo, clearUndo } from "./undo.js";
 
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
 let selectedIndex = -1; // keyboard-selected article index
 let showArchived = false; // whether to include decayed articles
+let showSnoozed = false; // whether to include snoozed articles (M3.2)
 let showVIPOnly = false; // whether to filter to VIP articles only
 let currentPage = 1;
 let perPage = 50; // default page size
@@ -39,6 +47,17 @@ let activeFilters = {}; // e.g. { is_read: "false", ai_tier: "must-read", tag: "
 let filterPanelOpen = false;
 let filterData = null; // cached /api/filters response
 let selectedForDelete = new Set(); // article ids checked for bulk delete
+let searchActive = false; // whether a live search query is showing results (M3.2 Task 4)
+// Sticky flag (M3.2 Task 4): true once ANY loadInbox() fetch this session has
+// proven the library has at least one article (in any view -- filtered or
+// not). Distinct from `cachedArticles.length`, which the triage-removal
+// paths trim locally without a re-fetch: cachedArticles going to 0 by
+// swiping every loaded card away is exactly the "reached inbox zero"
+// condition worth celebrating, while a *server* response with zero rows on
+// a never-touched page is the ambiguous "could be a fresh install" case
+// that must NOT flip this (see loadInbox()'s early-return branch, which
+// never sets this true). Never reset to false once true this session.
+let libraryEverHadArticles = false;
 
 /* ---- Inbox (articles list) ---- */
 
@@ -57,6 +76,14 @@ function buildQueryString() {
     // Archived / decayed
     if (!showArchived) {
         params.set("include_decayed", "false");
+    }
+
+    // Snoozed (M3.2) — API defaults to excluding snoozed articles from the
+    // inbox, so only set the param when the toggle is ON (opposite polarity
+    // from include_decayed, whose default is permissive and needs an
+    // explicit "false" to hide).
+    if (showSnoozed) {
+        params.set("include_snoozed", "true");
     }
 
     // Active filters
@@ -113,16 +140,30 @@ async function loadInbox() {
         const json = await res.json();
 
         if (!json.success || !json.data.length) {
+            // Never the inbox-zero celebratory state here (M3.2 Task 4) --
+            // a server-side zero-results response is exactly the ambiguous
+            // case that state must NOT claim (could be a genuinely fresh,
+            // never-saved-anything library, which "no articles yet" already
+            // handles below). The celebratory state only ever turns on from
+            // the client-side triage-removal paths in performArchive/
+            // performSnooze; resetting cachedArticles + hiding it here
+            // keeps a stale banner from lingering across an unrelated
+            // reload/filter/toggle.
+            cachedArticles = [];
+            const zeroEl = document.getElementById("inbox-zero-state");
+            if (zeroEl) zeroEl.style.display = "none";
             emptyEl.style.display = Object.keys(activeFilters).length ? "none" : "block";
             if (toolbar) toolbar.style.display = Object.keys(activeFilters).length ? "flex" : "none";
             listEl.innerHTML = Object.keys(activeFilters).length
                 ? '<div class="filter-loading">No articles match these filters.</div>'
                 : "";
+            renderTriagePill();
             renderPagination(null);
             return;
         }
 
         cachedArticles = json.data;
+        libraryEverHadArticles = true;
         emptyEl.style.display = "none";
         renderArticleList(cachedArticles);
         updateToolbar(cachedArticles);
@@ -201,11 +242,80 @@ function sortArticles(articles, mode) {
     return copy;
 }
 
+// Whether `a` is currently hidden from the default inbox view by an active
+// (future) snooze. Single definition shared by renderArticle's dimming,
+// performSnooze's prior-state capture, and countsAsUnread() below --
+// previously each computed this inline with its own copy of the same
+// Safari-safe date compare (Finding 1, M3.2 Task 4 review).
+// .replace(" ", "T"): snoozed_until is a naive-UTC "YYYY-MM-DD HH:MM:SS"
+// string; Safari rejects the space-separated form (Invalid Date) — same
+// guard digest.js/wiki.js use for their timestamp comparisons.
+function isCurrentlySnoozed(a) {
+    return !!(a && a.snoozed_until && new Date(a.snoozed_until.replace(" ", "T")) > new Date());
+}
+
+// Whether `a` is currently included in the shared unread count (sidebar
+// badge + inbox triage pill): unread AND not hidden by an active snooze.
+// The base count_only fetch (sidebar.js's updateUnreadBadge) excludes
+// snoozed-unread articles server-side (include_snoozed defaults false), so
+// they were never part of the count in the first place -- archiving,
+// deleting, or snoozing one must NOT decrement it, and undoing that action
+// must NOT re-increment it either. Used by performArchive and performDelete
+// below (Finding 1 fix).
+function countsAsUnread(a) {
+    return !!(a && !a.is_read && !isCurrentlySnoozed(a));
+}
+
+/* ---- Per-entity action sequence tokens (Finding 2, M3.2 final review) ----
+
+   Follows the highlights.js `fetchToken` idiom, but keyed PER ENTITY (an
+   article id or a source id) rather than one page-global counter -- an
+   action on a DIFFERENT article/source must never be blocked or
+   invalidated by this. Every undo-adjacent triage action (rate, archive,
+   snooze, wake, VIP toggle) bumps its entity's token BEFORE its first
+   await; after EVERY subsequent await in that action -- both the success
+   continuation and the failure/rollback branch -- the action re-checks its
+   captured token against the entity's CURRENT token and skips all further
+   state writes (cache mutation, DOM update, unread-count adjustment,
+   offerUndo) if a newer action on the same entity started meanwhile. This
+   is what stops a held/delayed response from a stale first action (e.g. a
+   rapid rate-1-then-2 where 1's response is held and lands AFTER 2's
+   completes) from clobbering the cache/UI/undo-slot a newer, already-
+   resolved action already established. */
+const actionTokens = new Map(); // entity key -> monotonic counter
+
+function articleTokenKey(articleId) {
+    return `article:${Number(articleId)}`;
+}
+
+function sourceTokenKey(sourceId) {
+    return `source:${Number(sourceId)}`;
+}
+
+function bumpActionToken(key) {
+    const next = (actionTokens.get(key) || 0) + 1;
+    actionTokens.set(key, next);
+    return next;
+}
+
+function isStaleActionToken(key, token) {
+    return actionTokens.get(key) !== token;
+}
+
 function renderArticle(a, showScore) {
     const classes = ["article-card"];
     if (a.is_read) classes.push("is-read");
     if (a.is_vip) classes.push("is-vip");
     if (a.ai_tier) classes.push(`tier-${a.ai_tier}`);
+
+    // Snoozed (M3.2): only ever present in the payload when the Snoozed
+    // toggle asked for include_snoozed=true (the default fetch hides these
+    // articles server-side entirely). A snoozed_until in the past means the
+    // snooze already expired — treat that as a normal, non-dimmed card
+    // (mirrors the server's own auto-reappear semantics in
+    // build_article_filters()).
+    const isSnoozed = isCurrentlySnoozed(a);
+    if (isSnoozed) classes.push("is-snoozed");
 
     const date = formatDate(a.published_at || a.ingested_at);
     const summary = a.summary || "";
@@ -230,6 +340,18 @@ function renderArticle(a, showScore) {
     const checked = isSelectedForDelete ? "checked" : "";
     if (isSelectedForDelete) classes.push("bulk-selected");
 
+    // Wake-time chip (M3.2) — only rendered while actively snoozed. Short
+    // date via core's formatDate(), same as every other date shown in this
+    // card; esc()'d even though formatDate() only ever returns a fixed
+    // "Mon D[, YYYY]" shape, per the "esc() every new server-derived string"
+    // convention.
+    const snoozedChip = isSnoozed
+        ? `<div class="snoozed-chip">
+            <span class="snoozed-chip-label">Snoozed until ${esc(formatDate(a.snoozed_until.replace(" ", "T")))}</span>
+            <button class="wake-now-btn" data-article-id="${a.id}">Wake now</button>
+        </div>`
+        : "";
+
     return `
     <article class="${classes.join(" ")}" data-id="${a.id}">
         <input type="checkbox" class="bulk-select-checkbox" data-id="${a.id}" title="Select for bulk delete" ${checked}>
@@ -252,8 +374,17 @@ function renderArticle(a, showScore) {
             </h2>
             ${summary ? `<p class="article-summary"><strong>TL;DR</strong> &ndash; <em>${esc(summary)}</em></p>` : ""}
             ${tags ? `<div class="article-tags">${tags}</div>` : ""}
+            ${snoozedChip}
         </div>
         <div class="article-actions">
+            <div class="card-menu">
+                <button class="card-menu-btn" data-article-id="${a.id}"
+                        aria-haspopup="true" aria-expanded="false"
+                        title="More actions">&#8942;</button>
+                <div class="card-menu-dropdown" hidden>
+                    <button class="card-menu-item card-menu-snooze" data-action="snooze" data-article-id="${a.id}">Snooze&hellip;</button>
+                </div>
+            </div>
             <button class="rate-btn love ${activeRating === "love" ? "active" : ""}"
                     data-article-id="${a.id}" data-rating="2"
                     title="Love">&hearts;</button>
@@ -300,6 +431,17 @@ function attachListeners() {
                 });
                 const json = await res.json();
                 if (json.success) {
+                    // Keep cachedArticles in sync (Finding 4, M3.2 final
+                    // review): this mouse-click handler never touched the
+                    // cache, so a subsequent keyboard undo capture
+                    // (rateSelected's `priorRating`) trusted a stale value
+                    // that no longer matched the server. A miss here (the
+                    // card isn't in the currently-cached page — e.g. a live
+                    // search result, Finding 1) is a harmless no-op.
+                    const article = cachedArticles.find(
+                        (a) => Number(a.id) === Number(articleId)
+                    );
+                    if (article) article.rating = rating;
                     // Update active state within this card
                     const card = btn.closest(".article-card");
                     card.querySelectorAll(".rate-btn").forEach((b) =>
@@ -309,6 +451,78 @@ function attachListeners() {
                 }
             } catch (err) {
                 console.error("Rating failed:", err);
+            }
+        });
+    });
+
+    // Card overflow menu (M3.2) — "⋯" button toggles a per-card dropdown;
+    // its first (and for T1, only) item opens the snooze preset sheet. T3
+    // extends this same dropdown with swipe-triage's other actions.
+    document.querySelectorAll(".card-menu-btn").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const dropdown = btn.nextElementSibling;
+            const wasOpen = dropdown && !dropdown.hidden;
+            closeAllCardMenus();
+            if (dropdown && !wasOpen) {
+                dropdown.hidden = false;
+                btn.setAttribute("aria-expanded", "true");
+            }
+        });
+    });
+
+    document.querySelectorAll('.card-menu-item[data-action="snooze"]').forEach((item) => {
+        item.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closeAllCardMenus();
+            openSnoozeSheet(Number(item.dataset.articleId));
+        });
+    });
+
+    // Wake now (M3.2) — clears snoozed_until immediately via PATCH {until: null}.
+    document.querySelectorAll(".wake-now-btn").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const articleId = btn.dataset.articleId;
+            // Wake-now only ever renders on a currently-snoozed card (see
+            // renderArticle's snoozedChip), so this article was excluded
+            // from the unread count while snoozed (countsAsUnread(article)
+            // is guaranteed false beforehand); waking an unread one brings
+            // it back in (M3.2 Task 4 pill live-update). Equivalent to
+            // countsAsUnread() gated on that guarantee -- audited per
+            // Finding 1, left as `wasUnread` since it was already correct.
+            const article = cachedArticles.find((a) => Number(a.id) === Number(articleId));
+            const wasUnread = !!(article && !article.is_read);
+
+            // Sequence token (Finding 2, M3.2 final review) -- same shape as
+            // performSnooze/performArchive/rateSelected: a newer action on
+            // this article (e.g. a rapid re-snooze or wake-now double click)
+            // must invalidate this continuation.
+            const key = articleTokenKey(articleId);
+            const token = bumpActionToken(key);
+
+            let ok = false;
+            try {
+                const res = await fetch(`/api/articles/${articleId}/snooze`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ until: null }),
+                });
+                const json = await res.json();
+                ok = !!json.success;
+            } catch (err) {
+                console.error("Wake now failed:", err);
+                ok = false;
+            }
+
+            if (isStaleActionToken(key, token)) return; // superseded by a newer action
+
+            if (ok) {
+                if (wasUnread) adjustUnreadCount(1);
+                showToast("Article woken up", "success");
+                await loadInbox();
+            } else {
+                showToast("Failed to wake article", "error");
             }
         });
     });
@@ -364,6 +578,502 @@ function attachListeners() {
 
             window.location.href = link.href;
         });
+    });
+}
+
+/* ---- Card overflow menu + snooze (M3.2 Task 1) ---- */
+
+function closeAllCardMenus() {
+    document.querySelectorAll(".card-menu-dropdown").forEach((d) => {
+        d.hidden = true;
+    });
+    document.querySelectorAll(".card-menu-btn").forEach((b) => {
+        b.setAttribute("aria-expanded", "false");
+    });
+}
+
+const SNOOZE_PRESET_LABELS = {
+    tonight: "Tonight",
+    tomorrow: "Tomorrow",
+    weekend: "Weekend",
+    next_week: "Next week",
+};
+
+function openSnoozeSheet(articleId) {
+    closeSnoozeSheet();
+
+    const overlay = document.createElement("div");
+    overlay.id = "snooze-sheet-overlay";
+    overlay.className = "export-overlay";
+    overlay.innerHTML =
+        '<div class="export-dialog snooze-sheet">' +
+            "<h3>Snooze until&hellip;</h3>" +
+            '<div class="snooze-preset-grid">' +
+                Object.entries(SNOOZE_PRESET_LABELS).map(([preset, label]) =>
+                    `<button class="snooze-preset-btn" data-preset="${preset}">${esc(label)}</button>`
+                ).join("") +
+            "</div>" +
+            '<div class="export-dialog-actions">' +
+                '<button class="export-cancel-btn" id="snooze-sheet-cancel">Cancel</button>' +
+            "</div>" +
+        "</div>";
+    document.body.appendChild(overlay);
+
+    function close() {
+        overlay.remove();
+    }
+
+    document.getElementById("snooze-sheet-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close();
+    });
+    overlay.querySelectorAll(".snooze-preset-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            close();
+            await performSnooze(articleId, btn.dataset.preset);
+        });
+    });
+}
+
+function closeSnoozeSheet() {
+    document.getElementById("snooze-sheet-overlay")?.remove();
+}
+
+async function performSnooze(articleId, preset) {
+    // Prior value captured BEFORE the action (from cachedArticles) so undo
+    // can restore it: re-snoozing an already-snoozed article (visible via
+    // the Snoozed toggle) restores its previous future wake time; snoozing
+    // a normal article restores "not snoozed". A prior timestamp already in
+    // the past is treated as not-snoozed (the server 400s past `until`
+    // values, and an expired snooze is semantically awake anyway).
+    const prior = cachedArticles.find((a) => Number(a.id) === Number(articleId));
+    const priorUntil = prior ? prior.snoozed_until : null;
+    const priorStillFuture = isCurrentlySnoozed(prior);
+
+    // Live pill update (M3.2 Task 4): snoozing only changes the unread
+    // count when it's a genuine visible-unread -> hidden-snoozed
+    // transition. An article that was ALREADY snoozed (re-snoozed to a new
+    // preset via the Snoozed toggle) was already excluded from the count,
+    // so re-snoozing it is a no-op for this counter. Equivalent to
+    // countsAsUnread(prior) -- spelled out via priorWasUnread/
+    // priorStillFuture (rather than one countsAsUnread() call) since
+    // priorStillFuture is also needed below to pick the undo restore target.
+    const priorWasUnread = !!(prior && !prior.is_read);
+    const leavesUnreadCount = priorWasUnread && !priorStillFuture;
+
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // await so a newer action on this same article invalidates this one's
+    // eventual continuation. See the token helpers' header comment.
+    const key = articleTokenKey(articleId);
+    const token = bumpActionToken(key);
+
+    let json = null;
+    let ok = false;
+    try {
+        const res = await fetch(`/api/articles/${articleId}/snooze`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset }),
+        });
+        json = await res.json();
+        ok = !!json.success;
+    } catch (err) {
+        console.error("Snooze failed:", err);
+        ok = false;
+    }
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
+        showToast("Failed to snooze article", "error");
+        return;
+    }
+
+    if (leavesUnreadCount) adjustUnreadCount(-1);
+
+    if (searchActive) {
+        // Finding 1 (M3.2 final review): a live search's results are NOT
+        // cachedArticles (runSearch() renders straight from the API
+        // response without populating it) -- filtering/re-rendering
+        // cachedArticles here would replace the visible search results with
+        // a stale inbox snapshot mid-search. Remove just this card in
+        // place; the rest of the search results stay exactly as rendered.
+        document.querySelector(`.article-card[data-id="${Number(articleId)}"]`)?.remove();
+    } else if (showSnoozed) {
+        // Toggle is on — re-fetch so the card re-renders in place with
+        // the wake-time chip rather than disappearing.
+        await loadInbox();
+    } else {
+        // Default view: the card simply leaves the list.
+        cachedArticles = cachedArticles.filter((a) => Number(a.id) !== Number(articleId));
+        renderArticleList(cachedArticles);
+        updateToolbar(cachedArticles);
+    }
+
+    const label = `Snoozed until ${formatDate((json.data.snoozed_until || "").replace(" ", "T"))}`;
+
+    if (!prior) {
+        // Fabricated-prior guard (Finding 1): `prior` missing means this
+        // card was never in cachedArticles (a search hit outside the cached
+        // page) -- there is no real prior state to restore, so offering
+        // undo would silently un-snooze or pick the wrong restore target.
+        // The (already-committed, correct) snooze stands; just no Undo
+        // button.
+        showToast(label, "success");
+        return;
+    }
+
+    // The undo toast replaces T1's plain success toast — same message,
+    // now with the Undo affordance (single toast slot either way).
+    offerUndo(label, async () => {
+        await fetch(`/api/articles/${articleId}/snooze`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ until: priorStillFuture ? priorUntil : null }),
+        });
+        if (isStaleActionToken(key, token)) return;
+        if (leavesUnreadCount) adjustUnreadCount(1);
+        await loadInbox();
+    });
+}
+
+function toggleSnoozed() {
+    showSnoozed = !showSnoozed;
+    loadInbox();
+}
+
+// Registered once (not per render, unlike the per-card listeners in
+// attachListeners()) so clicking anywhere outside an open card menu closes
+// it. Card-menu-btn/item clicks stopPropagation() so they never reach here.
+function setupCardMenuOutsideClick() {
+    document.addEventListener("click", () => closeAllCardMenus());
+}
+
+/* ---- Undo binder (M3.2 Task 3) ----
+   DOM/timer layer over js/undo.js's pure single-slot manager: an undoable
+   triage action (swipe-archive, snooze, keyboard 1/2/3 rate, keyboard s
+   VIP toggle) shows a toast with an Undo button for UNDO_WINDOW_MS; the
+   `u` key or the button runs the entry's undo callback. A second action
+   within the window displaces (finalizes) the first — all actions here are
+   already committed server-side at push time, so finalizing needs no
+   server work, the binder just drops the old toast. x delete and bulk
+   delete deliberately KEEP their confirm dialogs and get NO undo (deletion
+   is irreversible across all four stores — the dialog is the safety). */
+
+const UNDO_WINDOW_MS = 5000;
+let undoMgr = createUndoManager();
+let undoTimer = null;
+
+function dismissUndoToast() {
+    document.getElementById("undo-toast")?.remove();
+}
+
+function renderUndoToast(label) {
+    // Same single-toast-at-a-time posture as core.js's showToast() — remove
+    // whatever toast is showing (plain or undo) before rendering this one.
+    document.querySelector(".settings-toast")?.remove();
+
+    const toast = document.createElement("div");
+    toast.id = "undo-toast";
+    toast.className = "settings-toast settings-toast-info undo-toast";
+
+    const text = document.createElement("span");
+    text.className = "undo-toast-label";
+    text.textContent = label; // textContent sink — no esc() needed
+
+    const btn = document.createElement("button");
+    btn.className = "undo-toast-btn";
+    btn.textContent = "Undo";
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        triggerUndo();
+    });
+
+    toast.appendChild(text);
+    toast.appendChild(btn);
+    document.body.appendChild(toast);
+    setTimeout(() => toast.classList.add("show"), 10);
+}
+
+function offerUndo(label, undoFn) {
+    const { mgr } = pushUndoable(undoMgr, { label, undo: undoFn });
+    // The displaced (finalized) entry needs no cleanup — see the section
+    // comment above — so `finalized` is intentionally unused here.
+    undoMgr = mgr;
+    clearTimeout(undoTimer);
+    renderUndoToast(label);
+    undoTimer = setTimeout(() => {
+        const { mgr: next } = clearUndo(undoMgr);
+        undoMgr = next;
+        dismissUndoToast();
+    }, UNDO_WINDOW_MS);
+}
+
+async function triggerUndo() {
+    const { entry, mgr } = takeUndo(undoMgr);
+    undoMgr = mgr;
+    clearTimeout(undoTimer);
+    dismissUndoToast();
+    if (!entry) return;
+    try {
+        await entry.undo();
+    } catch (err) {
+        console.error("Undo failed:", err);
+        showToast("Undo failed", "error");
+    }
+}
+
+/* ---- Swipe triage (M3.2 Task 3) ----
+   Delegated pointer handlers on #article-list drive js/swipe.js's pure
+   state machine. Right swipe past the threshold archives (mark-read +
+   undo), left swipe opens the snooze preset sheet. Scroll protection is
+   double: the state machine's permanent vertical lock (a scroll gesture
+   can never become a swipe) AND `touch-action: pan-y` on the cards (the
+   browser keeps native vertical scrolling without waiting on JS). */
+
+// Live MediaQueryList — `.matches` reflects OS-setting changes mid-session.
+// Under reduced motion the gesture still functions (release still acts);
+// the card just doesn't visually track the finger, and the snap-back
+// transition is disabled in CSS by the matching media query.
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// Interactive descendants that own their own pointer/click behavior — a
+// pointerdown on any of these never engages the swipe gesture (pointer
+// capture would otherwise retarget pointerup to the card and break the
+// child's click event).
+const SWIPE_IGNORE_SELECTOR =
+    "button, a, input, select, .vip-star, .clickable-tag, .card-menu, .snoozed-chip";
+
+let swipeState = createSwipeState();
+let swipeCard = null; // card element owning the in-flight gesture
+let swipePointerId = null;
+let swipeCardWidth = 0;
+
+function setupSwipe() {
+    const listEl = document.getElementById("article-list");
+    if (!listEl) return;
+    // Delegated on the persistent list container — card re-renders
+    // (innerHTML replacement) never orphan these handlers.
+    listEl.addEventListener("pointerdown", onSwipePointerDown);
+    listEl.addEventListener("pointermove", onSwipePointerMove);
+    listEl.addEventListener("pointerup", onSwipePointerUp);
+    listEl.addEventListener("pointercancel", onSwipePointerCancel);
+}
+
+function onSwipePointerDown(e) {
+    if (swipeCard) return; // one gesture at a time
+    if (e.button !== 0) return; // primary button/touch only
+    if (e.target.closest(SWIPE_IGNORE_SELECTOR)) return;
+    const card = e.target.closest(".article-card");
+    if (!card) return;
+
+    // GUARD (T2 review edge): a 0/NaN cardWidth would make the 35%
+    // act-threshold meaningless (0.35 * 0 = 0 → every release acts), so a
+    // card that measures empty does NOT engage the gesture at all.
+    const width = card.getBoundingClientRect().width;
+    if (!Number.isFinite(width) || width <= 0) return;
+
+    // Pointer capture keeps move/up delivery flowing (retargeted to the
+    // card, so it still bubbles through #article-list's delegated
+    // listeners) even when the pointer leaves the card mid-swipe. It can
+    // throw for a pointerId with no active pointer (e.g. synthesized test
+    // events) — non-fatal, the delegated listeners still see events
+    // dispatched at the card/list themselves.
+    try {
+        card.setPointerCapture(e.pointerId);
+    } catch (err) { /* enhancement only — see above */ }
+
+    swipeCard = card;
+    swipePointerId = e.pointerId;
+    swipeCardWidth = width;
+    const r = swipeEvent(swipeState, {
+        type: "down", x: e.clientX, y: e.clientY, t: e.timeStamp, cardWidth: width,
+    });
+    swipeState = r.state;
+}
+
+function onSwipePointerMove(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "move", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    if (r.transform) {
+        // Horizontal lock engaged — the gesture owns this pointer now.
+        // .swiping is only added here (not on pointerdown) so plain taps
+        // and vertical scrolls never toggle card classes at all.
+        swipeCard.classList.add("swiping");
+        swipeCard.classList.toggle("swipe-right-hint", r.transform.dx > 0);
+        swipeCard.classList.toggle("swipe-left-hint", r.transform.dx < 0);
+        if (!reducedMotion.matches) {
+            swipeCard.style.transform = `translateX(${r.transform.dx}px)`;
+        }
+    }
+}
+
+function onSwipePointerUp(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "up", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    resolveSwipe(r.action);
+}
+
+function onSwipePointerCancel(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "cancel", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    resolveSwipe(r.action); // always "cancelled" per the state machine
+}
+
+function resolveSwipe(action) {
+    const card = swipeCard;
+    swipeCard = null;
+    swipePointerId = null;
+    swipeCardWidth = 0;
+    if (!card) return;
+
+    const articleId = Number(card.dataset.id);
+    card.classList.remove("swiping", "swipe-right-hint", "swipe-left-hint");
+
+    if (action === "archive") {
+        card.style.transform = "";
+        performArchive(articleId);
+        return;
+    }
+    if (action === "snooze-sheet") {
+        card.style.transform = "";
+        openSnoozeSheet(articleId);
+        return;
+    }
+
+    // Cancelled: snap back. The transition class animates transform back
+    // to rest; under prefers-reduced-motion the media query disables the
+    // transition and this is an instant reset.
+    if (card.style.transform) {
+        card.classList.add("swipe-snap-back");
+        card.style.transform = "";
+        setTimeout(() => card.classList.remove("swipe-snap-back"), 250);
+    }
+}
+
+async function performArchive(articleId) {
+    const id = Number(articleId);
+    const article = cachedArticles.find((a) => Number(a.id) === id);
+    const wasRead = !!(article && article.is_read);
+    // Captured HERE, before the optimistic is_read mutation just below and
+    // before the await -- this is the last point the article's true
+    // pre-archive state (including snoozed_until) is known. The undo
+    // closure below reuses this exact boolean rather than recomputing it
+    // (Finding 1, M3.2 Task 4 review): a snooze can expire in the window
+    // between archive and undo, and recomputing at undo time would then
+    // silently pick up the wrong answer.
+    const wasCountedUnread = countsAsUnread(article);
+
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // optimistic mutation so a newer action on this same article
+    // invalidates this one's eventual continuation. See the token helpers'
+    // header comment.
+    const key = articleTokenKey(id);
+    const token = bumpActionToken(key);
+
+    // Same reorder as rateSelected's fix: mutate the cached read state
+    // optimistically before the await so a rapid second action on this
+    // article reads this action's post-state as its "prior", not the stale
+    // pre-action one. Rolled back below on PATCH failure.
+    if (article) article.is_read = true;
+
+    let ok = false;
+    try {
+        const res = await fetch(`/api/articles/${id}/read`, { method: "PATCH" });
+        const json = await res.json();
+        ok = !!json.success;
+    } catch (err) {
+        console.error("Archive failed:", err);
+        ok = false;
+    }
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
+        if (article) article.is_read = wasRead;
+        showToast("Failed to archive article", "error");
+        return;
+    }
+
+    // Live pill update (M3.2 Task 4): archiving only changes the unread
+    // count when the article was actually counted as unread beforehand --
+    // an already-read article, OR a snoozed-unread one (already excluded
+    // from the count server-side -- Finding 1 fix), is a no-op here.
+    // MUST run BEFORE updateToolbar() below (M3.2 final-review regression
+    // caught in testing): adjustUnreadCount() only updates the shared
+    // counter + the sidebar badge, it does NOT itself re-render this page's
+    // #triage-pill -- that happens inside updateToolbar()'s
+    // refreshTriageUI() call, which reads whatever the counter says AT THAT
+    // MOMENT. Decrementing after updateToolbar() would render the pill with
+    // the stale (pre-decrement) count and never repaint it again.
+    if (wasCountedUnread) adjustUnreadCount(-1);
+
+    if (searchActive) {
+        // Finding 1 (M3.2 final review): a live search's results are NOT
+        // cachedArticles (runSearch() renders straight from the API
+        // response without populating it) -- filtering/re-rendering
+        // cachedArticles here would replace the visible search results with
+        // a stale inbox snapshot mid-search. Remove just this card in
+        // place; the rest of the search results stay exactly as rendered.
+        document.querySelector(`.article-card[data-id="${id}"]`)?.remove();
+    } else {
+        // Triage semantics: the card leaves the current view immediately
+        // (same posture as performSnooze's default-view path). Archive IS
+        // mark-read — there is no separate archived state — so a later
+        // full reload may legitimately show the article again as a read
+        // row.
+        cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
+        renderArticleList(cachedArticles);
+        updateToolbar(cachedArticles);
+    }
+
+    if (!article) {
+        // Fabricated-prior guard (Finding 1): no `article` means this card
+        // was never in cachedArticles (a search hit outside the cached
+        // page) -- `wasRead`/`wasCountedUnread` above are computed from an
+        // undefined article and are NOT this article's true prior state.
+        // Offering undo on a fabricated prior would silently un-read an
+        // already-read article, or mis-adjust a count that was never
+        // really decremented. The (already-committed, correct) archive
+        // stands; just no Undo button.
+        showToast("Archived", "success");
+        return;
+    }
+
+    offerUndo("Archived", async () => {
+        // Restore the pre-archive state server-side, not just visually:
+        // PATCH back to unread ONLY when the article wasn't already read
+        // before the swipe (un-reading an article that was read before the
+        // gesture would not be a restore). opened_count and reading stats
+        // are monotonic by design and are not rolled back.
+        if (!wasRead) {
+            await fetch(`/api/articles/${id}/read`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ is_read: false }),
+            });
+        }
+        if (isStaleActionToken(key, token)) return;
+        // Mirrors wasCountedUnread captured above at archive time, NOT a
+        // fresh countsAsUnread() recompute here and NOT nested under the
+        // `!wasRead` PATCH guard above (Finding 1): those are two different
+        // questions. A snoozed-unread article never decremented the count
+        // on archive, so its undo must not increment it either, even though
+        // `!wasRead` is true and the is_read PATCH above still runs.
+        if (wasCountedUnread) adjustUnreadCount(1);
+        await loadInbox();
     });
 }
 
@@ -427,6 +1137,12 @@ async function runSearch(query) {
     const listEl = document.getElementById("article-list");
     const emptyEl = document.getElementById("empty-state");
 
+    // A live search is never the "default view" (M3.2 Task 4) -- hide the
+    // inbox-zero celebratory state immediately, before the request even
+    // resolves, rather than leaving it visible behind/above search results.
+    searchActive = true;
+    updateInboxZeroState();
+
     try {
         const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
         const json = await res.json();
@@ -452,9 +1168,84 @@ async function runSearch(query) {
 }
 
 function exitSearch() {
+    searchActive = false;
     currentPage = 1;
     window.history.replaceState({}, "", "/inbox");
     loadInbox();
+}
+
+/* ---- Triage progress pill + inbox-zero state (M3.2 Task 4) ----
+
+   The pill's count is deliberately NOT derived from `cachedArticles` (which
+   only reflects whatever page/filter/sort is currently loaded, and is
+   sometimes trimmed client-side without a re-fetch -- see performArchive's
+   header comment). It mirrors the sidebar's global unread badge exactly via
+   sidebar.js's shared getUnreadCount()/adjustUnreadCount() state, so the
+   two can never drift: every triage call site below adjusts that ONE
+   counter, and both this pill and the sidebar badge just render whatever it
+   currently says.
+
+   The inbox-zero celebratory state answers "has the user triaged every
+   unread article away, in a view that has genuinely seen real data this
+   session" -- gated on `libraryEverHadArticles` (sticky once true) rather
+   than `cachedArticles.length`, deliberately: archive/snooze are mark-read/
+   hide, not delete, so a real user's default view usually still has READ
+   articles sitting in it even after the last unread one is triaged away,
+   and the banner is meant to show alongside them (a "you're caught up"
+   banner above older history), not only in the edge case where the loaded
+   page happens to be visually empty too. It never fires from loadInbox()'s
+   "server returned zero rows" branch (that's the pre-existing "no articles
+   yet" / filtered-empty handling, untouched by this task, and the one
+   place `libraryEverHadArticles` is deliberately never set) -- only once a
+   loadInbox() fetch has proven real data exists, refreshed on every
+   updateToolbar() call (loadInbox's happy path, and performArchive/
+   performSnooze/performDelete's local-removal paths). */
+
+function renderTriagePill() {
+    const pill = document.getElementById("triage-pill");
+    if (!pill) return;
+    const count = getUnreadCount();
+    if (count === null || count <= 0) {
+        pill.style.display = "none";
+        pill.textContent = "";
+        return;
+    }
+    pill.textContent = `${num(count)} to zero`;
+    pill.style.display = "inline-flex";
+}
+
+// "Default view" for inbox-zero purposes: no live search, no filter-panel
+// filters, and none of the toggles that pull extra (non-default) rows into
+// view. Matches the binding spec's "no search/filters active AND the
+// default view (not snoozed/archived toggles)" verbatim, plus VIP-only
+// (not named in the spec, but the same kind of client-side view filter --
+// showing the celebratory banner while the user is looking at a narrowed
+// VIP subset would be misleading).
+function isDefaultTriageView() {
+    return !searchActive
+        && Object.keys(activeFilters).length === 0
+        && !showArchived && !showSnoozed && !showVIPOnly;
+}
+
+function updateInboxZeroState() {
+    const zeroEl = document.getElementById("inbox-zero-state");
+    if (!zeroEl) return;
+    // `libraryEverHadArticles`, not `cachedArticles.length` -- a real user's
+    // default view usually still has READ articles sitting in it (archive is
+    // mark-read, not a separate hidden state) even after every unread one
+    // has been triaged away, and the banner should show alongside them, not
+    // only in the edge case where the loaded page happens to be visually
+    // empty too. See the flag's own declaration comment for why a
+    // server-confirmed empty response never sets it.
+    const shouldShow = isDefaultTriageView()
+        && libraryEverHadArticles
+        && getUnreadCount() === 0;
+    zeroEl.style.display = shouldShow ? "block" : "none";
+}
+
+function refreshTriageUI() {
+    renderTriagePill();
+    updateInboxZeroState();
 }
 
 /* ---- Tier toolbar (classify button + discard toggle) ---- */
@@ -515,6 +1306,21 @@ function updateToolbar(articles) {
         }
     }
 
+    // Snoozed toggle (M3.2) — mirrors the archived toggle exactly (always
+    // visible so the user can turn it on, label/active-class flip on state).
+    const snoozedToggle = document.getElementById("snoozed-toggle");
+    if (snoozedToggle) {
+        if (showSnoozed) {
+            snoozedToggle.style.display = "inline-flex";
+            snoozedToggle.textContent = "Hide snoozed";
+            snoozedToggle.classList.add("active");
+        } else {
+            snoozedToggle.style.display = "inline-flex";
+            snoozedToggle.textContent = "Show snoozed";
+            snoozedToggle.classList.remove("active");
+        }
+    }
+
     // VIP toggle
     const vipToggle = document.getElementById("vip-toggle");
     if (vipToggle) {
@@ -526,9 +1332,16 @@ function updateToolbar(articles) {
     classifyBtn.onclick = classifyArticles;
     discardToggle.onclick = toggleDiscarded;
     if (archivedToggle) archivedToggle.onclick = toggleArchived;
+    if (snoozedToggle) snoozedToggle.onclick = toggleSnoozed;
 
     // Bulk-delete toolbar button reflects current selection
     updateBulkDeleteToolbar();
+
+    // Triage pill + inbox-zero state (M3.2 Task 4) -- called from every
+    // updateToolbar() invocation (loadInbox's happy path, performArchive/
+    // performSnooze/performDelete's local-removal paths) so both stay
+    // fresh no matter which call site reached here.
+    refreshTriageUI();
 }
 
 async function classifyArticles() {
@@ -612,6 +1425,10 @@ function toggleVIPOnly() {
     } else {
         renderArticleList(cachedArticles);
     }
+
+    // VIP-only is a view filter same as search/archived/snoozed (M3.2 Task
+    // 4) -- the inbox-zero celebratory state must not show while it's on.
+    updateInboxZeroState();
 }
 
 /* ---- Filter panel ---- */
@@ -1132,6 +1949,26 @@ function handleInboxKeydown(e) {
         return;
     }
 
+    // Don't capture when the snooze preset sheet is open (except Escape to close)
+    const snoozeSheetOverlay = document.getElementById("snooze-sheet-overlay");
+    if (snoozeSheetOverlay) {
+        if (e.key === "Escape") {
+            document.getElementById("snooze-sheet-cancel")?.click();
+            e.preventDefault();
+        }
+        return;
+    }
+
+    // Don't capture when a card overflow menu is open (except Escape to close)
+    const openCardMenu = document.querySelector(".card-menu-dropdown:not([hidden])");
+    if (openCardMenu) {
+        if (e.key === "Escape") {
+            closeAllCardMenus();
+            e.preventDefault();
+        }
+        return;
+    }
+
     const cards = getVisibleCards();
 
     switch (e.key) {
@@ -1170,6 +2007,10 @@ function handleInboxKeydown(e) {
         case "x":
             e.preventDefault();
             deleteSelectedArticle(cards);
+            break;
+        case "u":
+            e.preventDefault();
+            triggerUndo(); // no-op when no undo window is live
             break;
         case "/":
             e.preventDefault();
@@ -1257,18 +2098,136 @@ function openSelectedArticle(cards) {
     if (link) link.click();
 }
 
-function toggleSelectedVip(cards) {
+/* Keyboard `s` / `1`/`2`/`3` go through their own fetch paths (rather than
+   clicking the per-card button like they historically did) so the undo
+   binder can capture the prior value BEFORE the action and offer a restore.
+   Mouse clicks on the star / rate buttons keep their original handlers and
+   deliberately do NOT get undo (binding spec: keyboard actions + swipe/menu
+   triage actions are the undoable set). */
+
+async function toggleSelectedVip(cards) {
     if (selectedIndex < 0 || selectedIndex >= cards.length) return;
     const card = cards[selectedIndex];
     const star = card.querySelector(".vip-star");
-    if (star) star.click();
+    if (!star) return;
+    const sourceId = star.dataset.sourceId;
+
+    // Sequence token (Finding 2, M3.2 final review), keyed by SOURCE (this
+    // toggle mutates a source, not the article) -- same shape as
+    // rateSelected/performArchive/performSnooze. See the token helpers'
+    // header comment.
+    const key = sourceTokenKey(sourceId);
+    const token = bumpActionToken(key);
+
+    const nowVip = await patchVipToggle(sourceId);
+    if (isStaleActionToken(key, token)) return; // a newer action on this source now owns state
+    if (nowVip === null) return;
+    offerUndo(nowVip ? "Source marked VIP" : "Source VIP removed", async () => {
+        await patchVipToggle(sourceId); // toggle back
+        if (isStaleActionToken(key, token)) return;
+        await loadInbox();
+    });
+    await loadInbox();
 }
 
-function rateSelected(cards, rating) {
+async function patchVipToggle(sourceId) {
+    // Returns the new is_vip state, or null on failure.
+    try {
+        const res = await fetch(`/api/sources/${sourceId}/vip`, { method: "PATCH" });
+        const json = await res.json();
+        return json.success ? !!json.data.is_vip : null;
+    } catch (err) {
+        console.error("VIP toggle failed:", err);
+        return null;
+    }
+}
+
+async function rateSelected(cards, rating) {
     if (selectedIndex < 0 || selectedIndex >= cards.length) return;
     const card = cards[selectedIndex];
-    const btn = card.querySelector(`.rate-btn[data-rating="${rating}"]`);
-    if (btn) btn.click();
+    const id = Number(card.dataset.id);
+    const article = cachedArticles.find((a) => Number(a.id) === id);
+    // Prior rating from cachedArticles BEFORE the action; null == unrated
+    // (restored via the rate API's `{"rating": null}` clear).
+    const priorRating = article && article.rating !== undefined ? article.rating : null;
+
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // optimistic mutation so a newer rating action on this same article
+    // invalidates this one's eventual continuation, both the success
+    // continuation below AND the failure/rollback branch. This is what
+    // stops a held/delayed response from a stale first rate action from
+    // clobbering the cache/UI/undo-slot after a second, faster rate action
+    // on the same card has already resolved. See the token helpers' header
+    // comment.
+    const key = articleTokenKey(id);
+    const token = bumpActionToken(key);
+
+    // Mutate the cache optimistically IMMEDIATELY (before the await) so a
+    // second rapid rating keypress on the same card — fired before this
+    // PATCH round-trip resolves — captures THIS action's rating as its own
+    // "prior" value, not the stale pre-action one (the race the undo target
+    // corruption bug came from). Rolled back below on PATCH failure.
+    if (article) article.rating = rating;
+
+    const ok = await patchRating(id, rating);
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
+        if (article) article.rating = priorRating;
+        showToast("Failed to rate article", "error");
+        return;
+    }
+    updateCardRatingUI(card, rating);
+
+    const labels = { "-1": "Rated: dislike", 1: "Rated: like", 2: "Rated: love" };
+    const label = labels[String(rating)] || "Rated";
+
+    if (!article) {
+        // Fabricated-prior guard (Finding 1, M3.2 final review): no
+        // `article` means this card was never in cachedArticles -- a
+        // search hit outside the cached page, since runSearch() renders
+        // straight from the API response without populating
+        // cachedArticles. `priorRating` above therefore defaulted to null
+        // rather than this article's real prior rating; offering undo on
+        // that fabricated prior would silently clear a real rating. The
+        // (already-committed, correct) rating stands; just no Undo button.
+        showToast(label, "success");
+        return;
+    }
+
+    offerUndo(label, async () => {
+        if (!(await patchRating(id, priorRating))) return;
+        if (isStaleActionToken(key, token)) return;
+        if (article) article.rating = priorRating;
+        // The card may have been re-rendered since — look it up live.
+        const liveCard = document.querySelector(`.article-card[data-id="${id}"]`);
+        if (liveCard) updateCardRatingUI(liveCard, priorRating);
+    });
+}
+
+async function patchRating(articleId, rating) {
+    try {
+        const res = await fetch(`/api/articles/${articleId}/rate`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rating }),
+        });
+        const json = await res.json();
+        return !!json.success;
+    } catch (err) {
+        console.error("Rating failed:", err);
+        return false;
+    }
+}
+
+function updateCardRatingUI(card, rating) {
+    card.querySelectorAll(".rate-btn").forEach((b) => {
+        b.classList.toggle(
+            "active",
+            rating !== null && Number(b.dataset.rating) === Number(rating),
+        );
+    });
 }
 
 
@@ -1371,6 +2330,20 @@ async function performDelete(ids) {
 
     const succeeded = ids.filter((id) => !failed.includes(id));
     if (succeeded.length) {
+        // Live pill update (M3.2 Task 4): deleting an article that was
+        // actually counted as unread (unread AND not currently snoozed --
+        // Finding 1 fix) removes it from the unread count same as archiving
+        // one -- it's no longer in the library at all. A snoozed-unread
+        // article was already excluded from the count and deleting it is a
+        // no-op here. Not part of the undoable triage set (delete keeps its
+        // confirm dialog, by design), so this is a one-way adjustment with
+        // no undo counterpart.
+        const deletedUnread = succeeded.filter((id) => {
+            const a = cachedArticles.find((c) => Number(c.id) === Number(id));
+            return countsAsUnread(a);
+        }).length;
+        if (deletedUnread > 0) adjustUnreadCount(-deletedUnread);
+
         cachedArticles = cachedArticles.filter((a) => !succeeded.includes(Number(a.id)));
         succeeded.forEach((id) => selectedForDelete.delete(id));
         renderArticleList(cachedArticles);
@@ -1392,16 +2365,30 @@ async function performDelete(ids) {
 
 /* ---- Init ---- */
 
+// Sidebar.js's own DOMContentLoaded handler runs its own unread-count fetch
+// (for its badge) on every page load, including this one -- but module init
+// order gives no guarantee it has resolved by the time this page's first
+// render wants the number. Awaiting this module's own call to the same
+// shared getter/fetch (sidebar.js's updateUnreadBadge()) is idempotent
+// (same endpoint, same shared state) and avoids racing it.
+async function initTriagePill() {
+    await updateUnreadBadge();
+    refreshTriageUI();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     if (!document.getElementById("article-list")) return;
 
     restoreFiltersFromURL();
     loadInbox();
     loadFilters();
+    initTriagePill();
     setupSearch();
     setupSort();
     setupFilterPanel();
     setupBulkDeleteToolbar();
+    setupCardMenuOutsideClick();
+    setupSwipe();
     setupKeyboard();
 
     // Refresh after a save from the chrome-level save modal (sidebar.js).
@@ -1409,4 +2396,12 @@ document.addEventListener("DOMContentLoaded", () => {
         loadInbox();
         loadFilters();
     });
+
+    // Finding 2 (M3.2 Task 4 review): re-render the pill/zero-state whenever
+    // sidebar.js's shared count actually finishes refetching, not just on
+    // "tiro:content-saved" -- that event fires synchronously, BEFORE
+    // updateUnreadBadge()'s own fetch (called alongside it, unawaited) has
+    // resolved, so a save-while-on-inbox could otherwise leave the pill one
+    // fetch behind whatever loadInbox()'s own re-render happened to see.
+    document.addEventListener("tiro:unread-count-updated", refreshTriageUI);
 });

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import frontmatter
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tiro.database import get_connection
 from tiro.intelligence.analysis import analyze_article, get_cached_analysis
@@ -31,7 +31,7 @@ async def get_article(article_id: int, request: Request):
                 a.id, a.title, a.author, a.url, a.slug, a.summary,
                 a.word_count, a.reading_time_min, a.published_at, a.ingested_at,
                 a.is_read, a.rating, a.opened_count, a.markdown_path, a.ai_tier,
-                a.relevance_weight,
+                a.relevance_weight, a.snoozed_until,
                 s.name AS source_name, s.domain, s.is_vip, s.id AS source_id,
                 s.source_type
             FROM articles a
@@ -194,12 +194,42 @@ async def list_articles(
 
 
 class RateRequest(BaseModel):
-    rating: int
+    # Required-but-nullable (Finding 3, M3.2 final review): a default of
+    # `None` made an empty body `{}` silently equivalent to `{"rating":
+    # null}` (clear the rating) -- a client bug (missing field) and an
+    # explicit clear were indistinguishable. `Field(...)` makes the key
+    # itself required (missing `rating` -> 422), while the field's `int |
+    # None` type still accepts an explicit `{"rating": null}` to clear.
+    rating: int | None = Field(...)
 
 
 @router.patch("/{article_id}/rate")
 async def rate_article(article_id: int, body: RateRequest, request: Request):
-    """Set article rating: -1 (dislike), 1 (like), 2 (love)."""
+    """Set article rating: -1 (dislike), 1 (like), 2 (love).
+
+    `{"rating": null}` clears the rating back to unrated (M3.2 Task 3 —
+    the swipe-triage undo binder needs to restore a prior-NULL rating, and
+    -1/1/2 can't express that). Clearing never decrements `articles_rated`
+    (reading stats are transition-gated monotonic counters, same accepted
+    semantics as `opened_count`); a later re-rate counts as a first rating
+    again.
+    """
+    if body.rating is None:
+        conn = get_connection(request.app.state.config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Article not found")
+            conn.execute(
+                "UPDATE articles SET rating = NULL WHERE id = ?", (article_id,)
+            )
+            conn.commit()
+            return {"success": True, "data": {"id": article_id, "rating": None}}
+        finally:
+            conn.close()
+
     if body.rating not in (-1, 1, 2):
         raise HTTPException(status_code=400, detail="Rating must be -1, 1, or 2")
 
@@ -229,10 +259,26 @@ async def rate_article(article_id: int, body: RateRequest, request: Request):
         conn.close()
 
 
+class ReadRequest(BaseModel):
+    is_read: bool = True
+
+
 @router.patch("/{article_id}/read")
-async def mark_read(article_id: int, request: Request):
-    """Mark article as read and increment open count."""
+async def mark_read(article_id: int, request: Request, body: ReadRequest | None = None):
+    """Mark article as read and increment open count.
+
+    The body is optional and defaults to the historical no-body behavior
+    (`{"is_read": true}`). `{"is_read": false}` marks the article UNREAD
+    (M3.2 Task 3 — the swipe-archive undo binder restores the pre-archive
+    state server-side, not just client-side): it clears `is_read` WITHOUT
+    incrementing `opened_count` (nothing was opened) and WITHOUT touching
+    reading stats (`articles_read`/`total_reading_time_min` are
+    transition-gated monotonic counters — un-reading never decrements, and
+    a later re-read counts again; same accepted semantics as
+    `opened_count`).
+    """
     config = request.app.state.config
+    unmark = body is not None and body.is_read is False
     conn = get_connection(config.db_path)
     try:
         row = conn.execute(
@@ -242,6 +288,23 @@ async def mark_read(article_id: int, request: Request):
         if row is None:
             raise HTTPException(status_code=404, detail="Article not found")
         was_read = bool(row["is_read"])
+        if unmark:
+            conn.execute(
+                "UPDATE articles SET is_read = 0 WHERE id = ?", (article_id,)
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT is_read, opened_count FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
+            return {
+                "success": True,
+                "data": {
+                    "id": article_id,
+                    "is_read": row["is_read"],
+                    "opened_count": row["opened_count"],
+                },
+            }
         conn.execute(
             "UPDATE articles SET is_read = 1, opened_count = opened_count + 1 WHERE id = ?",
             (article_id,),

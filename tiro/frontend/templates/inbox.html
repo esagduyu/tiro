@@ -17,11 +17,23 @@
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/article"}'</code>
     </div>
+    <!-- Inbox-zero celebratory state (M3.2 Task 4) -- distinct from the
+         onboarding empty-state above (never-saved-anything) and the
+         filtered-empty message rendered inline in #article-list (filters
+         active). Shown only when triage has emptied the default,
+         unfiltered view; see inbox.js's updateInboxZeroState(). -->
+    <div id="inbox-zero-state" class="inbox-zero-state" style="display: none;">
+        <div class="inbox-zero-mark" aria-hidden="true">&#8266;</div>
+        <h2>Inbox zero &mdash; the oracle rests.</h2>
+        <p>Every article you kept has been read, archived, or snoozed. Tiro will wake you when there&rsquo;s more.</p>
+    </div>
     <div id="inbox-toolbar" class="inbox-toolbar" style="display: none;">
         <button id="classify-btn" class="classify-btn">Classify inbox</button>
+        <span id="triage-pill" class="triage-pill" style="display: none;"></span>
         <button id="vip-toggle" class="discard-toggle" title="Show only VIP articles">&#9733; VIP only</button>
         <button id="discard-toggle" class="discard-toggle" style="display: none;">Show discarded (0)</button>
         <button id="archived-toggle" class="discard-toggle" style="display: none;">Show archived</button>
+        <button id="snoozed-toggle" class="discard-toggle" style="display: none;">Show snoozed</button>
         <span id="classify-info" class="classify-info"></span>
         <select id="sort-select" class="sort-select">
             <option value="unread">Unread first</option>

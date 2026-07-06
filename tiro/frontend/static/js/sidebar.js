@@ -88,22 +88,62 @@ function closeSidebar() {
     document.getElementById('sidebar-overlay')?.classList.remove('open');
 }
 
-/* ---- Unread badge ---- */
+/* ---- Unread count (shared with inbox.js's "N to zero" pill, M3.2 Task 4) ----
+   `unreadCount` is the single source of truth for BOTH this sidebar badge
+   (every page) and the inbox toolbar's triage-progress pill (/inbox only).
+   inbox.js never runs its own parallel count -- it reads getUnreadCount()
+   and mutates via adjustUnreadCount(), so the two can never drift apart.
+   `null` means "not fetched yet" (distinct from a real 0), which inbox.js
+   uses to decide whether to hide its pill for "data isn't loaded" rather
+   than "zero unread". */
+
+let unreadCount = null;
+
+function renderUnreadBadge() {
+    const badge = document.getElementById('unread-badge');
+    if (!badge) return;
+    if (unreadCount !== null && unreadCount > 0) {
+        badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+        badge.style.display = '';
+    } else {
+        badge.style.display = 'none';
+    }
+}
 
 async function updateUnreadBadge() {
     try {
         const res = await fetch('/api/articles?is_read=false&include_decayed=false&count_only=true');
         const json = await res.json();
-        const badge = document.getElementById('unread-badge');
-        if (!badge) return;
-        const count = json.data?.count ?? 0;
-        if (count > 0) {
-            badge.textContent = count > 99 ? '99+' : count;
-            badge.style.display = '';
-        } else {
-            badge.style.display = 'none';
-        }
+        unreadCount = json.data?.count ?? 0;
+        renderUnreadBadge();
     } catch (e) {}
+    // Finding 2 (M3.2 Task 4 review): callers that trigger this (e.g. a save
+    // from the chrome-level save modal) don't await it -- they fire-and-
+    // forget it alongside a synchronous `notifyContentSaved()` dispatch, so
+    // a page-specific consumer's own re-render (inbox.js's loadInbox, via
+    // the "tiro:content-saved" listener) can resolve BEFORE this fetch does
+    // and end up rendering a stale count. Dispatched here, after the count
+    // is actually settled, so any listener re-renders from the true final
+    // value regardless of ordering. Same decoupled CustomEvent pattern as
+    // notifyContentSaved() -- this module stays free of a compile-time
+    // dependency on inbox.js.
+    document.dispatchEvent(new CustomEvent("tiro:unread-count-updated"));
+}
+
+function getUnreadCount() {
+    return unreadCount;
+}
+
+// Applies a local delta (e.g. -1 when an unread article leaves the inbox
+// via archive/snooze, +1 when undo or wake-now restores it) with no
+// network round-trip -- the whole point of "live-updating on every triage
+// action" (M3.2 Task 4 binding spec). No-op (returns null) if the count
+// hasn't been fetched yet, since there is nothing correct to adjust from.
+function adjustUnreadCount(delta) {
+    if (unreadCount === null) return null;
+    unreadCount = Math.max(0, unreadCount + delta);
+    renderUnreadBadge();
+    return unreadCount;
 }
 
 /* ---- Saved views (sidebar) ----
@@ -673,6 +713,8 @@ const INBOX_SHORTCUTS = [
     { keys: ["2"], desc: "Rate like" },
     { keys: ["3"], desc: "Rate love" },
     { keys: ["x"], desc: "Delete selected article" },
+    { keys: ["u"], desc: "Undo last triage action" },
+    { hint: "Swipe a card right to archive, left to snooze (touch)" },
     { hint: "Click checkboxes to bulk-select articles for deletion" },
     { keys: ["n"], desc: "Save new item (URL or email)" },
     { keys: ["c"], desc: "Classify / reclassify inbox" },
@@ -739,6 +781,7 @@ function hideShortcuts() {
 export {
     showShortcuts, hideShortcuts, INBOX_SHORTCUTS, READER_SHORTCUTS,
     loadSavedViews, openSaveModal, closeSaveModal,
+    updateUnreadBadge, getUnreadCount, adjustUnreadCount,
 };
 
 /* ---- Init (runs on every page) ---- */
@@ -752,8 +795,28 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById('mobile-menu-btn')?.addEventListener('click', openSidebar);
     document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
 
-    // Logout
-    document.getElementById('logout-btn')?.addEventListener('click', () => {
+    // Logout (M3.2 Task 4: SW article-cache hardening, M3.1 final-review
+    // adjudication). Tiro's auth posture is device possession, not cache
+    // secrecy -- logging out ends the session server-side regardless -- so
+    // this is defense-in-depth only: best-effort clear the service worker's
+    // article cache (which can hold previously-fetched /api/articles/{id}
+    // JSON bodies) before handing the device back. Feature-detected and
+    // wrapped in try/catch, and its own failure must NEVER block or delay
+    // the actual logout. The static cache (versioned, cookie-free assets)
+    // is deliberately left alone -- it's public content either way.
+    document.getElementById('logout-btn')?.addEventListener('click', async () => {
+        if ('caches' in window) {
+            try {
+                const keys = await caches.keys();
+                await Promise.all(
+                    keys
+                        .filter((k) => /^tiro-.*-articles$/.test(k))
+                        .map((k) => caches.delete(k))
+                );
+            } catch (e) {
+                // Best-effort only -- never blocks logout.
+            }
+        }
         fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
             window.location.href = '/login';
         });

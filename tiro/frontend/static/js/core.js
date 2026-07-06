@@ -183,7 +183,18 @@ export async function apiFetch(url, opts = {}) {
  * rules apply unchanged once callers migrate to this.
  */
 export function showToast(message, type) {
-    const existing = document.querySelector(".settings-toast");
+    // Exclude #undo-toast (Finding 7, M3.2 final review): inbox.js's undo
+    // binder (js/undo.js) manages that toast's own lifecycle -- an armed
+    // undo slot, a live setTimeout, and a "u" key binding all still valid.
+    // Removing it here (it also matches the plain ".settings-toast" class
+    // for shared CSS) without clearing that state would silently orphan a
+    // still-armed undo slot: the user could no longer see or reach the
+    // Undo button, yet "u" would still fire it. Excluding it is the safer
+    // of the two fixes (the alternative -- clearing the undo slot whenever
+    // a plain toast displaces it -- would need this module to reach into
+    // inbox.js's undo state); a plain toast now simply renders alongside
+    // a live undo toast instead of silently disappearing it.
+    const existing = document.querySelector(".settings-toast:not(#undo-toast)");
     if (existing) existing.remove();
 
     const toast = document.createElement("div");
