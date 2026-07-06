@@ -12,6 +12,10 @@ tiro-export-<random>.zip
 │   └── <slug>.md        # one file per exported article; YAML frontmatter + markdown body
 ├── wiki/                 # optional — only present if the library has synthesis pages (Phase 1b)
 │   └── <name>.md
+├── annotations/           # optional — one <stem>.jsonl per exported article that has highlights (Phase 2 M2.1)
+│   └── <stem>.jsonl
+├── notes/                 # optional — one <stem>.md per exported article that has an article-level note (Phase 2 M2.1)
+│   └── <stem>.md
 ├── metadata.json          # full structured data — see below
 ├── sources.opml           # OPML 2.0 listing of sources
 └── README.md              # bundle-local copy of this format's basics
@@ -19,7 +23,14 @@ tiro-export-<random>.zip
 
 `articles/` and `wiki/` filenames are not otherwise referenced by `metadata.json`
 except via `articles[*].markdown_path` (bare filename, matches the `articles/`
-entry) — there is no manifest cross-linking `wiki/` pages.
+entry) — there is no manifest cross-linking `wiki/` pages. `annotations/<stem>.jsonl`
+and `notes/<stem>.md` ARE cross-linked: `<stem>` is the same stem as the matching
+`articles/<stem>.md` file (i.e. `Path(articles[*].markdown_path).stem`) — this is
+how highlights/notes are matched back to their owning article, both in the
+sidecar files themselves and via `highlights[*].article_id`/`notes[*].article_id`
+in `metadata.json`. Unlike `wiki/`, `annotations/`/`notes/` ARE scoped to the
+export's article filters: a filtered export includes only the sidecars of the
+articles it actually exported, never a sidecar for an excluded article.
 
 **`tiro import` (`tiro/importer.py`) does not import `wiki/`.** A bundle
 carries `wiki/` when the source library has synthesis pages, but `import_bundle`
@@ -30,11 +41,28 @@ Phase 1b wave W1. Snapshots/restore (`tiro/backup.py`), which replace the
 whole library rather than merging into an existing one, DO round-trip
 `wiki/` faithfully since they copy the directory wholesale.
 
+**`tiro import` DOES import `annotations/`/`notes/`** (Phase 2 M2.1 Task 4):
+for each bundle article, its highlight/note sidecar lines are merged into the
+matching local article's own sidecars, keyed by each highlight's `uid` —
+`skip` keeps every existing local line untouched and only adds bundle lines
+whose uid isn't already present locally; `overwrite` replaces both of the
+local article's sidecar files wholesale with the bundle's; `keep-both` copies
+the bundle's lines under the newly-created duplicate article's own (fresh)
+stem, minting fresh uids so they can never collide with the original's. A
+bundle article with neither an `annotations/<stem>.jsonl` file nor a
+`notes/<stem>.md` file is a no-op for that article (nothing to merge). Older
+bundles that predate Task 4 have neither the directories nor the
+`highlights`/`notes` metadata keys — importing them is unaffected. After
+every article in the run has been processed, `import_bundle` runs
+`reconcile_annotations()` once to rebuild the derived `highlights`/`notes`
+SQLite rows from whatever sidecar files ended up on disk (files-win, same as
+every other sidecar write path in the codebase).
+
 ## metadata.json keys
 
 Top-level: `exported_at` (ISO 8601 timestamp), `tiro_version` (string), `filters`
 (the tag/source_id/rating_min/date_from filters used, any may be `null`), plus
-the ten data keys below. Each is a JSON array of row objects; column names match
+the twelve data keys below. Each is a JSON array of row objects; column names match
 the row's SQL source verbatim (snake_case).
 
 | Key | Row shape | Notes |
@@ -49,6 +77,8 @@ the row's SQL source verbatim (snake_case).
 | `digests` | `date, digest_type, content, article_ids, created_at` | **Whole-library**, not scoped to the export's article filters — a digest can reference articles outside the current filter. `digest_type` is one of `ranked`/`by_topic`/`by_entity`. `article_ids` is a JSON-encoded string of numeric IDs, not parsed here. |
 | `reading_stats` | `date, articles_saved, articles_read, articles_rated, total_reading_time_min` | **Whole-library**, one row per calendar date; not article-filtered (daily aggregates aren't per-article). |
 | `audio` | `article_id, voice, model, duration_seconds, file_size_bytes, generated_at` | Scoped to the exported articles. Deliberately omits the internal `file_path` column — cached MP3s are not included in the bundle. |
+| `highlights` | `id, uid, article_id, article_uid, quote_text, prefix_context, suffix_context, text_position_start, text_position_end, content_hash, color, created_at, updated_at` | Scoped to the exported articles. `article_uid` is joined in for cross-database re-keying (same rationale as `source_*` on `articles`). This is the SQLite-derived-row shape (`_get_highlights`), a fallback for importers that don't read the `annotations/<stem>.jsonl` sidecar files directly — the sidecar files are the actual source of truth. |
+| `notes` | `id, uid, article_id, article_uid, highlight_id, body_markdown, created_at, updated_at` | Scoped to the exported articles; covers BOTH note kinds. `highlight_id` set = a highlight-anchored note (inlined in that highlight's sidecar line as `note_markdown`, not a separate file); `highlight_id: null` = the one article-level note (`notes/<stem>.md`). Same sidecar-files-are-truth caveat as `highlights` above. |
 
 ## Markdown frontmatter fields
 

@@ -172,5 +172,157 @@ def test_export_schema_doc_lists_all_metadata_keys():
     from pathlib import Path
 
     doc = (Path(__file__).parent.parent / "EXPORT_SCHEMA.md").read_text()
-    for key in ("digests", "reading_stats", "audio", "sources.opml", "uid"):
+    for key in ("digests", "reading_stats", "audio", "sources.opml", "uid", "highlights", "notes"):
         assert key in doc, key
+
+
+# --- Highlights + notes sidecars (Phase 2 M2.1 Task 4) -----------------------
+
+
+def _seed_article_with_annotations(config, *, stem="art-1", title="T1"):
+    """Seed an article + one highlight (with an anchored note) + one
+    article-level note, both as SQLite rows AND as sidecar files (mirroring
+    what routes_annotations.py's sidecar-first writes produce)."""
+    from tiro.annotations import write_annotations, write_note
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT OR IGNORE INTO sources (name, source_type) VALUES ('S', 'web')")
+    article_uid = new_ulid()
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES (?, 1, ?, ?, ?)",
+        (article_uid, title, stem, f"{stem}.md"),
+    )
+    article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    h_uid = new_ulid()
+    conn.execute(
+        """INSERT INTO highlights
+           (uid, article_id, quote_text, prefix_context, suffix_context,
+            text_position_start, text_position_end, content_hash, color,
+            created_at, updated_at)
+           VALUES (?, ?, 'quote', 'pre', 'suf', 0, 5, 'hash', 'yellow',
+                   '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (h_uid, article_id),
+    )
+    highlight_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute(
+        """INSERT INTO notes (uid, article_id, highlight_id, body_markdown, created_at, updated_at)
+           VALUES (?, ?, ?, 'hl note', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (new_ulid(), article_id, highlight_id),
+    )
+    conn.execute(
+        """INSERT INTO notes (uid, article_id, highlight_id, body_markdown, created_at, updated_at)
+           VALUES (?, ?, NULL, 'article note', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (new_ulid(), article_id),
+    )
+    conn.commit()
+    conn.close()
+    (config.articles_dir / f"{stem}.md").write_text(f"---\ntitle: {title}\n---\nbody")
+
+    write_annotations(
+        config, stem,
+        [{
+            "uid": h_uid, "article_uid": article_uid, "quote": "quote",
+            "prefix": "pre", "suffix": "suf", "position_start": 0, "position_end": 5,
+            "content_hash": "hash", "color": "yellow", "note_markdown": "hl note",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        }],
+    )
+    write_note(config, stem, "article note")
+    return article_id, article_uid
+
+
+def test_export_includes_annotation_sidecars_for_exported_articles(initialized_library):
+    import zipfile
+
+    config = initialized_library
+    _seed_article_with_annotations(config)
+
+    zip_path = export_library(config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert "annotations/art-1.jsonl" in names
+            assert "notes/art-1.md" in names
+    finally:
+        zip_path.unlink()
+
+
+def test_export_metadata_has_highlights_and_notes(initialized_library):
+    import json
+    import zipfile
+
+    config = initialized_library
+    _, article_uid = _seed_article_with_annotations(config)
+
+    zip_path = export_library(config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            meta = json.loads(zf.read("metadata.json"))
+        assert len(meta["highlights"]) == 1
+        assert meta["highlights"][0]["article_uid"] == article_uid
+        assert meta["highlights"][0]["quote_text"] == "quote"
+        assert len(meta["notes"]) == 2
+        bodies = {n["body_markdown"] for n in meta["notes"]}
+        assert bodies == {"hl note", "article note"}
+    finally:
+        zip_path.unlink()
+
+
+def test_filtered_export_only_includes_matching_articles_sidecars(initialized_library):
+    """A filtered export (e.g. by source_id) must include ONLY the sidecars
+    of the articles that pass the filter, not every sidecar in the library."""
+    import zipfile
+
+    from tiro.database import get_connection
+
+    config = initialized_library
+    _seed_article_with_annotations(config, stem="art-1", title="T1")
+    _seed_article_with_annotations(config, stem="art-2", title="T2")
+
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT OR IGNORE INTO sources (name, source_type) VALUES ('Other', 'web')")
+    other_source_id = conn.execute(
+        "SELECT id FROM sources WHERE name = 'Other'"
+    ).fetchone()["id"]
+    conn.execute("UPDATE articles SET source_id = ? WHERE slug = 'art-2'", (other_source_id,))
+    conn.commit()
+    conn.close()
+
+    zip_path = export_library(config, source_id=other_source_id)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert "annotations/art-2.jsonl" in names
+            assert "notes/art-2.md" in names
+            assert "annotations/art-1.jsonl" not in names
+            assert "notes/art-1.md" not in names
+            import json
+
+            meta = json.loads(zf.read("metadata.json"))
+            assert {h["article_id"] for h in meta["highlights"]} == {
+                a["id"] for a in meta["articles"]
+            }
+    finally:
+        zip_path.unlink()
+
+
+def test_export_omits_annotation_dirs_when_absent(test_config):
+    import zipfile
+
+    from tiro.database import init_db, migrate_db
+
+    test_config.articles_dir.mkdir(parents=True, exist_ok=True)
+    init_db(test_config.db_path)
+    migrate_db(test_config.db_path)
+
+    zip_path = export_library(test_config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert not any(n.startswith("annotations/") for n in names)
+            assert not any(n.startswith("notes/") for n in names)
+    finally:
+        zip_path.unlink()

@@ -23,6 +23,7 @@ import yaml
 import zstandard
 
 from tiro import __version__
+from tiro.annotations import annotations_dir, notes_dir
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 
@@ -167,6 +168,18 @@ def create_snapshot(
                     for page in sorted(config.wiki_dir.rglob("*.md")):
                         rel = page.relative_to(config.wiki_dir)
                         tar.add(page, arcname=f"wiki/{rel.as_posix()}")
+                # Highlights + notes sidecars (Phase 2 M2.1): files-as-truth,
+                # whole-library (unlike export.py, snapshots are never
+                # filtered) -- restore's generic `dest = library /
+                # member.name` fallback already handles these arcnames.
+                ann_dir = annotations_dir(config)
+                if ann_dir.exists():
+                    for f in sorted(ann_dir.glob("*.jsonl")):
+                        tar.add(f, arcname=f"annotations/{f.name}")
+                nt_dir = notes_dir(config)
+                if nt_dir.exists():
+                    for f in sorted(nt_dir.glob("*.md")):
+                        tar.add(f, arcname=f"notes/{f.name}")
                 _add_bytes(tar, "embeddings.jsonl", _dump_embeddings_jsonl(config))
                 audio_dir = config.library / "audio"
                 if include_audio and audio_dir.exists():

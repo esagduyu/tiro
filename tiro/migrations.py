@@ -298,6 +298,47 @@ def _m008_wiki_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m009_highlights_notes(conn: sqlite3.Connection) -> None:
+    """Highlights + notes tables (Phase 2 M2.1 first commit): sidecar files
+    are the source of truth (owned by later tasks); these are the derived
+    SQLite index, same files-win pattern as wiki_pages (_m008).
+
+    New-table contract fourth practice (see module docstring / _m006/_m007/
+    _m008): tables only, no backfill — a fresh 009 DB has no highlights/notes
+    sidecar files yet."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS highlights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL,
+            article_id INTEGER NOT NULL REFERENCES articles(id),
+            quote_text TEXT NOT NULL,
+            prefix_context TEXT,
+            suffix_context TEXT,
+            text_position_start INTEGER,
+            text_position_end INTEGER,
+            content_hash TEXT,
+            color TEXT NOT NULL DEFAULT 'yellow',
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL,
+            article_id INTEGER NOT NULL REFERENCES articles(id),
+            highlight_id INTEGER REFERENCES highlights(id),
+            body_markdown TEXT NOT NULL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id)")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -307,6 +348,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "phase-0 tables (sessions/api_tokens) for pre-auth DBs", _m006_phase0_tables),
     (7, "authors + article_authors + saved_views", _m007_authors_views),
     (8, "wiki derived-index tables", _m008_wiki_tables),
+    (9, "highlights + notes tables", _m009_highlights_notes),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

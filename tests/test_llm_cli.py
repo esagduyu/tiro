@@ -149,3 +149,35 @@ def test_check_cli_backend_ok(test_config, monkeypatch):
     monkeypatch.setattr(llm_cli.shutil, "which", lambda name: f"/usr/local/bin/{name}")
     assert llm_cli.check_cli_backend(test_config, "claude-cli") == "ok"
     assert llm_cli.check_cli_backend(test_config, "codex-cli") == "ok"
+
+
+def test_claude_cli_scrubs_anthropic_api_key_from_child_env(
+    test_config, fake_cli, monkeypatch
+):
+    """A stray ANTHROPIC_API_KEY (direnv etc.) must not reach the claude CLI —
+    it takes precedence over subscription login inside the CLI, defeating the
+    backend's purpose (and failing outright on a depleted key)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stray")
+    monkeypatch.setenv("HOME_MARKER_FOR_TEST", "kept")
+    calls = fake_cli(json.dumps({"type": "result", "is_error": False, "result": "ok"}))
+    test_config.ai_heavy_provider = "claude-cli"
+    llm_call(test_config, "heavy", "x", purpose="digest")
+    env = calls["kwargs"]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    # The rest of the environment (CLI auth lives in HOME) passes through.
+    assert env["HOME_MARKER_FOR_TEST"] == "kept"
+
+
+def test_codex_cli_scrubs_openai_api_key_from_child_env(
+    test_config, fake_cli, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-stray")
+    stdout = _codex_jsonl(
+        {"type": "item.completed", "item": {"id": "i0", "type": "agent_message",
+                                            "text": "ok"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    )
+    calls = fake_cli(stdout)
+    test_config.ai_heavy_provider = "codex-cli"
+    llm_call(test_config, "heavy", "x", purpose="digest")
+    assert "OPENAI_API_KEY" not in calls["kwargs"]["env"]

@@ -98,6 +98,96 @@ def test_restore_recreates_wiki_subdir_pages(initialized_library, tmp_path):
     assert restored.read_bytes() == original_bytes
 
 
+def _seed_article_with_annotations(config, *, stem="art-1"):
+    """Seed one article + one highlight (with an anchored note) + an
+    article-level note, as both SQLite rows AND sidecar files."""
+    from tiro.annotations import write_annotations, write_note
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT OR IGNORE INTO sources (name, source_type) VALUES ('S', 'web')")
+    article_uid = new_ulid()
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES (?, 1, 'T1', ?, ?)",
+        (article_uid, stem, f"{stem}.md"),
+    )
+    article_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    h_uid = new_ulid()
+    conn.execute(
+        """INSERT INTO highlights
+           (uid, article_id, quote_text, prefix_context, suffix_context,
+            text_position_start, text_position_end, content_hash, color,
+            created_at, updated_at)
+           VALUES (?, ?, 'quote', 'pre', 'suf', 0, 5, 'hash', 'yellow',
+                   '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (h_uid, article_id),
+    )
+    conn.execute(
+        """INSERT INTO notes (uid, article_id, highlight_id, body_markdown, created_at, updated_at)
+           VALUES (?, ?, NULL, 'article note', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+        (new_ulid(), article_id),
+    )
+    conn.commit()
+    conn.close()
+    (config.articles_dir / f"{stem}.md").write_text("---\ntitle: T1\n---\nbody")
+
+    write_annotations(
+        config, stem,
+        [{
+            "uid": h_uid, "article_uid": article_uid, "quote": "quote",
+            "prefix": "pre", "suffix": "suf", "position_start": 0, "position_end": 5,
+            "content_hash": "hash", "color": "yellow", "note_markdown": None,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        }],
+    )
+    write_note(config, stem, "article note")
+    return article_id
+
+
+def test_snapshot_contains_annotation_sidecars(initialized_library, tmp_path):
+    config = initialized_library
+    _seed_article_with_annotations(config)
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    names = _read_snapshot_names(snap)
+    assert "annotations/art-1.jsonl" in names
+    assert "notes/art-1.md" in names
+
+
+def test_restore_round_trips_highlight_and_note_rows_and_files(initialized_library, tmp_path):
+    """Create a highlight + note -> snapshot -> wipe the library -> restore
+    -> both the sidecar FILES and the derived SQLite ROWS must be present
+    (tiro.db is restored wholesale, so the rows come back with it)."""
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+
+    config = initialized_library
+    article_id = _seed_article_with_annotations(config)
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    restore_snapshot(config, snap)
+
+    assert (config.library / "annotations" / "art-1.jsonl").exists()
+    assert (config.library / "notes" / "art-1.md").exists()
+    assert (config.library / "notes" / "art-1.md").read_text() == "article note"
+
+    conn = get_connection(config.db_path)
+    try:
+        highlight = conn.execute(
+            "SELECT quote_text FROM highlights WHERE article_id = ?", (article_id,)
+        ).fetchone()
+        note = conn.execute(
+            "SELECT body_markdown FROM notes WHERE article_id = ? AND highlight_id IS NULL",
+            (article_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert highlight is not None and highlight["quote_text"] == "quote"
+    assert note is not None and note["body_markdown"] == "article note"
+
+
 def test_snapshot_strips_secrets(initialized_library, tmp_path):
     config = initialized_library
     config.anthropic_api_key = "sk-ant-SECRET"

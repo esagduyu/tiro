@@ -180,6 +180,35 @@ CREATE TABLE IF NOT EXISTS wiki_page_articles (
     PRIMARY KEY (page_id, article_id)
 );
 
+-- Highlights + notes (Phase 2 M2.1): sidecar files are the source of truth,
+-- these tables are the derived SQLite index (files-win, same pattern as
+-- wiki_pages above). Anchors reconcile against the article's current
+-- markdown via tiro/anchors.py.
+CREATE TABLE IF NOT EXISTS highlights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE NOT NULL,
+    article_id INTEGER NOT NULL REFERENCES articles(id),
+    quote_text TEXT NOT NULL,
+    prefix_context TEXT,
+    suffix_context TEXT,
+    text_position_start INTEGER,
+    text_position_end INTEGER,
+    content_hash TEXT,
+    color TEXT NOT NULL DEFAULT 'yellow',
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE NOT NULL,
+    article_id INTEGER NOT NULL REFERENCES articles(id),
+    highlight_id INTEGER REFERENCES highlights(id),
+    body_markdown TEXT NOT NULL,
+    created_at TEXT,
+    updated_at TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -199,6 +228,8 @@ CREATE INDEX IF NOT EXISTS idx_article_authors_author ON article_authors(author_
 CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_views_uid ON saved_views(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_uid ON wiki_pages(uid);
 CREATE INDEX IF NOT EXISTS idx_wiki_page_articles_article ON wiki_page_articles(article_id);
+CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id);
+CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id);
 """
 
 

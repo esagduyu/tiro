@@ -50,6 +50,26 @@ def _delete_files(config: TiroConfig, markdown_path: str | None, article_id: int
         logger.warning("Audio unlink failed for article %d: %s", article_id, e)
 
 
+def _delete_annotation_sidecars(config: TiroConfig, markdown_path: str | None, article_id: int) -> None:
+    """Remove the article's highlights sidecar (`annotations/{stem}.jsonl`)
+    and article-level note sidecar (`notes/{stem}.md`), if either exists.
+    `markdown_path` must be read BEFORE the article row is deleted -- it's
+    the only thing the stem can be derived from (Phase 2 M2.1)."""
+    if not markdown_path:
+        return
+    from tiro.annotations import annotations_dir, notes_dir, sidecar_stem
+
+    stem = sidecar_stem(markdown_path)
+    try:
+        (annotations_dir(config) / f"{stem}.jsonl").unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Annotations sidecar unlink failed for article %d: %s", article_id, e)
+    try:
+        (notes_dir(config) / f"{stem}.md").unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Note sidecar unlink failed for article %d: %s", article_id, e)
+
+
 def delete_article(config: TiroConfig, article_id: int) -> bool:
     """Remove an article from all stores. Returns True if it existed."""
     conn = get_connection(config.db_path)
@@ -62,6 +82,7 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
         # Non-SQLite stores first (best-effort)
         _delete_vector(config, article_id)
         _delete_files(config, markdown_path, article_id)
+        _delete_annotation_sidecars(config, markdown_path, article_id)
 
         # SQLite last, in one transaction: junctions (both directions) + audio + article
         conn.execute("DELETE FROM article_tags WHERE article_id = ?", (article_id,))
@@ -72,6 +93,12 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
             (article_id, article_id),
         )
         conn.execute("DELETE FROM audio WHERE article_id = ?", (article_id,))
+        # Highlights + notes (Phase 2 M2.1): notes.highlight_id REFERENCES
+        # highlights(id) with foreign_keys=ON, so notes must go first.
+        # notes.article_id is set for BOTH kinds (article-level and
+        # highlight-anchored), so this one DELETE clears both.
+        conn.execute("DELETE FROM notes WHERE article_id = ?", (article_id,))
+        conn.execute("DELETE FROM highlights WHERE article_id = ?", (article_id,))
 
         # Wiki (Phase 1b): wiki_page_articles.article_id REFERENCES articles(id)
         # with foreign_keys=ON, so any page citing this article would make the
