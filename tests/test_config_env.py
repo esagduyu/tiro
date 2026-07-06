@@ -119,6 +119,39 @@ def test_run_py_config_path_honors_tiro_config(monkeypatch, tmp_path):
     assert run._config_path() == str(cfg)
 
 
+def test_cli_config_default_honors_tiro_config(monkeypatch, tmp_path):
+    """cli.py's `--config` default must honor TIRO_CONFIG (absolute path),
+    mirroring run.py's and tiro/mcp/server.py's _config_path() (Finding 2,
+    M2.3 final review -- cli.py was the one remaining place that silently
+    ignored TIRO_CONFIG, the same footgun that already bit run.py once).
+    An explicit --config must still win over the env var."""
+    import sys
+
+    from tiro import cli
+
+    captured = {}
+    monkeypatch.setattr(cli, "cmd_status", lambda args: captured.update(config=args.config))
+
+    cfg = tmp_path / "elsewhere.yaml"
+    monkeypatch.setenv("TIRO_CONFIG", str(cfg))
+    monkeypatch.setattr(sys, "argv", ["tiro", "status"])
+    cli.main()
+    assert captured["config"] == str(cfg)
+
+    # explicit --config wins over TIRO_CONFIG even when the env var is set
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", ["tiro", "--config", "explicit.yaml", "status"])
+    cli.main()
+    assert captured["config"] == "explicit.yaml"
+
+    # no TIRO_CONFIG set: falls back to the historical "config.yaml" default
+    captured.clear()
+    monkeypatch.delenv("TIRO_CONFIG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["tiro", "status"])
+    cli.main()
+    assert captured["config"] == "config.yaml"
+
+
 def test_env_overlay_applied_before_api_key_sync(tmp_path, monkeypatch):
     """The overlay must run before the ANTHROPIC_API_KEY env-sync so that an
     env-provided anthropic_api_key still gets synced to os.environ."""

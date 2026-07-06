@@ -300,6 +300,44 @@ def test_session_heading_201_chars_truncated_to_200(authenticated_client, config
     assert len(dwell[0]["heading"]) == 200
 
 
+def test_session_started_at_exactly_40_chars_kept(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "started_at": "s" * 40}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    assert row["started_at"] == "s" * 40
+
+
+def test_session_started_at_over_40_chars_trimmed(authenticated_client, configured_library):
+    """Review finding 3 (LOW): started_at was unclamped -- a hostile or
+    buggy client could stuff an arbitrarily long string in. Trim to 40 chars
+    (mirrors the trim style used for dwell headings, not a 400)."""
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "started_at": "s" * 500}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    assert row["started_at"] == "s" * 40
+    assert len(row["started_at"]) == 40
+
+
+def test_session_started_at_none_stays_none(authenticated_client, configured_library):
+    """started_at is Optional -- the clamp must not choke on None."""
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "started_at": None}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    assert row["started_at"] is None
+
+
 # --- auth --------------------------------------------------------------------
 
 

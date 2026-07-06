@@ -1208,13 +1208,17 @@ function handleTelemetryVisibilityChange() {
 
 function sendTelemetry() {
     if (!telemetryState || telemetryState.sent) return;
-    telemetryState.sent = true; // set BEFORE any early return: never send twice, never retry
-
-    teardownTelemetryListeners();
 
     if (telemetryState.activeSeconds === 0 && telemetryState.maxScrollPct === 0) {
-        return; // empty-session guard — see module comment above
+        // Empty-session guard — see module comment above. Checked BEFORE the
+        // sent flag/teardown below: an instant hide that trips this guard
+        // must not burn the page load's once-per-load send budget, so a
+        // returning-visible user later in the same load can still send.
+        return;
     }
+    telemetryState.sent = true; // set BEFORE any early return past this point: never send twice, never retry
+
+    teardownTelemetryListeners();
 
     const dwell = Array.from(telemetryState.dwell.entries())
         .slice(0, 100)

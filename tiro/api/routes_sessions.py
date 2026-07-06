@@ -33,6 +33,7 @@ router = APIRouter(prefix="/api/articles", tags=["sessions"])
 MAX_ACTIVE_SECONDS = 86400
 MAX_DWELL_ENTRIES = 100
 MAX_HEADING_CHARS = 200
+MAX_STARTED_AT_CHARS = 40
 
 
 class DwellEntry(BaseModel):
@@ -94,6 +95,9 @@ async def record_reading_session(article_id: int, request: Request):
 
         max_scroll_pct = _clamp(payload.max_scroll_pct, 0, 100)
         active_seconds = _clamp(payload.active_seconds, 0, MAX_ACTIVE_SECONDS)
+        started_at = (
+            payload.started_at[:MAX_STARTED_AT_CHARS] if payload.started_at is not None else None
+        )
 
         dwell = [
             {
@@ -112,7 +116,7 @@ async def record_reading_session(article_id: int, request: Request):
             (
                 new_ulid(),
                 article_id,
-                payload.started_at,
+                started_at,
                 _now_iso(),
                 max_scroll_pct,
                 active_seconds,

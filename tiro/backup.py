@@ -6,13 +6,16 @@ line) and re-upserted on restore; anything missing falls back to
 vector_status='pending' and the retry loop re-embeds. {library}/backups/ is
 excluded from snapshots (recursion guard). Secrets are stripped from the
 bundled config-snapshot.yaml (reference only — restore never touches the
-live config.yaml).
+live config.yaml). `reading_sessions` rows (ephemeral local telemetry, M2.3)
+are scrubbed from the throwaway DB copy before it's tarred — snapshots never
+carry them, matching the docs' promise (see `_scrub_reading_sessions`).
 """
 
 import json
 import logging
 import os
 import shutil
+import sqlite3
 import tarfile
 import tempfile
 from contextlib import contextmanager
@@ -111,6 +114,32 @@ def _dump_embeddings_jsonl(config: TiroConfig) -> bytes:
     return ("\n".join(lines) + ("\n" if lines else "")).encode()
 
 
+def _scrub_reading_sessions(db_copy: Path) -> None:
+    """Delete all rows from `reading_sessions` in the throwaway snapshot DB
+    copy. reading_sessions (migration 010) is ephemeral local telemetry, not
+    library content -- README/docs promise backups exclude it, so this makes
+    that promise true rather than just weakening the docs (controller
+    decision O-6). Operates ONLY on `db_copy` (a tempdir copy produced by
+    this function's caller) -- the live `config.db_path` is never opened
+    here. Uses a plain (non-WAL) connection so the DELETE lands directly in
+    the copy's single file: `create_snapshot` only `tar.add`s that one path,
+    so anything left behind in a separate -wal/-shm sidecar would silently
+    fail to be scrubbed from the archive. Guards for pre-010 databases
+    (table doesn't exist yet) by checking sqlite_master first rather than
+    relying on a caught OperationalError.
+    """
+    conn = sqlite3.connect(str(db_copy))
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reading_sessions'"
+        ).fetchone()
+        if has_table:
+            conn.execute("DELETE FROM reading_sessions")
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def _checkpointed_db_copy(config: TiroConfig, dest: Path) -> None:
     conn = get_connection(config.db_path)
     try:
@@ -118,6 +147,7 @@ def _checkpointed_db_copy(config: TiroConfig, dest: Path) -> None:
     finally:
         conn.close()
     shutil.copy2(config.db_path, dest)
+    _scrub_reading_sessions(dest)
 
 
 def create_snapshot(
