@@ -6,7 +6,7 @@ ARTICLE_COLUMNS = """
     a.id, a.uid, a.title, a.author, a.url, a.slug, a.summary,
     a.word_count, a.reading_time_min, a.published_at, a.ingested_at,
     a.is_read, a.rating, a.opened_count, a.ai_tier,
-    a.relevance_weight, a.ingestion_method,
+    a.relevance_weight, a.ingestion_method, a.snoozed_until,
     s.name AS source_name, s.domain, s.is_vip, s.id AS source_id,
     s.source_type
 """

@@ -1,9 +1,11 @@
 /* Tiro — inbox (article list) module (M2.0 split of app.js, Task 2).
  *
  * Owns the /inbox page only: article list rendering + sort, search, tier
- * toolbar (classify/discard/archived/VIP-only), the filter panel + active
- * filter pills, pagination, inbox keyboard navigation, and single/bulk
- * delete. Loaded as `<script type="module">` from inbox.html only.
+ * toolbar (classify/discard/archived/snoozed/VIP-only), the filter panel +
+ * active filter pills, pagination, inbox keyboard navigation, single/bulk
+ * delete, and (M3.2 Task 1) the per-card overflow menu + snooze preset
+ * sheet + wake-time chip. Loaded as `<script type="module">` from
+ * inbox.html only.
  *
  * Digest logic (previously interleaved in the same app.js file) now lives
  * in its own js/digest.js module — see that file's header for why the split
@@ -32,6 +34,7 @@ let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
 let selectedIndex = -1; // keyboard-selected article index
 let showArchived = false; // whether to include decayed articles
+let showSnoozed = false; // whether to include snoozed articles (M3.2)
 let showVIPOnly = false; // whether to filter to VIP articles only
 let currentPage = 1;
 let perPage = 50; // default page size
@@ -57,6 +60,14 @@ function buildQueryString() {
     // Archived / decayed
     if (!showArchived) {
         params.set("include_decayed", "false");
+    }
+
+    // Snoozed (M3.2) — API defaults to excluding snoozed articles from the
+    // inbox, so only set the param when the toggle is ON (opposite polarity
+    // from include_decayed, whose default is permissive and needs an
+    // explicit "false" to hide).
+    if (showSnoozed) {
+        params.set("include_snoozed", "true");
     }
 
     // Active filters
@@ -207,6 +218,15 @@ function renderArticle(a, showScore) {
     if (a.is_vip) classes.push("is-vip");
     if (a.ai_tier) classes.push(`tier-${a.ai_tier}`);
 
+    // Snoozed (M3.2): only ever present in the payload when the Snoozed
+    // toggle asked for include_snoozed=true (the default fetch hides these
+    // articles server-side entirely). A snoozed_until in the past means the
+    // snooze already expired — treat that as a normal, non-dimmed card
+    // (mirrors the server's own auto-reappear semantics in
+    // build_article_filters()).
+    const isSnoozed = !!(a.snoozed_until && new Date(a.snoozed_until) > new Date());
+    if (isSnoozed) classes.push("is-snoozed");
+
     const date = formatDate(a.published_at || a.ingested_at);
     const summary = a.summary || "";
     const tags = (a.tags || [])
@@ -230,6 +250,18 @@ function renderArticle(a, showScore) {
     const checked = isSelectedForDelete ? "checked" : "";
     if (isSelectedForDelete) classes.push("bulk-selected");
 
+    // Wake-time chip (M3.2) — only rendered while actively snoozed. Short
+    // date via core's formatDate(), same as every other date shown in this
+    // card; esc()'d even though formatDate() only ever returns a fixed
+    // "Mon D[, YYYY]" shape, per the "esc() every new server-derived string"
+    // convention.
+    const snoozedChip = isSnoozed
+        ? `<div class="snoozed-chip">
+            <span class="snoozed-chip-label">Snoozed until ${esc(formatDate(a.snoozed_until))}</span>
+            <button class="wake-now-btn" data-article-id="${a.id}">Wake now</button>
+        </div>`
+        : "";
+
     return `
     <article class="${classes.join(" ")}" data-id="${a.id}">
         <input type="checkbox" class="bulk-select-checkbox" data-id="${a.id}" title="Select for bulk delete" ${checked}>
@@ -252,8 +284,17 @@ function renderArticle(a, showScore) {
             </h2>
             ${summary ? `<p class="article-summary"><strong>TL;DR</strong> &ndash; <em>${esc(summary)}</em></p>` : ""}
             ${tags ? `<div class="article-tags">${tags}</div>` : ""}
+            ${snoozedChip}
         </div>
         <div class="article-actions">
+            <div class="card-menu">
+                <button class="card-menu-btn" data-article-id="${a.id}"
+                        aria-haspopup="true" aria-expanded="false"
+                        title="More actions">&#8942;</button>
+                <div class="card-menu-dropdown" hidden>
+                    <button class="card-menu-item card-menu-snooze" data-action="snooze" data-article-id="${a.id}">Snooze&hellip;</button>
+                </div>
+            </div>
             <button class="rate-btn love ${activeRating === "love" ? "active" : ""}"
                     data-article-id="${a.id}" data-rating="2"
                     title="Love">&hearts;</button>
@@ -313,6 +354,55 @@ function attachListeners() {
         });
     });
 
+    // Card overflow menu (M3.2) — "⋯" button toggles a per-card dropdown;
+    // its first (and for T1, only) item opens the snooze preset sheet. T3
+    // extends this same dropdown with swipe-triage's other actions.
+    document.querySelectorAll(".card-menu-btn").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const dropdown = btn.nextElementSibling;
+            const wasOpen = dropdown && !dropdown.hidden;
+            closeAllCardMenus();
+            if (dropdown && !wasOpen) {
+                dropdown.hidden = false;
+                btn.setAttribute("aria-expanded", "true");
+            }
+        });
+    });
+
+    document.querySelectorAll('.card-menu-item[data-action="snooze"]').forEach((item) => {
+        item.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closeAllCardMenus();
+            openSnoozeSheet(Number(item.dataset.articleId));
+        });
+    });
+
+    // Wake now (M3.2) — clears snoozed_until immediately via PATCH {until: null}.
+    document.querySelectorAll(".wake-now-btn").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const articleId = btn.dataset.articleId;
+            try {
+                const res = await fetch(`/api/articles/${articleId}/snooze`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ until: null }),
+                });
+                const json = await res.json();
+                if (json.success) {
+                    showToast("Article woken up", "success");
+                    await loadInbox();
+                } else {
+                    showToast("Failed to wake article", "error");
+                }
+            } catch (err) {
+                console.error("Wake now failed:", err);
+                showToast("Failed to wake article", "error");
+            }
+        });
+    });
+
     // VIP star toggle
     document.querySelectorAll(".vip-star").forEach((star) => {
         star.addEventListener("click", async (e) => {
@@ -365,6 +455,107 @@ function attachListeners() {
             window.location.href = link.href;
         });
     });
+}
+
+/* ---- Card overflow menu + snooze (M3.2 Task 1) ---- */
+
+function closeAllCardMenus() {
+    document.querySelectorAll(".card-menu-dropdown").forEach((d) => {
+        d.hidden = true;
+    });
+    document.querySelectorAll(".card-menu-btn").forEach((b) => {
+        b.setAttribute("aria-expanded", "false");
+    });
+}
+
+const SNOOZE_PRESET_LABELS = {
+    tonight: "Tonight",
+    tomorrow: "Tomorrow",
+    weekend: "Weekend",
+    next_week: "Next week",
+};
+
+function openSnoozeSheet(articleId) {
+    closeSnoozeSheet();
+
+    const overlay = document.createElement("div");
+    overlay.id = "snooze-sheet-overlay";
+    overlay.className = "export-overlay";
+    overlay.innerHTML =
+        '<div class="export-dialog snooze-sheet">' +
+            "<h3>Snooze until&hellip;</h3>" +
+            '<div class="snooze-preset-grid">' +
+                Object.entries(SNOOZE_PRESET_LABELS).map(([preset, label]) =>
+                    `<button class="snooze-preset-btn" data-preset="${preset}">${esc(label)}</button>`
+                ).join("") +
+            "</div>" +
+            '<div class="export-dialog-actions">' +
+                '<button class="export-cancel-btn" id="snooze-sheet-cancel">Cancel</button>' +
+            "</div>" +
+        "</div>";
+    document.body.appendChild(overlay);
+
+    function close() {
+        overlay.remove();
+    }
+
+    document.getElementById("snooze-sheet-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close();
+    });
+    overlay.querySelectorAll(".snooze-preset-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            close();
+            await performSnooze(articleId, btn.dataset.preset);
+        });
+    });
+}
+
+function closeSnoozeSheet() {
+    document.getElementById("snooze-sheet-overlay")?.remove();
+}
+
+async function performSnooze(articleId, preset) {
+    try {
+        const res = await fetch(`/api/articles/${articleId}/snooze`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset }),
+        });
+        const json = await res.json();
+        if (!json.success) {
+            showToast("Failed to snooze article", "error");
+            return;
+        }
+
+        showToast(`Snoozed until ${formatDate(json.data.snoozed_until)}`, "success");
+
+        if (showSnoozed) {
+            // Toggle is on — re-fetch so the card re-renders in place with
+            // the wake-time chip rather than disappearing.
+            await loadInbox();
+        } else {
+            // Default view: the card simply leaves the list.
+            cachedArticles = cachedArticles.filter((a) => Number(a.id) !== Number(articleId));
+            renderArticleList(cachedArticles);
+            updateToolbar(cachedArticles);
+        }
+    } catch (err) {
+        console.error("Snooze failed:", err);
+        showToast("Failed to snooze article", "error");
+    }
+}
+
+function toggleSnoozed() {
+    showSnoozed = !showSnoozed;
+    loadInbox();
+}
+
+// Registered once (not per render, unlike the per-card listeners in
+// attachListeners()) so clicking anywhere outside an open card menu closes
+// it. Card-menu-btn/item clicks stopPropagation() so they never reach here.
+function setupCardMenuOutsideClick() {
+    document.addEventListener("click", () => closeAllCardMenus());
 }
 
 /* ---- Sort ---- */
@@ -515,6 +706,21 @@ function updateToolbar(articles) {
         }
     }
 
+    // Snoozed toggle (M3.2) — mirrors the archived toggle exactly (always
+    // visible so the user can turn it on, label/active-class flip on state).
+    const snoozedToggle = document.getElementById("snoozed-toggle");
+    if (snoozedToggle) {
+        if (showSnoozed) {
+            snoozedToggle.style.display = "inline-flex";
+            snoozedToggle.textContent = "Hide snoozed";
+            snoozedToggle.classList.add("active");
+        } else {
+            snoozedToggle.style.display = "inline-flex";
+            snoozedToggle.textContent = "Show snoozed";
+            snoozedToggle.classList.remove("active");
+        }
+    }
+
     // VIP toggle
     const vipToggle = document.getElementById("vip-toggle");
     if (vipToggle) {
@@ -526,6 +732,7 @@ function updateToolbar(articles) {
     classifyBtn.onclick = classifyArticles;
     discardToggle.onclick = toggleDiscarded;
     if (archivedToggle) archivedToggle.onclick = toggleArchived;
+    if (snoozedToggle) snoozedToggle.onclick = toggleSnoozed;
 
     // Bulk-delete toolbar button reflects current selection
     updateBulkDeleteToolbar();
@@ -1132,6 +1339,26 @@ function handleInboxKeydown(e) {
         return;
     }
 
+    // Don't capture when the snooze preset sheet is open (except Escape to close)
+    const snoozeSheetOverlay = document.getElementById("snooze-sheet-overlay");
+    if (snoozeSheetOverlay) {
+        if (e.key === "Escape") {
+            document.getElementById("snooze-sheet-cancel")?.click();
+            e.preventDefault();
+        }
+        return;
+    }
+
+    // Don't capture when a card overflow menu is open (except Escape to close)
+    const openCardMenu = document.querySelector(".card-menu-dropdown:not([hidden])");
+    if (openCardMenu) {
+        if (e.key === "Escape") {
+            closeAllCardMenus();
+            e.preventDefault();
+        }
+        return;
+    }
+
     const cards = getVisibleCards();
 
     switch (e.key) {
@@ -1402,6 +1629,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupSort();
     setupFilterPanel();
     setupBulkDeleteToolbar();
+    setupCardMenuOutsideClick();
     setupKeyboard();
 
     // Refresh after a save from the chrome-level save modal (sidebar.js).

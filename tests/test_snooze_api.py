@@ -256,3 +256,38 @@ def test_mcp_search_still_finds_snoozed_article(initialized_library, monkeypatch
 
     result = mcp_server.search_articles(query="")
     assert "Snoozed For MCP" in result
+
+
+# --- Payload surfacing: snoozed_until must reach the frontend (M3.2 Task 1) --
+
+
+def test_article_list_payload_carries_snoozed_until(authenticated_client, configured_library):
+    _seed_article(
+        configured_library, slug="chip", title="Chip", snoozed_until="2099-01-01 00:00:00"
+    )
+    r = authenticated_client.get("/api/articles", params={"include_snoozed": "true"})
+    assert r.status_code == 200
+    articles = {a["title"]: a for a in r.json()["data"]}
+    assert "snoozed_until" in articles["Chip"]
+    assert articles["Chip"]["snoozed_until"] == "2099-01-01 00:00:00"
+
+
+def test_article_list_payload_carries_null_snoozed_until_when_unset(
+    authenticated_client, configured_library
+):
+    _seed_article(configured_library, slug="plain", title="Plain")
+    r = authenticated_client.get("/api/articles")
+    articles = {a["title"]: a for a in r.json()["data"]}
+    assert articles["Plain"]["snoozed_until"] is None
+
+
+def test_article_detail_payload_carries_snoozed_until(authenticated_client, configured_library):
+    aid = _seed_article(
+        configured_library, slug="chip-detail", title="Chip Detail",
+        snoozed_until="2099-01-01 00:00:00",
+    )
+    r = authenticated_client.get(f"/api/articles/{aid}")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert "snoozed_until" in data
+    assert data["snoozed_until"] == "2099-01-01 00:00:00"

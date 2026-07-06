@@ -987,6 +987,140 @@ main {
     opacity: 0.8;
 }
 
+/* --- Snoozed cards (M3.2 Task 1) ---
+   Visibility is server-side (only fetched at all when the Snoozed toggle
+   is on), so unlike tier-discard this dims rather than hides — same
+   opacity values as the discarded treatment above, for visual parity. */
+
+.article-card.is-snoozed {
+    opacity: 0.5;
+}
+
+.article-card.is-snoozed:hover {
+    opacity: 0.8;
+}
+
+.snoozed-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+    font-size: 0.78rem;
+    color: var(--tiro-muted);
+}
+
+.wake-now-btn {
+    padding: 0.15rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 4px;
+    background: none;
+    font-size: 0.72rem;
+    font-family: inherit;
+    color: var(--tiro-fg-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.wake-now-btn:hover {
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+}
+
+/* --- Card overflow menu (M3.2 Task 1) ---
+   Minimal "⋯" menu in the rating rail; T3 extends the same dropdown with
+   swipe-triage's other actions. */
+
+.card-menu {
+    position: relative;
+}
+
+.card-menu-btn {
+    width: 32px;
+    height: 28px;
+    border: 1px solid var(--tiro-border);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--tiro-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+
+.card-menu-btn:hover,
+.card-menu-btn[aria-expanded="true"] {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg-secondary);
+}
+
+.card-menu-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--tiro-bg);
+    border: 1px solid var(--tiro-border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    min-width: 140px;
+    z-index: 60;
+    overflow: hidden;
+}
+
+.card-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: none;
+    background: none;
+    font-size: 0.82rem;
+    font-family: inherit;
+    color: var(--tiro-fg);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.card-menu-item:hover {
+    background: var(--tiro-bg-hover);
+}
+
+/* --- Snooze preset sheet (M3.2 Task 1) ---
+   Reuses the .export-overlay/.export-dialog/.export-dialog-actions/
+   .export-cancel-btn shell (see the export-confirm dialog above) so it
+   matches every other small modal in the app. */
+
+.snooze-preset-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin: 1rem 0 1.25rem;
+}
+
+.snooze-preset-btn {
+    padding: 0.65rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 6px;
+    background: var(--tiro-bg);
+    font-size: 0.85rem;
+    font-family: inherit;
+    color: var(--tiro-fg);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.snooze-preset-btn:hover,
+.snooze-preset-btn:focus-visible {
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+    outline: none;
+}
+
 /* --- Inbox toolbar --- */
 
 .inbox-toolbar {
