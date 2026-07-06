@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS articles (
     ingenuity_analysis TEXT,
     ingestion_method TEXT DEFAULT 'manual',
     vector_status TEXT DEFAULT 'pending',
+    snoozed_until TEXT,
     display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
 );
 
@@ -129,6 +130,18 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     token_hash TEXT UNIQUE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at TIMESTAMP
+);
+
+-- One-time QR-login tokens (Phase 3 M3.0): issued by the desktop app,
+-- redeemed once by a phone scanning the QR code (M3.0 Task 2), then
+-- marked used_at so a screenshot/replay of the same code can't log in
+-- twice.
+CREATE TABLE IF NOT EXISTS login_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT UNIQUE NOT NULL,
+    created_at TEXT,
+    expires_at TEXT,
+    used_at TEXT
 );
 
 -- Authors (deduped by canonical_key across article.author spellings)
@@ -247,6 +260,7 @@ CREATE INDEX IF NOT EXISTS idx_wiki_page_articles_article ON wiki_page_articles(
 CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id);
 CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id);
 CREATE INDEX IF NOT EXISTS idx_reading_sessions_article ON reading_sessions(article_id);
+CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at);
 """
 
 

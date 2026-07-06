@@ -580,3 +580,192 @@ def test_m010_reading_sessions_schema_columns(tmp_path):
         "max_scroll_pct", "active_seconds", "dwell_json",
     }
     conn.close()
+
+
+def _rebuild_articles_without_snooze(conn) -> None:
+    """Simulate a real pre-M3.0 (version <= 10) `articles` table honestly:
+    rebuild without `snoozed_until`/`display_date`'s newer generated form
+    intact (display_date already existed pre-M3.0, just not snoozed_until),
+    then restore the indexes a real version-10 DB would already have (from
+    _m003_uid_columns/_m004_indexes, which won't re-run once stamped at
+    version 10) — otherwise this simulation would understate the legacy
+    DB's real index set and the cross-path equality test would compare
+    apples to oranges."""
+    conn.execute("ALTER TABLE articles RENAME TO articles_old")
+    conn.execute("""
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
+            source_id INTEGER REFERENCES sources(id),
+            title TEXT NOT NULL,
+            author TEXT,
+            url TEXT,
+            slug TEXT UNIQUE NOT NULL,
+            markdown_path TEXT NOT NULL,
+            summary TEXT,
+            word_count INTEGER,
+            reading_time_min INTEGER,
+            published_at TIMESTAMP,
+            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_read BOOLEAN DEFAULT FALSE,
+            rating INTEGER,
+            opened_count INTEGER DEFAULT 0,
+            ai_tier TEXT,
+            relevance_weight REAL DEFAULT 1.0,
+            ingenuity_analysis TEXT,
+            ingestion_method TEXT DEFAULT 'manual',
+            vector_status TEXT DEFAULT 'pending',
+            display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
+        )
+    """)
+    conn.execute("""
+        INSERT INTO articles (id, uid, source_id, title, author, url, slug,
+            markdown_path, summary, word_count, reading_time_min, published_at,
+            ingested_at, is_read, rating, opened_count, ai_tier,
+            relevance_weight, ingenuity_analysis, ingestion_method, vector_status)
+        SELECT id, uid, source_id, title, author, url, slug,
+            markdown_path, summary, word_count, reading_time_min, published_at,
+            ingested_at, is_read, rating, opened_count, ai_tier,
+            relevance_weight, ingenuity_analysis, ingestion_method, vector_status
+        FROM articles_old
+    """)
+    conn.execute("DROP TABLE articles_old")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_display_date ON articles(display_date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles(is_read)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_vector_status ON articles(vector_status)")
+
+
+def test_m011_fresh_schema_has_snooze_column_and_login_tokens_table(tmp_path):
+    """Fresh DB path: init_db() runs SCHEMA directly (no migration involved)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    assert "snoozed_until" in {
+        r[1] for r in conn.execute("PRAGMA table_xinfo(articles)").fetchall()
+    }
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "login_tokens" in names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(login_tokens)").fetchall()}
+    assert "idx_login_tokens_expires" in index_names
+    conn.close()
+
+
+def test_m011_legacy_db_at_version_10_gains_snooze_and_login_tokens(tmp_path):
+    """A DB stamped at user_version 10 (pre-M3.0) must gain snoozed_until
+    and login_tokens via run_migrations, with no backfill (no article is
+    snoozed and no login token exists yet on a legacy DB either)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("DROP TABLE login_tokens")
+    # SQLite can't drop a column pre-3.35 cleanly via simple DDL in this
+    # test harness, and _has_column must treat a version-10 DB as lacking
+    # it regardless — rebuild articles without snoozed_until to simulate a
+    # real pre-M3.0 DB honestly instead of trusting DROP COLUMN support.
+    _rebuild_articles_without_snooze(conn)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    applied = run_migrations(db)
+    assert any("snooze_and_login_tokens" in a for a in applied)
+
+    conn = get_connection(db)
+    assert "snoozed_until" in {
+        r[1] for r in conn.execute("PRAGMA table_xinfo(articles)").fetchall()
+    }
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "login_tokens" in names
+    assert conn.execute("SELECT COUNT(*) FROM login_tokens").fetchone()[0] == 0
+    conn.close()
+
+
+def test_m011_migration_is_idempotent(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+    assert run_migrations(db) == []  # re-run: nothing pending
+
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path, snoozed_until)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 't', 'sl', 'f.md', '2099-01-01 00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO login_tokens (token_hash, created_at, expires_at)"
+        " VALUES ('h1', '2026-01-01 00:00:00', '2026-01-01 00:05:00')"
+    )
+    conn.commit()
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)  # re-running the migration must not raise or wipe data
+    conn = get_connection(db)
+    assert conn.execute("SELECT snoozed_until FROM articles").fetchone()[0] == "2099-01-01 00:00:00"
+    assert conn.execute("SELECT COUNT(*) FROM login_tokens").fetchone()[0] == 1
+    conn.close()
+
+
+def test_m011_fresh_schema_and_legacy_migration_produce_identical_tables(tmp_path):
+    """Cross-path schema equality: the SCHEMA path (fresh DB) and the
+    migrate_db/_m011 path (legacy DB upgraded from user_version 10, articles
+    table rebuilt without snoozed_until to honestly simulate a pre-M3.0 DB)
+    are two independently-maintained copies of the same end state."""
+    fresh_db = tmp_path / "fresh.db"
+    init_db(fresh_db)
+
+    legacy_db = tmp_path / "legacy.db"
+    init_db(legacy_db)
+    conn = get_connection(legacy_db)
+    conn.execute("DROP TABLE login_tokens")
+    _rebuild_articles_without_snooze(conn)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+    run_migrations(legacy_db)
+
+    def xinfo(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            return {(r["name"], r["type"], r["notnull"], r["dflt_value"]) for r in rows}
+        finally:
+            conn.close()
+
+    def index_list(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA index_list({table})").fetchall()
+            return {(r["name"], r["unique"]) for r in rows}
+        finally:
+            conn.close()
+
+    for table in ("articles", "login_tokens"):
+        assert xinfo(fresh_db, table) == xinfo(legacy_db, table), (
+            f"{table} column schema diverges between SCHEMA and migration paths"
+        )
+        assert index_list(fresh_db, table) == index_list(legacy_db, table), (
+            f"{table} index list diverges between SCHEMA and migration paths"
+        )
+
+
+def test_m011_login_tokens_schema_columns(tmp_path):
+    """Column-level check against the brief's exact schema (both convergence
+    paths use the same CREATE TABLE, so checking the fresh path suffices)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(login_tokens)").fetchall()}
+    assert cols == {"id", "token_hash", "created_at", "expires_at", "used_at"}
+    conn.close()

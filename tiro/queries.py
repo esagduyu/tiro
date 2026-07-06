@@ -28,6 +28,7 @@ def build_article_filters(
     *,
     include_decayed: bool = True,
     decay_threshold: float | None = None,
+    include_snoozed: bool = True,
     is_read: bool | None = None,
     is_vip: bool | None = None,
     ai_tier: str | None = None,
@@ -44,13 +45,30 @@ def build_article_filters(
 ) -> tuple[str, list]:
     """Build a ` WHERE ...` clause (or "") plus its params list from the
     documented article-list filter facets. Caller supplies decay_threshold as
-    a value (this module must not import config)."""
+    a value (this module must not import config).
+
+    `include_snoozed` defaults to True (permissive) deliberately — snoozed
+    articles are inbox-hidden, not gone, so every consumer of this builder
+    (digest gather doesn't use it; MCP search_articles' `_build_filter_sql`
+    does, via this function) sees them unless it explicitly opts out. Only
+    the inbox route (GET /api/articles in routes_articles.py) passes
+    `include_snoozed=False` by default, scoping the exclusion to that one
+    call site."""
     where_clauses: list[str] = []
     params: list = []
 
     if not include_decayed:
         where_clauses.append("a.relevance_weight >= ?")
         params.append(decay_threshold)
+
+    if not include_snoozed:
+        # SQLite's datetime('now') returns UTC 'YYYY-MM-DD HH:MM:SS', the
+        # same naive-UTC string convention snoozed_until is stored in
+        # (tiro/snooze.py) — lexically comparable, no Python-side "now".
+        # A NULL snoozed_until (never snoozed) always passes; a past
+        # snoozed_until (expired) also passes, so it auto-reappears once
+        # its time comes without any sweep/cron needed.
+        where_clauses.append("(a.snoozed_until IS NULL OR a.snoozed_until <= datetime('now'))")
 
     if is_read is not None:
         where_clauses.append("a.is_read = ?")

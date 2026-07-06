@@ -89,6 +89,13 @@ async def get_filter_counts(request: Request):
         # Has audio
         data["has_audio"] = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
 
+        # Snoozed (hidden from the default inbox until snoozed_until passes —
+        # same UTC-string comparison as tiro/queries.py's include_snoozed)
+        data["snoozed"] = conn.execute(
+            "SELECT COUNT(*) FROM articles"
+            " WHERE snoozed_until IS NOT NULL AND snoozed_until > datetime('now')"
+        ).fetchone()[0]
+
         # Total articles
         data["total"] = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
 
