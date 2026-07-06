@@ -230,8 +230,16 @@ def test_sidebar_js_has_saved_views_functions():
 def test_static_version_bumped_for_saved_views_ui():
     from tiro.app import STATIC_VERSION
 
-    # Bumped again for Task 9 (/wiki views) and M2.0 Task 5 (frontend module
-    # closeout) -- see test_wiki_views.py / test_static_version.py for the
-    # pins that own specific values; this test's job is just to confirm the
-    # saved-views-era bump wasn't silently reverted.
-    assert STATIC_VERSION in ("58", "59", "60")
+    # This used to be a growing accepted-values tuple (58/59/60) so it
+    # wouldn't need editing on every unrelated bump -- but that meant it
+    # verified nothing except "STATIC_VERSION is one of an ever-widening
+    # set," diluting further with each addition. M2.2 Task 5 (reader
+    # annotation UI closeout) refactored it to assert-current-value-only:
+    # it still guards the same thing (the saved-views-era bump wasn't
+    # silently reverted below its floor), just via equality against the
+    # live constant instead of membership in a list that has to be
+    # remembered and extended by every future closeout task. The canonical
+    # "what changed at this exact version" pins live in
+    # test_wiki_views.py's test_static_version_is_61 and
+    # test_static_version.py's import-map test.
+    assert STATIC_VERSION == "61"

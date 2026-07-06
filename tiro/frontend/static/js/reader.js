@@ -1180,7 +1180,7 @@ function paintHighlight(hl) {
     const range = domRangeFromTextIndices(annotationTextIndex, domRange.start, domRange.end);
     if (!range) return;
 
-    const paintColor = annotationHighlightObjects[hl.color] ? hl.color : ANNOTATE_DEFAULT_COLOR;
+    const paintColor = ANNOTATE_COLORS.includes(hl.color) ? hl.color : ANNOTATE_DEFAULT_COLOR;
     const bucket = annotationHighlightObjects[paintColor];
     try {
         bucket.add(range);
@@ -1919,7 +1919,7 @@ function repaintHighlightColor(uid, newColor) {
     const rec = annotationPaintedRanges.get(uid);
     if (!rec || !annotationCssSupported) return;
     const oldBucket = annotationHighlightObjects[rec.color];
-    const resolvedColor = annotationHighlightObjects[newColor] ? newColor : ANNOTATE_DEFAULT_COLOR;
+    const resolvedColor = ANNOTATE_COLORS.includes(newColor) ? newColor : ANNOTATE_DEFAULT_COLOR;
     const newBucket = annotationHighlightObjects[resolvedColor];
     if (oldBucket) oldBucket.delete(rec.range);
     if (newBucket) newBucket.add(rec.range);

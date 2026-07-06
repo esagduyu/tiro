@@ -58,13 +58,15 @@ def test_wiki_page_view_loads_wiki_js(authenticated_client):
     assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
-def test_static_version_is_60():
+def test_static_version_is_61():
     from tiro.app import STATIC_VERSION
 
-    # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout) — see
-    # tests/test_static_version.py for the import-map pin that owns the
-    # details of what changed at this bump.
-    assert STATIC_VERSION == "60"
+    # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout), then
+    # 60 -> 61 in M2.2 Task 5 (reader annotation UI closeout: reader.js/
+    # highlights.js + the annotate.js core landed under the old "60" pin) —
+    # see tests/test_static_version.py for the import-map pin that owns the
+    # details of what changed at the 60 bump specifically.
+    assert STATIC_VERSION == "61"
 
 
 # --- Sidebar nav link ----------------------------------------------------------
