@@ -466,3 +466,32 @@ async def import_theme(body: ThemeImport, request: Request):
             "path": f"/library/themes/{body.name}.css",
         },
     }
+
+
+@router.get("/telemetry")
+async def get_telemetry_settings(request: Request):
+    """Get reading-session telemetry opt-in status (Phase 2 M2.3)."""
+    config = request.app.state.config
+    return {"success": True, "data": {"enabled": config.reading_telemetry_enabled}}
+
+
+class TelemetryUpdate(BaseModel):
+    enabled: bool
+
+
+@router.post("/telemetry")
+async def update_telemetry_settings(body: TelemetryUpdate, request: Request):
+    """Update reading-session telemetry opt-in status. Strictly local-only —
+    feeds the future wiki-importance ranking signal (Decision #8)."""
+    config = request.app.state.config
+
+    try:
+        persist_config(config, {"reading_telemetry_enabled": body.enabled})
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    config.reading_telemetry_enabled = body.enabled
+
+    logger.info("Reading telemetry %s", "enabled" if body.enabled else "disabled")
+
+    return {"success": True, "data": {"enabled": config.reading_telemetry_enabled}}

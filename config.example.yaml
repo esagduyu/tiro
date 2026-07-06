@@ -104,3 +104,11 @@ decay_threshold: 0.1
 # Appearance
 # theme_light: "papyrus"      # Light theme CSS file name
 # theme_dark: "roman-night"   # Dark theme CSS file name
+
+# Reading telemetry — opt-in, strictly local-only — feeds future
+# wiki-importance ranking (Decision #8); never leaves your machine
+# reading_telemetry_enabled: false
+
+# Obsidian-compatible write mode — format-only: writes notes/highlights in a
+# layout Obsidian can open directly
+# obsidian_compatible_mode: false

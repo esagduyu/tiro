@@ -339,6 +339,35 @@ def _m009_highlights_notes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id)")
 
 
+def _m010_reading_sessions(conn: sqlite3.Connection) -> None:
+    """Reading-session telemetry table (Phase 2 M2.3 first commit): one row
+    per reader visit, opt-in (`reading_telemetry_enabled`, default False) and
+    strictly local-only — feeds the future wiki-importance ranking signal
+    (Decision #8). No sidecar file for this one (unlike wiki_pages/
+    highlights/notes above) — sessions are ephemeral telemetry, not
+    user-authored content, so SQLite is the only store.
+
+    New-table contract fifth practice (see module docstring / _m006/_m007/
+    _m008/_m009): table only, no backfill — a fresh 010 DB has no sessions
+    yet."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS reading_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL,
+            article_id INTEGER NOT NULL REFERENCES articles(id),
+            started_at TEXT,
+            ended_at TEXT,
+            max_scroll_pct INTEGER,
+            active_seconds INTEGER,
+            dwell_json TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reading_sessions_article"
+        " ON reading_sessions(article_id)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -349,6 +378,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (7, "authors + article_authors + saved_views", _m007_authors_views),
     (8, "wiki derived-index tables", _m008_wiki_tables),
     (9, "highlights + notes tables", _m009_highlights_notes),
+    (10, "reading_sessions telemetry table", _m010_reading_sessions),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

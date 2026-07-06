@@ -209,6 +209,22 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at TEXT
 );
 
+-- Reading-session telemetry (Phase 2 M2.3): opt-in
+-- (reading_telemetry_enabled, default False), strictly local-only — feeds
+-- the future wiki-importance ranking signal (Decision #8). Ephemeral
+-- telemetry, not user-authored content, so unlike wiki_pages/highlights/
+-- notes above there is no sidecar file — SQLite is the only store.
+CREATE TABLE IF NOT EXISTS reading_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE NOT NULL,
+    article_id INTEGER NOT NULL REFERENCES articles(id),
+    started_at TEXT,
+    ended_at TEXT,
+    max_scroll_pct INTEGER,
+    active_seconds INTEGER,
+    dwell_json TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -230,6 +246,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_uid ON wiki_pages(uid);
 CREATE INDEX IF NOT EXISTS idx_wiki_page_articles_article ON wiki_page_articles(article_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id);
 CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id);
+CREATE INDEX IF NOT EXISTS idx_reading_sessions_article ON reading_sessions(article_id);
 """
 
 
