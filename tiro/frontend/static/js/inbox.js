@@ -3,9 +3,11 @@
  * Owns the /inbox page only: article list rendering + sort, search, tier
  * toolbar (classify/discard/archived/snoozed/VIP-only), the filter panel +
  * active filter pills, pagination, inbox keyboard navigation, single/bulk
- * delete, and (M3.2 Task 1) the per-card overflow menu + snooze preset
- * sheet + wake-time chip. Loaded as `<script type="module">` from
- * inbox.html only.
+ * delete, (M3.2 Task 1) the per-card overflow menu + snooze preset sheet +
+ * wake-time chip, and (M3.2 Task 3) swipe triage (js/swipe.js pointer
+ * wiring: right → archive, left → snooze sheet) plus the single-slot undo
+ * binder (js/undo.js + 5s toast + `u` key). Loaded as
+ * `<script type="module">` from inbox.html only.
  *
  * Digest logic (previously interleaved in the same app.js file) now lives
  * in its own js/digest.js module — see that file's header for why the split
@@ -29,6 +31,8 @@ import {
     showShortcuts, hideShortcuts, openSaveModal, closeSaveModal,
     loadSavedViews as refreshSidebarViews,
 } from "./sidebar.js";
+import { createSwipeState, swipeEvent } from "./swipe.js";
+import { createUndoManager, pushUndoable, takeUndo, clearUndo } from "./undo.js";
 
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
@@ -521,6 +525,18 @@ function closeSnoozeSheet() {
 }
 
 async function performSnooze(articleId, preset) {
+    // Prior value captured BEFORE the action (from cachedArticles) so undo
+    // can restore it: re-snoozing an already-snoozed article (visible via
+    // the Snoozed toggle) restores its previous future wake time; snoozing
+    // a normal article restores "not snoozed". A prior timestamp already in
+    // the past is treated as not-snoozed (the server 400s past `until`
+    // values, and an expired snooze is semantically awake anyway).
+    const prior = cachedArticles.find((a) => Number(a.id) === Number(articleId));
+    const priorUntil = prior ? prior.snoozed_until : null;
+    const priorStillFuture = !!(
+        priorUntil && new Date(priorUntil.replace(" ", "T")) > new Date()
+    );
+
     try {
         const res = await fetch(`/api/articles/${articleId}/snooze`, {
             method: "PATCH",
@@ -533,9 +549,18 @@ async function performSnooze(articleId, preset) {
             return;
         }
 
-        showToast(
+        // The undo toast replaces T1's plain success toast — same message,
+        // now with the Undo affordance (single toast slot either way).
+        offerUndo(
             `Snoozed until ${formatDate((json.data.snoozed_until || "").replace(" ", "T"))}`,
-            "success",
+            async () => {
+                await fetch(`/api/articles/${articleId}/snooze`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ until: priorStillFuture ? priorUntil : null }),
+                });
+                await loadInbox();
+            },
         );
 
         if (showSnoozed) {
@@ -564,6 +589,263 @@ function toggleSnoozed() {
 // it. Card-menu-btn/item clicks stopPropagation() so they never reach here.
 function setupCardMenuOutsideClick() {
     document.addEventListener("click", () => closeAllCardMenus());
+}
+
+/* ---- Undo binder (M3.2 Task 3) ----
+   DOM/timer layer over js/undo.js's pure single-slot manager: an undoable
+   triage action (swipe-archive, snooze, keyboard 1/2/3 rate, keyboard s
+   VIP toggle) shows a toast with an Undo button for UNDO_WINDOW_MS; the
+   `u` key or the button runs the entry's undo callback. A second action
+   within the window displaces (finalizes) the first — all actions here are
+   already committed server-side at push time, so finalizing needs no
+   server work, the binder just drops the old toast. x delete and bulk
+   delete deliberately KEEP their confirm dialogs and get NO undo (deletion
+   is irreversible across all four stores — the dialog is the safety). */
+
+const UNDO_WINDOW_MS = 5000;
+let undoMgr = createUndoManager();
+let undoTimer = null;
+
+function dismissUndoToast() {
+    document.getElementById("undo-toast")?.remove();
+}
+
+function renderUndoToast(label) {
+    // Same single-toast-at-a-time posture as core.js's showToast() — remove
+    // whatever toast is showing (plain or undo) before rendering this one.
+    document.querySelector(".settings-toast")?.remove();
+
+    const toast = document.createElement("div");
+    toast.id = "undo-toast";
+    toast.className = "settings-toast settings-toast-info undo-toast";
+
+    const text = document.createElement("span");
+    text.className = "undo-toast-label";
+    text.textContent = label; // textContent sink — no esc() needed
+
+    const btn = document.createElement("button");
+    btn.className = "undo-toast-btn";
+    btn.textContent = "Undo";
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        triggerUndo();
+    });
+
+    toast.appendChild(text);
+    toast.appendChild(btn);
+    document.body.appendChild(toast);
+    setTimeout(() => toast.classList.add("show"), 10);
+}
+
+function offerUndo(label, undoFn) {
+    const { mgr } = pushUndoable(undoMgr, { label, undo: undoFn });
+    // The displaced (finalized) entry needs no cleanup — see the section
+    // comment above — so `finalized` is intentionally unused here.
+    undoMgr = mgr;
+    clearTimeout(undoTimer);
+    renderUndoToast(label);
+    undoTimer = setTimeout(() => {
+        const { mgr: next } = clearUndo(undoMgr);
+        undoMgr = next;
+        dismissUndoToast();
+    }, UNDO_WINDOW_MS);
+}
+
+async function triggerUndo() {
+    const { entry, mgr } = takeUndo(undoMgr);
+    undoMgr = mgr;
+    clearTimeout(undoTimer);
+    dismissUndoToast();
+    if (!entry) return;
+    try {
+        await entry.undo();
+    } catch (err) {
+        console.error("Undo failed:", err);
+        showToast("Undo failed", "error");
+    }
+}
+
+/* ---- Swipe triage (M3.2 Task 3) ----
+   Delegated pointer handlers on #article-list drive js/swipe.js's pure
+   state machine. Right swipe past the threshold archives (mark-read +
+   undo), left swipe opens the snooze preset sheet. Scroll protection is
+   double: the state machine's permanent vertical lock (a scroll gesture
+   can never become a swipe) AND `touch-action: pan-y` on the cards (the
+   browser keeps native vertical scrolling without waiting on JS). */
+
+// Live MediaQueryList — `.matches` reflects OS-setting changes mid-session.
+// Under reduced motion the gesture still functions (release still acts);
+// the card just doesn't visually track the finger, and the snap-back
+// transition is disabled in CSS by the matching media query.
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// Interactive descendants that own their own pointer/click behavior — a
+// pointerdown on any of these never engages the swipe gesture (pointer
+// capture would otherwise retarget pointerup to the card and break the
+// child's click event).
+const SWIPE_IGNORE_SELECTOR =
+    "button, a, input, select, .vip-star, .clickable-tag, .card-menu, .snoozed-chip";
+
+let swipeState = createSwipeState();
+let swipeCard = null; // card element owning the in-flight gesture
+let swipePointerId = null;
+let swipeCardWidth = 0;
+
+function setupSwipe() {
+    const listEl = document.getElementById("article-list");
+    if (!listEl) return;
+    // Delegated on the persistent list container — card re-renders
+    // (innerHTML replacement) never orphan these handlers.
+    listEl.addEventListener("pointerdown", onSwipePointerDown);
+    listEl.addEventListener("pointermove", onSwipePointerMove);
+    listEl.addEventListener("pointerup", onSwipePointerUp);
+    listEl.addEventListener("pointercancel", onSwipePointerCancel);
+}
+
+function onSwipePointerDown(e) {
+    if (swipeCard) return; // one gesture at a time
+    if (e.button !== 0) return; // primary button/touch only
+    if (e.target.closest(SWIPE_IGNORE_SELECTOR)) return;
+    const card = e.target.closest(".article-card");
+    if (!card) return;
+
+    // GUARD (T2 review edge): a 0/NaN cardWidth would make the 35%
+    // act-threshold meaningless (0.35 * 0 = 0 → every release acts), so a
+    // card that measures empty does NOT engage the gesture at all.
+    const width = card.getBoundingClientRect().width;
+    if (!Number.isFinite(width) || width <= 0) return;
+
+    // Pointer capture keeps move/up delivery flowing (retargeted to the
+    // card, so it still bubbles through #article-list's delegated
+    // listeners) even when the pointer leaves the card mid-swipe. It can
+    // throw for a pointerId with no active pointer (e.g. synthesized test
+    // events) — non-fatal, the delegated listeners still see events
+    // dispatched at the card/list themselves.
+    try {
+        card.setPointerCapture(e.pointerId);
+    } catch (err) { /* enhancement only — see above */ }
+
+    swipeCard = card;
+    swipePointerId = e.pointerId;
+    swipeCardWidth = width;
+    const r = swipeEvent(swipeState, {
+        type: "down", x: e.clientX, y: e.clientY, t: e.timeStamp, cardWidth: width,
+    });
+    swipeState = r.state;
+}
+
+function onSwipePointerMove(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "move", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    if (r.transform) {
+        // Horizontal lock engaged — the gesture owns this pointer now.
+        // .swiping is only added here (not on pointerdown) so plain taps
+        // and vertical scrolls never toggle card classes at all.
+        swipeCard.classList.add("swiping");
+        swipeCard.classList.toggle("swipe-right-hint", r.transform.dx > 0);
+        swipeCard.classList.toggle("swipe-left-hint", r.transform.dx < 0);
+        if (!reducedMotion.matches) {
+            swipeCard.style.transform = `translateX(${r.transform.dx}px)`;
+        }
+    }
+}
+
+function onSwipePointerUp(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "up", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    resolveSwipe(r.action);
+}
+
+function onSwipePointerCancel(e) {
+    if (!swipeCard || e.pointerId !== swipePointerId) return;
+    const r = swipeEvent(swipeState, {
+        type: "cancel", x: e.clientX, y: e.clientY, t: e.timeStamp,
+        cardWidth: swipeCardWidth,
+    });
+    swipeState = r.state;
+    resolveSwipe(r.action); // always "cancelled" per the state machine
+}
+
+function resolveSwipe(action) {
+    const card = swipeCard;
+    swipeCard = null;
+    swipePointerId = null;
+    swipeCardWidth = 0;
+    if (!card) return;
+
+    const articleId = Number(card.dataset.id);
+    card.classList.remove("swiping", "swipe-right-hint", "swipe-left-hint");
+
+    if (action === "archive") {
+        card.style.transform = "";
+        performArchive(articleId);
+        return;
+    }
+    if (action === "snooze-sheet") {
+        card.style.transform = "";
+        openSnoozeSheet(articleId);
+        return;
+    }
+
+    // Cancelled: snap back. The transition class animates transform back
+    // to rest; under prefers-reduced-motion the media query disables the
+    // transition and this is an instant reset.
+    if (card.style.transform) {
+        card.classList.add("swipe-snap-back");
+        card.style.transform = "";
+        setTimeout(() => card.classList.remove("swipe-snap-back"), 250);
+    }
+}
+
+async function performArchive(articleId) {
+    const id = Number(articleId);
+    const article = cachedArticles.find((a) => Number(a.id) === id);
+    const wasRead = !!(article && article.is_read);
+
+    try {
+        const res = await fetch(`/api/articles/${id}/read`, { method: "PATCH" });
+        const json = await res.json();
+        if (!json.success) {
+            showToast("Failed to archive article", "error");
+            return;
+        }
+    } catch (err) {
+        console.error("Archive failed:", err);
+        showToast("Failed to archive article", "error");
+        return;
+    }
+
+    // Triage semantics: the card leaves the current view immediately (same
+    // posture as performSnooze's default-view path). Archive IS mark-read —
+    // there is no separate archived state — so a later full reload may
+    // legitimately show the article again as a read row.
+    cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
+    renderArticleList(cachedArticles);
+    updateToolbar(cachedArticles);
+
+    offerUndo("Archived", async () => {
+        // Restore the pre-archive state server-side, not just visually:
+        // PATCH back to unread ONLY when the article wasn't already read
+        // before the swipe (un-reading an article that was read before the
+        // gesture would not be a restore). opened_count and reading stats
+        // are monotonic by design and are not rolled back.
+        if (!wasRead) {
+            await fetch(`/api/articles/${id}/read`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ is_read: false }),
+            });
+        }
+        await loadInbox();
+    });
 }
 
 /* ---- Sort ---- */
@@ -1406,6 +1688,10 @@ function handleInboxKeydown(e) {
             e.preventDefault();
             deleteSelectedArticle(cards);
             break;
+        case "u":
+            e.preventDefault();
+            triggerUndo(); // no-op when no undo window is live
+            break;
         case "/":
             e.preventDefault();
             document.getElementById("search-input")?.focus();
@@ -1492,18 +1778,86 @@ function openSelectedArticle(cards) {
     if (link) link.click();
 }
 
-function toggleSelectedVip(cards) {
+/* Keyboard `s` / `1`/`2`/`3` go through their own fetch paths (rather than
+   clicking the per-card button like they historically did) so the undo
+   binder can capture the prior value BEFORE the action and offer a restore.
+   Mouse clicks on the star / rate buttons keep their original handlers and
+   deliberately do NOT get undo (binding spec: keyboard actions + swipe/menu
+   triage actions are the undoable set). */
+
+async function toggleSelectedVip(cards) {
     if (selectedIndex < 0 || selectedIndex >= cards.length) return;
     const card = cards[selectedIndex];
     const star = card.querySelector(".vip-star");
-    if (star) star.click();
+    if (!star) return;
+    const sourceId = star.dataset.sourceId;
+
+    const nowVip = await patchVipToggle(sourceId);
+    if (nowVip === null) return;
+    offerUndo(nowVip ? "Source marked VIP" : "Source VIP removed", async () => {
+        await patchVipToggle(sourceId); // toggle back
+        await loadInbox();
+    });
+    await loadInbox();
 }
 
-function rateSelected(cards, rating) {
+async function patchVipToggle(sourceId) {
+    // Returns the new is_vip state, or null on failure.
+    try {
+        const res = await fetch(`/api/sources/${sourceId}/vip`, { method: "PATCH" });
+        const json = await res.json();
+        return json.success ? !!json.data.is_vip : null;
+    } catch (err) {
+        console.error("VIP toggle failed:", err);
+        return null;
+    }
+}
+
+async function rateSelected(cards, rating) {
     if (selectedIndex < 0 || selectedIndex >= cards.length) return;
     const card = cards[selectedIndex];
-    const btn = card.querySelector(`.rate-btn[data-rating="${rating}"]`);
-    if (btn) btn.click();
+    const id = Number(card.dataset.id);
+    const article = cachedArticles.find((a) => Number(a.id) === id);
+    // Prior rating from cachedArticles BEFORE the action; null == unrated
+    // (restored via the rate API's `{"rating": null}` clear).
+    const priorRating = article && article.rating !== undefined ? article.rating : null;
+
+    if (!(await patchRating(id, rating))) return;
+    if (article) article.rating = rating;
+    updateCardRatingUI(card, rating);
+
+    const labels = { "-1": "Rated: dislike", 1: "Rated: like", 2: "Rated: love" };
+    offerUndo(labels[String(rating)] || "Rated", async () => {
+        if (!(await patchRating(id, priorRating))) return;
+        if (article) article.rating = priorRating;
+        // The card may have been re-rendered since — look it up live.
+        const liveCard = document.querySelector(`.article-card[data-id="${id}"]`);
+        if (liveCard) updateCardRatingUI(liveCard, priorRating);
+    });
+}
+
+async function patchRating(articleId, rating) {
+    try {
+        const res = await fetch(`/api/articles/${articleId}/rate`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rating }),
+        });
+        const json = await res.json();
+        return !!json.success;
+    } catch (err) {
+        console.error("Rating failed:", err);
+        return false;
+    }
+}
+
+function updateCardRatingUI(card, rating) {
+    card.querySelectorAll(".rate-btn").forEach((b) => {
+        b.classList.toggle(
+            "active",
+            rating !== null && Number(b.dataset.rating) === Number(rating),
+        );
+    });
 }
 
 
@@ -1638,6 +1992,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupFilterPanel();
     setupBulkDeleteToolbar();
     setupCardMenuOutsideClick();
+    setupSwipe();
     setupKeyboard();
 
     // Refresh after a save from the chrome-level save modal (sidebar.js).

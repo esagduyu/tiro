@@ -1121,6 +1121,82 @@ main {
     outline: none;
 }
 
+/* --- Swipe triage (M3.2 Task 3) ---
+   touch-action: pan-y is HALF of the scroll-hijack protection: the browser
+   keeps native vertical scrolling over cards without ever waiting on JS,
+   while horizontal movement is left to the pointer handlers. The other
+   half is js/swipe.js's permanent vertical direction lock. */
+
+.article-card {
+    touch-action: pan-y;
+}
+
+/* Applied only once the horizontal lock engages (never on plain taps or
+   vertical scrolls): kill transitions so the transform tracks the pointer
+   1:1, and suppress accidental text selection mid-drag. */
+.article-card.swiping {
+    transition: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Direction hints while dragging: right = archive (olive), left = snooze
+   (gold) — subtle tints of the existing semantic theme variables. */
+.article-card.swipe-right-hint {
+    background: color-mix(in srgb, var(--tiro-secondary) 12%, transparent);
+}
+
+.article-card.swipe-left-hint {
+    background: color-mix(in srgb, var(--tiro-gold) 12%, transparent);
+}
+
+/* Snap-back after a below-threshold release. */
+.article-card.swipe-snap-back {
+    transition: transform 0.18s ease-out, background-color 0.18s ease-out;
+}
+
+/* prefers-reduced-motion: no transform animation — the JS side also skips
+   applying live transforms, so the gesture still functions (release still
+   archives/snoozes) but the card never visually slides. */
+@media (prefers-reduced-motion: reduce) {
+    .article-card.swipe-snap-back {
+        transition: none;
+    }
+}
+
+/* --- Undo toast (M3.2 Task 3) ---
+   Rides the .settings-toast base styles (position/animation/palette) but
+   must be clickable: the base rule sets pointer-events: none, and it is
+   declared LATER in this file — the compound selector wins on specificity
+   (0-2-0 vs 0-1-0) regardless of source order. */
+
+.settings-toast.undo-toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.undo-toast-btn {
+    flex-shrink: 0;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: 5px;
+    background: none;
+    color: white;
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.undo-toast-btn:hover,
+.undo-toast-btn:focus-visible {
+    background: rgba(255, 255, 255, 0.15);
+    outline: none;
+}
+
 /* --- Inbox toolbar --- */
 
 .inbox-toolbar {

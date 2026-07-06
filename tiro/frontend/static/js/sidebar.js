@@ -673,6 +673,8 @@ const INBOX_SHORTCUTS = [
     { keys: ["2"], desc: "Rate like" },
     { keys: ["3"], desc: "Rate love" },
     { keys: ["x"], desc: "Delete selected article" },
+    { keys: ["u"], desc: "Undo last triage action" },
+    { hint: "Swipe a card right to archive, left to snooze (touch)" },
     { hint: "Click checkboxes to bulk-select articles for deletion" },
     { keys: ["n"], desc: "Save new item (URL or email)" },
     { keys: ["c"], desc: "Classify / reclassify inbox" },
