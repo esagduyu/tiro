@@ -43,10 +43,34 @@
  *     into an adjacent paragraph. Content lines INSIDE the fence are kept
  *     verbatim (no inline stripping — code is literal).
  *   - Emphasis matching (`*`/`_`/`**`/`__`/`***`/`___`) requires an EXACT
- *     equal-length closing run rather than implementing full CommonMark
- *     delimiter-run flanking rules. Sufficient for the supported test
- *     table (bold/italic/bold-italic/nested); pathological runs (4+ of the
- *     same delimiter, mismatched split runs) fall back to literal text.
+ *     equal-length closing run PLUS a minimal flanking guard (not full
+ *     CommonMark): a run only OPENS if it's left-flanking (the next char
+ *     exists and isn't whitespace), and for `_` additionally only if the
+ *     char before the run isn't alphanumeric (intra-word `_`, e.g.
+ *     `foo_bar_baz`, never opens/closes emphasis — those underscores stay
+ *     literal). A run only CLOSES if the char before it isn't whitespace,
+ *     and for `_` additionally only if the char after the run isn't
+ *     alphanumeric. This is enough to keep spaced-out math like
+ *     `a * b` and snake_case identifiers from being misinterpreted as
+ *     emphasis while still stripping real bold/italic/nested cases.
+ *     Pathological runs (4+ of the same delimiter, mismatched split runs)
+ *     still fall back to literal text.
+ *   - Code-span closing search (`` ` ``/`` `` ``/...) requires an EXACT
+ *     equal-length backtick run too (skipping over longer or shorter runs
+ *     rather than treating any substring match as a close) — otherwise a
+ *     single-backtick opener could spuriously "close" against the first
+ *     backtick of a longer run later in the text.
+ *   - List markers (`-`, `*`, `1.`, etc.) are NOT stripped — only ATX
+ *     headings (`#`...`######`) and blockquote (`>`) markers are recognized
+ *     as block-level prefixes (see `blockPrefixLength`). A markdown list
+ *     item's leading marker projects into the plain text verbatim. This was
+ *     verified empirically in T2 and is consistent with the module's
+ *     disclosed approximation posture (it isn't a full CommonMark block
+ *     parser).
+ *   - `\r\n` line endings are normalized: the projection never emits a
+ *     literal `\r`, and the map still points back at exact markdown
+ *     offsets across the CRLF boundary (see `projectMarkdown`'s `crLen`
+ *     handling).
  *   - `plainToMarkdownRange`'s returned range can and does include syntax
  *     characters that sit INSIDE the selected span (e.g. selecting across
  *     a `**` boundary pulls the asterisks into the markdown range) — this
@@ -69,8 +93,17 @@ export function projectMarkdown(markdown) {
     let inFence = false;
 
     for (let li = 0; li < lines.length; li++) {
-        const line = lines[li];
+        const rawLine = lines[li];
         const lineMdStart = mdOffset;
+        // CRLF normalization: split("\n") leaves a trailing '\r' on any line
+        // that used "\r\n" in the source. Strip it before block/inline
+        // processing so it never leaks into the plain projection as a
+        // literal char, but keep `crLen` so every offset computed below
+        // (the newline's map entry, and mdOffset's advance to the next
+        // line) still accounts for the skipped byte — the map stays exact
+        // across the CRLF boundary even though the '\r' itself is elided.
+        const crLen = rawLine.endsWith("\r") ? 1 : 0;
+        const line = crLen ? rawLine.slice(0, -crLen) : rawLine;
         const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
 
         if (fenceMatch) {
@@ -90,13 +123,15 @@ export function projectMarkdown(markdown) {
         // (including blank lines and dropped fence-delimiter lines, whose
         // content was empty but whose newline still counts) becomes one
         // plain '\n'. This is what makes blank-line paragraph breaks in
-        // markdown show up as blank plain lines too.
+        // markdown show up as blank plain lines too. The '\n' maps to its
+        // own source index, which sits `crLen` further along than the
+        // content when the line ended in "\r\n".
         if (li < lines.length - 1) {
             plainArr.push("\n");
-            mapArr.push(lineMdStart + line.length);
+            mapArr.push(lineMdStart + line.length + crLen);
         }
 
-        mdOffset += line.length + 1; // +1 for the '\n' consumed by split()
+        mdOffset += line.length + crLen + 1; // +1 for the '\n' consumed by split()
     }
 
     return { plain: plainArr.join(""), map: mapArr };
@@ -318,9 +353,12 @@ function processInline(text, base, plainArr, mapArr) {
         if (ch === "`") {
             let runLen = 1;
             while (text[i + runLen] === "`") runLen++;
-            const marker = "`".repeat(runLen);
             const contentStart = i + runLen;
-            const closeIdx = text.indexOf(marker, contentStart);
+            // Exact-length closing run required (Finding 5): a lone opening
+            // backtick must not "close" against the first backtick of a
+            // LONGER run later in the text — that run only matches a
+            // same-length opener, not this one.
+            const closeIdx = findClosingBacktickRun(text, contentStart, runLen);
             if (closeIdx !== -1) {
                 // Code span content is literal — no nested emphasis
                 // processing, matching CommonMark code-span semantics.
@@ -334,11 +372,16 @@ function processInline(text, base, plainArr, mapArr) {
             let runLen = 1;
             while (text[i + runLen] === ch) runLen++;
             const contentStart = i + runLen;
-            const closeIdx = findClosingRun(text, contentStart, ch, runLen);
-            if (closeIdx !== -1 && closeIdx > contentStart) {
-                processInline(text.slice(contentStart, closeIdx), base + contentStart, plainArr, mapArr);
-                i = closeIdx + runLen;
-                continue;
+            // Minimal flanking guard (Finding 1): only attempt to open an
+            // emphasis span from a left-flanking run (and, for `_`, one
+            // that isn't intra-word) — see module docstring.
+            if (canOpenEmphasis(text, i, runLen, ch)) {
+                const closeIdx = findClosingRun(text, contentStart, ch, runLen);
+                if (closeIdx !== -1 && closeIdx > contentStart) {
+                    processInline(text.slice(contentStart, closeIdx), base + contentStart, plainArr, mapArr);
+                    i = closeIdx + runLen;
+                    continue;
+                }
             }
         }
 
@@ -364,15 +407,36 @@ function parseLinkOrImage(text, bracketIdx) {
 }
 
 /** First index at/after `from` where `ch` repeats EXACTLY `exactLen`
- * times (not part of a longer or shorter run) — an "equal-length closing
- * run" emphasis matcher, deliberately simpler than full CommonMark
- * delimiter-run flanking rules (see module docstring). */
+ * times (not part of a longer or shorter run) AND the run is a valid
+ * CLOSER per `canCloseEmphasis` — an "equal-length closing run" emphasis
+ * matcher with a minimal flanking guard, deliberately simpler than full
+ * CommonMark delimiter-run rules (see module docstring, Finding 1). */
 function findClosingRun(text, from, ch, exactLen) {
     let idx = from;
     while (idx < text.length) {
         if (text[idx] === ch) {
             let runLen = 1;
             while (text[idx + runLen] === ch) runLen++;
+            if (runLen === exactLen && canCloseEmphasis(text, idx, runLen, ch)) return idx;
+            idx += runLen;
+        } else {
+            idx++;
+        }
+    }
+    return -1;
+}
+
+/** First index at/after `from` where "`" repeats EXACTLY `exactLen` times
+ * (not part of a longer or shorter backtick run) — code spans have no
+ * flanking rules in CommonMark, just exact run-length matching (Finding 5:
+ * without this, `indexOf` would match inside a longer run later in the
+ * text and truncate the span's content). */
+function findClosingBacktickRun(text, from, exactLen) {
+    let idx = from;
+    while (idx < text.length) {
+        if (text[idx] === "`") {
+            let runLen = 1;
+            while (text[idx + runLen] === "`") runLen++;
             if (runLen === exactLen) return idx;
             idx += runLen;
         } else {
@@ -380,4 +444,42 @@ function findClosingRun(text, from, ch, exactLen) {
         }
     }
     return -1;
+}
+
+const WHITESPACE_RE = /\s/;
+const ALNUM_RE = /[A-Za-z0-9]/;
+
+/** True if `c` is a defined, non-whitespace character (used for
+ * left/right-flanking checks; undefined — i.e. start/end of `text` —
+ * counts as "whitespace-like" for flanking purposes, matching CommonMark's
+ * treatment of string boundaries as whitespace). */
+function isNonWhitespace(c) {
+    return c !== undefined && !WHITESPACE_RE.test(c);
+}
+
+/** True if `c` is an ASCII letter or digit (used for the `_` intra-word
+ * guard). `undefined` (start/end of `text`) is never alphanumeric. */
+function isAlnum(c) {
+    return c !== undefined && ALNUM_RE.test(c);
+}
+
+/** Can the delimiter run `text[runStart..runStart+runLen)` (all `ch`) OPEN
+ * emphasis? Left-flanking (next char exists and isn't whitespace) is
+ * required for both `*` and `_`; `_` additionally requires the char BEFORE
+ * the run not be alphanumeric, since intra-word underscores (`foo_bar`)
+ * never open emphasis (Finding 1). */
+function canOpenEmphasis(text, runStart, runLen, ch) {
+    if (!isNonWhitespace(text[runStart + runLen])) return false;
+    if (ch === "_" && isAlnum(text[runStart - 1])) return false;
+    return true;
+}
+
+/** Can the delimiter run at `runStart` CLOSE emphasis? Right-flanking (char
+ * before the run exists and isn't whitespace) is required for both `*` and
+ * `_`; `_` additionally requires the char AFTER the run not be
+ * alphanumeric (Finding 1). */
+function canCloseEmphasis(text, runStart, runLen, ch) {
+    if (!isNonWhitespace(text[runStart - 1])) return false;
+    if (ch === "_" && isAlnum(text[runStart + runLen])) return false;
+    return true;
 }

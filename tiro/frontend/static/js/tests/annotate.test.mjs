@@ -151,6 +151,148 @@ test("projectMarkdown: map invariant holds across a mixed-syntax document", () =
 });
 
 // ---------------------------------------------------------------------
+// projectMarkdown: emphasis flanking rules (Finding 1 — reviewer-mandated
+// regression coverage). CommonMark/marked do NOT emphasize intra-word `_`,
+// and do NOT treat a whitespace-flanked `*`/`_` run as an emphasis
+// delimiter. Without flanking checks the naive equal-length-closing-run
+// matcher corrupts realistic tech-newsletter content (snake_case
+// identifiers, spaced-out math).
+// ---------------------------------------------------------------------
+
+test("projectMarkdown: intra-word underscores (snake_case) are NOT emphasis", () => {
+    assert.equal(projectMarkdown("foo_bar_baz").plain, "foo_bar_baz");
+});
+
+test("projectMarkdown: spaced asterisks around math are NOT emphasis", () => {
+    const md = "solve a * b then c * d";
+    assert.equal(projectMarkdown(md).plain, md);
+});
+
+test("projectMarkdown: simple italic *text* still strips", () => {
+    assert.equal(projectMarkdown("*emphasis*").plain, "emphasis");
+});
+
+test("projectMarkdown: simple bold **text** still strips", () => {
+    assert.equal(projectMarkdown("**bold**").plain, "bold");
+});
+
+test("projectMarkdown: word-boundary underscore italic _text_ still strips", () => {
+    assert.equal(projectMarkdown("word _em_ word").plain, "word em word");
+});
+
+test("projectMarkdown: mixed snake_case identifier and real emphasis in one line", () => {
+    const md = "snake_case and *real em*";
+    assert.equal(projectMarkdown(md).plain, "snake_case and real em");
+});
+
+test("projectMarkdown: intra-word underscore at start of text (no preceding char) still opens", () => {
+    // No char before the first '_' — not intra-word, so this DOES open.
+    assert.equal(projectMarkdown("_em_ word").plain, "em word");
+});
+
+test("projectMarkdown: trailing intra-word underscore (word_) has no partner and stays literal", () => {
+    assert.equal(projectMarkdown("word_ *and* word_").plain, "word_ and word_");
+});
+
+test("plainToMarkdownRange: offset after a kept intra-word underscore maps correctly", () => {
+    const md = "foo_bar_baz rest of sentence";
+    const projection = projectMarkdown(md);
+    assert.equal(projection.plain, md); // nothing stripped, identity projection
+    const plainStart = projection.plain.indexOf("rest of sentence");
+    const plainEnd = plainStart + "rest of sentence".length;
+    const range = plainToMarkdownRange(projection, plainStart, plainEnd);
+    assert.equal(md.slice(range.start, range.end), "rest of sentence");
+    // Identity mapping: markdown offsets equal plain offsets throughout,
+    // since no characters were stripped by the (correctly, per Finding 1)
+    // non-firing emphasis matcher.
+    assert.equal(range.start, plainStart);
+    assert.equal(range.end, plainEnd);
+});
+
+// ---------------------------------------------------------------------
+// projectMarkdown: CRLF normalization (Finding 2)
+// ---------------------------------------------------------------------
+
+test("projectMarkdown: CRLF line endings produce no stray \\r in plain", () => {
+    const md = "first line\r\nsecond line\r\nthird line";
+    const { plain } = projectMarkdown(md);
+    assert.equal(plain.includes("\r"), false);
+    assert.equal(plain, "first line\nsecond line\nthird line");
+});
+
+test("projectMarkdown: CRLF map offsets stay exact past the CRLF boundary", () => {
+    const md = "first line\r\nsecond line\r\nthird line";
+    const projection = projectMarkdown(md);
+    const { plain, map } = projectMarkdown(md);
+    assert.equal(map.length, plain.length);
+    for (let i = 0; i < plain.length; i++) {
+        assert.equal(md[map[i]], plain[i], `map mismatch at plain index ${i}`);
+    }
+    // A selection on "second line" (after the CRLF boundary) must map back
+    // to its exact markdown offsets, skipping over the "\r\n".
+    const plainStart = projection.plain.indexOf("second line");
+    const plainEnd = plainStart + "second line".length;
+    const range = plainToMarkdownRange(projection, plainStart, plainEnd);
+    assert.equal(md.slice(range.start, range.end), "second line");
+});
+
+// ---------------------------------------------------------------------
+// projectMarkdown: surrogate-pair emoji index shift (Finding 3)
+// ---------------------------------------------------------------------
+
+test("projectMarkdown: content after a surrogate-pair emoji maps with exact UTF-16 indices", () => {
+    // U+1F600 is encoded as a UTF-16 surrogate pair (2 code units), so
+    // "hi \u{1F600} bye" is 3 + 2 (surrogate pair) + 1 + 3 = 9 code units
+    // long, not 8 (which a naive codepoint-counting bug would produce).
+    const md = "hi \u{1F600} bye";
+    const projection = projectMarkdown(md);
+    assert.equal(projection.plain, md);
+    assert.equal(projection.map.length, md.length);
+    // Identity mapping (nothing stripped): map[i] === i throughout.
+    for (let i = 0; i < md.length; i++) {
+        assert.equal(projection.map[i], i, `map mismatch at index ${i}`);
+    }
+    const byeStart = md.indexOf("bye");
+    const range = plainToMarkdownRange(projection, byeStart, byeStart + 3);
+    assert.deepEqual(range, { start: byeStart, end: byeStart + 3 });
+});
+
+// ---------------------------------------------------------------------
+// projectMarkdown: map strictly increasing over mixed syntax (Finding 4)
+// ---------------------------------------------------------------------
+
+test("projectMarkdown: map is strictly increasing over a mixed-syntax document (binary-search precondition)", () => {
+    const md =
+        "# Title\n\nA **bold** and *italic* and _em_ and snake_case_word and\n" +
+        "[link](url) and `code span` and a spaced * star * and \u{1F600} emoji.\n\n" +
+        "> quoted\n\n```\nfenced\ncontent\n```\n\nlast line";
+    const { map } = projectMarkdown(md);
+    for (let i = 1; i < map.length; i++) {
+        assert.ok(map[i] > map[i - 1], `map not strictly increasing at index ${i}: ${map[i - 1]} -> ${map[i]}`);
+    }
+});
+
+// ---------------------------------------------------------------------
+// projectMarkdown: code-span exact-length closing run (Finding 5)
+// ---------------------------------------------------------------------
+
+test("projectMarkdown: single-backtick code span does not close inside a longer backtick run", () => {
+    // Content between the single opening backtick and the single closing
+    // backtick includes a "``" (length-2) run — that run must NOT be
+    // mistaken for a valid closer of the length-1 opener; the true close
+    // is the lone backtick after " b".
+    const md = "`a`` b`";
+    const { plain } = projectMarkdown(md);
+    assert.equal(plain, "a`` b");
+});
+
+test("projectMarkdown: double-backtick code span containing a single backtick", () => {
+    const md = "``code with ` a single backtick``";
+    const { plain } = projectMarkdown(md);
+    assert.equal(plain, "code with ` a single backtick");
+});
+
+// ---------------------------------------------------------------------
 // plainToMarkdownRange: offset-map exactness
 // ---------------------------------------------------------------------
 
