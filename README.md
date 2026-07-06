@@ -183,7 +183,10 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Knowledge graph** — Interactive d3.js force-directed graph showing entities and tags connected by article co-occurrence. Density slider, click-to-explore article panel.
 - **Content decay** — Unengaged articles naturally fade from digests over time
 - **Reading telemetry (opt-in, local-only)** — Off by default; when enabled from Settings, the reader records scroll depth, active reading time, and per-section dwell for each visit, sent once per page load and stored only in your local SQLite database. Nothing leaves your machine, and it's not in any export or backup — this is a future signal for wiki/digest ranking, not a consumer-facing feature yet.
-- **Snooze (API-only for now)** — `PATCH /api/articles/{id}/snooze` hides an article from the inbox until later, via a preset (tonight / tomorrow / weekend / next week) or a custom time; it reappears automatically once that time passes, with no effect on digests, classification, decay, export, or the MCP server — only the inbox listing hides a snoozed article. There's no inbox UI for it yet; swipe-triage gestures land in a later 0.5 milestone.
+- **Snooze** — Hide an article from the inbox until later via a preset (tonight / tomorrow / weekend / next week) from each card's "⋯" menu or a left swipe; it reappears automatically once that time passes, with no effect on digests, classification, decay, export, or the MCP server — only the inbox listing hides a snoozed article. A "Snoozed" toggle reveals them early.
+- **Swipe triage** — On a touch screen, swipe an inbox card right to archive (mark read) or left to open the snooze sheet. The gesture engages only on unambiguous horizontal intent — vertical scrolling is never hijacked — and respects `prefers-reduced-motion`.
+- **Undo** — Every triage action (archive, snooze, rate, VIP toggle) offers a 5-second undo toast (`u` key or tap) that restores the real prior state server-side, not just visually. Delete keeps its confirmation dialog instead — deletion is the one irreversible action.
+- **Inbox zero** — A triage progress pill counts down remaining unread articles ("N to zero"), and a celebratory state marks the moment you've triaged them all.
 
 ### Library Wiki (alpha)
 
@@ -399,7 +402,7 @@ To use Tiro and Obsidian together today, point `library_path` in `config.yaml` a
 
 ## Remote access (mobile & LAN)
 
-Phase 3 landed the plumbing for reading Tiro away from your desktop: private remote access (M3.0 — snooze, QR login, mDNS discovery, TLS run flags) and an installable, offline-capable mobile app (M3.1 — PWA manifest, service worker, offline save queue, a `/setup/remote` wizard). The swipe-triage inbox UI is still ahead (M3.2).
+Phase 3 (complete at 0.5.0) built the full read-away-from-your-desktop story: private remote access (M3.0 — snooze, QR login, mDNS discovery, TLS run flags), an installable, offline-capable mobile app (M3.1 — PWA manifest, service worker, offline save queue, a `/setup/remote` wizard), and a phone-first triage inbox (M3.2 — swipe gestures, undo, snooze UI, inbox zero). The whole loop works today: install Tiro on your phone, sign in by scanning a QR code, and swipe-triage your inbox — offline-capable throughout.
 
 ### Install on your phone
 
@@ -442,6 +445,7 @@ Then `http://tiro.local:8000` resolves on any device on the same network that su
 | `s` | Toggle VIP on selected article's source |
 | `1` / `2` / `3` | Rate: dislike / like / love |
 | `x` | Delete selected article (with confirmation) |
+| `u` | Undo the last triage action (while its 5s window is open) |
 | `/` | Focus search bar |
 | `f` | Toggle filter panel |
 | `d` | Go to digest |
@@ -530,7 +534,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS helpers (`tiro/frontend/static/js/core.js`, `annotate.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. A handful of end-to-end browser specs also live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), and `telemetry.spec.js` (reading-session tracking) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
@@ -540,15 +544,15 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.4.0 `reader-memory-beta` to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.5.0 to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
-- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.4.0 is either this or Phase 3.)
-- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend (snooze, QR login, mDNS discovery, TLS run flags) and the installable PWA (manifest, service worker, offline reading, offline save queue, `/setup/remote` wizard) have both shipped; the swipe-triage inbox UI is still ahead, and `0.5.0` tags once it lands.
+- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.5.0 is either this or Phase 4.)
+- **Phase 3 — Private remote access (0.5): shipped.** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend (snooze, QR login, mDNS discovery, TLS run flags), the installable PWA (manifest, service worker, offline reading, offline save queue, `/setup/remote` wizard), and the swipe-triage inbox (gestures, undo, snooze UI, inbox zero) all landed.
 - **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
-- **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion once Phase 3 ships.
+- **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion — unblocked now that Phase 3 has shipped.
 - **Phase 6 — Agent runtime (0.8):** the ad-hoc AI calls become a library of inspectable local agents with replayable traces and cost accounting, provider adapters (Anthropic, OpenAI, local models via Ollama) making model-agnosticism shipped fact rather than aspiration, and a plugin API for community agents, connectors, and themes.
 - **Phase 7a — BYO cloud sync (0.9):** multi-device sync against storage *you* own (S3-compatible, WebDAV, or any synced folder) with client-side encryption. Tiro never holds your data.
 - **Phase 7b — Tiro Cloud (1.0):** an optional paid convenience tier — hosted sync and always-on agents — patterned on Obsidian Sync: it funds the open product and gates nothing. A user who never pays can use every feature.
