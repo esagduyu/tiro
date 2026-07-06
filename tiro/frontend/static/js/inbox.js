@@ -224,7 +224,12 @@ function renderArticle(a, showScore) {
     // snooze already expired — treat that as a normal, non-dimmed card
     // (mirrors the server's own auto-reappear semantics in
     // build_article_filters()).
-    const isSnoozed = !!(a.snoozed_until && new Date(a.snoozed_until) > new Date());
+    // .replace(" ", "T"): snoozed_until is a naive-UTC "YYYY-MM-DD HH:MM:SS"
+    // string; Safari rejects the space-separated form (Invalid Date) — same
+    // guard digest.js/wiki.js use for their timestamp comparisons.
+    const isSnoozed = !!(
+        a.snoozed_until && new Date(a.snoozed_until.replace(" ", "T")) > new Date()
+    );
     if (isSnoozed) classes.push("is-snoozed");
 
     const date = formatDate(a.published_at || a.ingested_at);
@@ -257,7 +262,7 @@ function renderArticle(a, showScore) {
     // convention.
     const snoozedChip = isSnoozed
         ? `<div class="snoozed-chip">
-            <span class="snoozed-chip-label">Snoozed until ${esc(formatDate(a.snoozed_until))}</span>
+            <span class="snoozed-chip-label">Snoozed until ${esc(formatDate(a.snoozed_until.replace(" ", "T")))}</span>
             <button class="wake-now-btn" data-article-id="${a.id}">Wake now</button>
         </div>`
         : "";
@@ -528,7 +533,10 @@ async function performSnooze(articleId, preset) {
             return;
         }
 
-        showToast(`Snoozed until ${formatDate(json.data.snoozed_until)}`, "success");
+        showToast(
+            `Snoozed until ${formatDate((json.data.snoozed_until || "").replace(" ", "T"))}`,
+            "success",
+        );
 
         if (showSnoozed) {
             // Toggle is on — re-fetch so the card re-renders in place with
