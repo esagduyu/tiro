@@ -57,6 +57,58 @@ def test_inbox_js_adjusts_unread_count_on_triage_actions():
     assert "wasUnread" in content
 
 
+# --- Finding 1 fix (review): snoozed-unread archive/delete must not drift
+# the shared count -------------------------------------------------------
+
+
+def test_inbox_js_has_single_shared_snoozed_and_unread_helpers():
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "function isCurrentlySnoozed" in content
+    assert "function countsAsUnread" in content
+    # countsAsUnread is unread AND not snoozed -- not just unread.
+    assert "!a.is_read && !isCurrentlySnoozed(a)" in content
+
+
+def test_inbox_js_archive_and_delete_use_countsAsUnread_not_bare_is_read():
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    # performArchive: decrement AND undo-increment both gated on the SAME
+    # captured boolean (wasCountedUnread), not a bare wasRead/is_read check
+    # and not recomputed at undo time.
+    assert "const wasCountedUnread = countsAsUnread(article);" in content
+    assert "if (wasCountedUnread) adjustUnreadCount(-1);" in content
+    assert "if (wasCountedUnread) adjustUnreadCount(1);" in content
+    # performDelete: the deletedUnread filter routes through the shared
+    # helper rather than a local `!a.is_read` check.
+    assert "return countsAsUnread(a);" in content
+
+
+def test_inbox_js_renderarticle_reuses_shared_snoozed_helper():
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "const isSnoozed = isCurrentlySnoozed(a);" in content
+
+
+def test_inbox_js_performsnooze_reuses_shared_snoozed_helper():
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "const priorStillFuture = isCurrentlySnoozed(prior);" in content
+
+
+# --- Finding 2 fix (review): pill re-renders once the count refetch settles,
+# not just on the synchronous save event -----------------------------------
+
+
+def test_sidebar_js_dispatches_event_when_unread_count_refetch_resolves():
+    content = (STATIC_DIR / "js" / "sidebar.js").read_text()
+    assert "function updateUnreadBadge" in content
+    assert 'new CustomEvent("tiro:unread-count-updated")' in content
+
+
+def test_inbox_js_listens_for_unread_count_updated_and_refreshes_pill():
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert (
+        'addEventListener("tiro:unread-count-updated", refreshTriageUI)' in content
+    )
+
+
 # --- Inbox-zero celebratory state ---------------------------------------------
 
 

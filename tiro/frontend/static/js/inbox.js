@@ -242,6 +242,30 @@ function sortArticles(articles, mode) {
     return copy;
 }
 
+// Whether `a` is currently hidden from the default inbox view by an active
+// (future) snooze. Single definition shared by renderArticle's dimming,
+// performSnooze's prior-state capture, and countsAsUnread() below --
+// previously each computed this inline with its own copy of the same
+// Safari-safe date compare (Finding 1, M3.2 Task 4 review).
+// .replace(" ", "T"): snoozed_until is a naive-UTC "YYYY-MM-DD HH:MM:SS"
+// string; Safari rejects the space-separated form (Invalid Date) — same
+// guard digest.js/wiki.js use for their timestamp comparisons.
+function isCurrentlySnoozed(a) {
+    return !!(a && a.snoozed_until && new Date(a.snoozed_until.replace(" ", "T")) > new Date());
+}
+
+// Whether `a` is currently included in the shared unread count (sidebar
+// badge + inbox triage pill): unread AND not hidden by an active snooze.
+// The base count_only fetch (sidebar.js's updateUnreadBadge) excludes
+// snoozed-unread articles server-side (include_snoozed defaults false), so
+// they were never part of the count in the first place -- archiving,
+// deleting, or snoozing one must NOT decrement it, and undoing that action
+// must NOT re-increment it either. Used by performArchive and performDelete
+// below (Finding 1 fix).
+function countsAsUnread(a) {
+    return !!(a && !a.is_read && !isCurrentlySnoozed(a));
+}
+
 function renderArticle(a, showScore) {
     const classes = ["article-card"];
     if (a.is_read) classes.push("is-read");
@@ -254,12 +278,7 @@ function renderArticle(a, showScore) {
     // snooze already expired — treat that as a normal, non-dimmed card
     // (mirrors the server's own auto-reappear semantics in
     // build_article_filters()).
-    // .replace(" ", "T"): snoozed_until is a naive-UTC "YYYY-MM-DD HH:MM:SS"
-    // string; Safari rejects the space-separated form (Invalid Date) — same
-    // guard digest.js/wiki.js use for their timestamp comparisons.
-    const isSnoozed = !!(
-        a.snoozed_until && new Date(a.snoozed_until.replace(" ", "T")) > new Date()
-    );
+    const isSnoozed = isCurrentlySnoozed(a);
     if (isSnoozed) classes.push("is-snoozed");
 
     const date = formatDate(a.published_at || a.ingested_at);
@@ -420,8 +439,11 @@ function attachListeners() {
             const articleId = btn.dataset.articleId;
             // Wake-now only ever renders on a currently-snoozed card (see
             // renderArticle's snoozedChip), so this article was excluded
-            // from the unread count while snoozed; waking an unread one
-            // brings it back in (M3.2 Task 4 pill live-update).
+            // from the unread count while snoozed (countsAsUnread(article)
+            // is guaranteed false beforehand); waking an unread one brings
+            // it back in (M3.2 Task 4 pill live-update). Equivalent to
+            // countsAsUnread() gated on that guarantee -- audited per
+            // Finding 1, left as `wasUnread` since it was already correct.
             const article = cachedArticles.find((a) => Number(a.id) === Number(articleId));
             const wasUnread = !!(article && !article.is_read);
             try {
@@ -566,15 +588,16 @@ async function performSnooze(articleId, preset) {
     // values, and an expired snooze is semantically awake anyway).
     const prior = cachedArticles.find((a) => Number(a.id) === Number(articleId));
     const priorUntil = prior ? prior.snoozed_until : null;
-    const priorStillFuture = !!(
-        priorUntil && new Date(priorUntil.replace(" ", "T")) > new Date()
-    );
+    const priorStillFuture = isCurrentlySnoozed(prior);
 
     // Live pill update (M3.2 Task 4): snoozing only changes the unread
     // count when it's a genuine visible-unread -> hidden-snoozed
     // transition. An article that was ALREADY snoozed (re-snoozed to a new
     // preset via the Snoozed toggle) was already excluded from the count,
-    // so re-snoozing it is a no-op for this counter.
+    // so re-snoozing it is a no-op for this counter. Equivalent to
+    // countsAsUnread(prior) -- spelled out via priorWasUnread/
+    // priorStillFuture (rather than one countsAsUnread() call) since
+    // priorStillFuture is also needed below to pick the undo restore target.
     const priorWasUnread = !!(prior && !prior.is_read);
     const leavesUnreadCount = priorWasUnread && !priorStillFuture;
 
@@ -853,6 +876,14 @@ async function performArchive(articleId) {
     const id = Number(articleId);
     const article = cachedArticles.find((a) => Number(a.id) === id);
     const wasRead = !!(article && article.is_read);
+    // Captured HERE, before the optimistic is_read mutation just below and
+    // before the await -- this is the last point the article's true
+    // pre-archive state (including snoozed_until) is known. The undo
+    // closure below reuses this exact boolean rather than recomputing it
+    // (Finding 1, M3.2 Task 4 review): a snooze can expire in the window
+    // between archive and undo, and recomputing at undo time would then
+    // silently pick up the wrong answer.
+    const wasCountedUnread = countsAsUnread(article);
 
     // Same reorder as rateSelected's fix: mutate the cached read state
     // optimistically before the await so a rapid second action on this
@@ -880,10 +911,11 @@ async function performArchive(articleId) {
     // there is no separate archived state — so a later full reload may
     // legitimately show the article again as a read row.
     cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
-    // Live pill update (M3.2 Task 4): archiving an already-read article
-    // doesn't change the unread count -- only a genuine unread->read
-    // transition does.
-    if (!wasRead) adjustUnreadCount(-1);
+    // Live pill update (M3.2 Task 4): archiving only changes the unread
+    // count when the article was actually counted as unread beforehand --
+    // an already-read article, OR a snoozed-unread one (already excluded
+    // from the count server-side -- Finding 1 fix), is a no-op here.
+    if (wasCountedUnread) adjustUnreadCount(-1);
     renderArticleList(cachedArticles);
     updateToolbar(cachedArticles);
 
@@ -899,8 +931,14 @@ async function performArchive(articleId) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ is_read: false }),
             });
-            adjustUnreadCount(1);
         }
+        // Mirrors wasCountedUnread captured above at archive time, NOT a
+        // fresh countsAsUnread() recompute here and NOT nested under the
+        // `!wasRead` PATCH guard above (Finding 1): those are two different
+        // questions. A snoozed-unread article never decremented the count
+        // on archive, so its undo must not increment it either, even though
+        // `!wasRead` is true and the is_read PATCH above still runs.
+        if (wasCountedUnread) adjustUnreadCount(1);
         await loadInbox();
     });
 }
@@ -2118,14 +2156,17 @@ async function performDelete(ids) {
 
     const succeeded = ids.filter((id) => !failed.includes(id));
     if (succeeded.length) {
-        // Live pill update (M3.2 Task 4): deleting an unread article removes
-        // it from the unread count same as archiving one -- it's no longer
-        // in the library at all. Not part of the undoable triage set
-        // (delete keeps its confirm dialog, by design), so this is a
-        // one-way adjustment with no undo counterpart.
+        // Live pill update (M3.2 Task 4): deleting an article that was
+        // actually counted as unread (unread AND not currently snoozed --
+        // Finding 1 fix) removes it from the unread count same as archiving
+        // one -- it's no longer in the library at all. A snoozed-unread
+        // article was already excluded from the count and deleting it is a
+        // no-op here. Not part of the undoable triage set (delete keeps its
+        // confirm dialog, by design), so this is a one-way adjustment with
+        // no undo counterpart.
         const deletedUnread = succeeded.filter((id) => {
             const a = cachedArticles.find((c) => Number(c.id) === Number(id));
-            return a && !a.is_read;
+            return countsAsUnread(a);
         }).length;
         if (deletedUnread > 0) adjustUnreadCount(-deletedUnread);
 
@@ -2181,4 +2222,12 @@ document.addEventListener("DOMContentLoaded", () => {
         loadInbox();
         loadFilters();
     });
+
+    // Finding 2 (M3.2 Task 4 review): re-render the pill/zero-state whenever
+    // sidebar.js's shared count actually finishes refetching, not just on
+    // "tiro:content-saved" -- that event fires synchronously, BEFORE
+    // updateUnreadBadge()'s own fetch (called alongside it, unawaited) has
+    // resolved, so a save-while-on-inbox could otherwise leave the pill one
+    // fetch behind whatever loadInbox()'s own re-render happened to see.
+    document.addEventListener("tiro:unread-count-updated", refreshTriageUI);
 });

@@ -117,6 +117,17 @@ async function updateUnreadBadge() {
         unreadCount = json.data?.count ?? 0;
         renderUnreadBadge();
     } catch (e) {}
+    // Finding 2 (M3.2 Task 4 review): callers that trigger this (e.g. a save
+    // from the chrome-level save modal) don't await it -- they fire-and-
+    // forget it alongside a synchronous `notifyContentSaved()` dispatch, so
+    // a page-specific consumer's own re-render (inbox.js's loadInbox, via
+    // the "tiro:content-saved" listener) can resolve BEFORE this fetch does
+    // and end up rendering a stale count. Dispatched here, after the count
+    // is actually settled, so any listener re-renders from the true final
+    // value regardless of ordering. Same decoupled CustomEvent pattern as
+    // notifyContentSaved() -- this module stays free of a compile-time
+    // dependency on inbox.js.
+    document.dispatchEvent(new CustomEvent("tiro:unread-count-updated"));
 }
 
 function getUnreadCount() {

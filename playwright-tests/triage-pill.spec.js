@@ -10,6 +10,9 @@
 //     showing
 //   - desktop: logout clears the SW's tiro-*-articles cache (created first
 //     by opening an article) without blocking the actual logout/redirect
+//   - desktop (Finding 1, review fix): Show-snoozed toggle on -> archive a
+//     snoozed-unread card -> pill/badge UNCHANGED (never counted to begin
+//     with) -> undo -> still unchanged
 //
 // Run against a SCRATCH Tiro server only (never the real library):
 //
@@ -24,6 +27,12 @@
 // swipe-triage.spec.js/snooze-ui.spec.js seed their own articles into a
 // shared one); cross-spec contamination on a shared scratch library is a
 // test-authoring reality here, not a product regression.
+//
+// The Finding-1 snoozed-archive test below is deliberately NOT
+// exact-text/fresh-library-dependent -- it reads its own baseline count off
+// the pill right after seeding its two articles and asserts relative deltas
+// from there, so it's safe to run after the first test's leftover unread
+// article (or any other prior contamination) within the same session.
 
 const { test, expect } = require('@playwright/test');
 
@@ -174,6 +183,113 @@ test.describe('M3.2 triage pill + inbox-zero (mobile emulation)', () => {
 
     await expect(pill).toHaveText('1 to zero');
     await expect(page.locator('#inbox-zero-state')).toBeHidden();
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
+});
+
+// Finding 1 (review, M3.2 Task 4): a snoozed-unread article was never part
+// of the shared unread count in the first place (the base count_only fetch
+// excludes it server-side), so archiving/deleting it -- and undoing that --
+// must never move the pill or sidebar badge.
+test.describe('M3.2 archive of a snoozed-unread article does not drift the count (desktop)', () => {
+  test.use({ baseURL: BASE_URL, viewport: { width: 1280, height: 800 } });
+
+  test('Show-snoozed on -> archive a snoozed-unread card -> pill/badge unchanged -> undo -> still unchanged', async ({ page }) => {
+    const consoleErrors = collectConsoleErrors(page);
+    await loginOrSetup(page);
+
+    const suffix = Date.now();
+    // Control: stays unread and un-snoozed for the whole test. Unlike the
+    // mobile-emulation test above, this test does NOT require a freshly
+    // emptied library -- it reads its own baseline count off the pill after
+    // saving (below) and asserts relative deltas from there, so it's safe
+    // to run in the same session as (and after) that test, which can leave
+    // its own leftover unread article behind.
+    const controlId = await saveArticleViaApi(page, `${suffix}-control`);
+    // Target: will be snoozed, then archived (swiped) while shown via the
+    // Show-snoozed toggle.
+    const targetId = await saveArticleViaApi(page, `${suffix}-target`);
+
+    await page.goto('/inbox');
+    const pill = page.locator('#triage-pill');
+    const badge = page.locator('#unread-badge');
+    await expect(pill).toBeVisible();
+
+    // Baseline: whatever the library's unread count is right after saving
+    // both of this test's articles (may include leftovers from an earlier
+    // test in this same file/session -- that's fine, see above).
+    const readPillCount = async () => {
+      const text = (await pill.textContent()) || '';
+      const m = text.match(/\d+/);
+      return m ? Number(m[0]) : null;
+    };
+    const readBadgeCount = async () => {
+      const text = (await badge.textContent()) || '';
+      const m = text.match(/\d+/);
+      return m ? Number(m[0]) : null;
+    };
+    const baseline = await readPillCount();
+    expect(baseline).not.toBeNull();
+    expect(await readBadgeCount()).toBe(baseline);
+
+    // Snooze the target via the card menu (mirrors snooze-ui.spec.js).
+    const targetCard = page.locator(`.article-card[data-id="${targetId}"]`);
+    await expect(targetCard).toBeVisible();
+    await targetCard.locator('.card-menu-btn').click();
+    await expect(targetCard.locator('.card-menu-dropdown')).toBeVisible();
+    await targetCard.locator('.card-menu-item[data-action="snooze"]').click();
+    const sheet = page.locator('#snooze-sheet-overlay');
+    await expect(sheet).toBeVisible();
+    await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/articles/${targetId}/snooze`) && res.request().method() === 'PATCH'
+      ),
+      // "tomorrow" always resolves to a future timestamp regardless of what
+      // time of day this suite happens to run (unlike "tonight", which can
+      // already be in the past near midnight).
+      sheet.locator('.snooze-preset-btn[data-preset="tomorrow"]').click(),
+    ]);
+
+    // Snoozing a genuinely unread article DOES leave the count (it becomes
+    // hidden by the snooze) -- this part of the pill's behavior is already
+    // covered elsewhere; it drops to baseline-1 here as an artifact of
+    // that. What this test cares about is what happens AFTER this point.
+    const afterSnooze = baseline - 1;
+    await expect(pill).toHaveText(`${afterSnooze} to zero`);
+    await expect(badge).toHaveText(String(afterSnooze));
+
+    // Reveal the snoozed target via the toggle -- now visible, dimmed, with
+    // the wake-time chip, and the base count above already excludes it.
+    await page.locator('#snoozed-toggle').click();
+    const snoozedCard = page.locator(`.article-card[data-id="${targetId}"]`);
+    await expect(snoozedCard).toBeVisible({ timeout: 10000 });
+    await expect(snoozedCard).toHaveClass(/is-snoozed/);
+
+    // Swipe-archive the snoozed-unread card -- Finding 1: this must NOT
+    // decrement the pill/badge, since the article was never part of the
+    // count to begin with.
+    await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/articles/${targetId}/read`) && res.request().method() === 'PATCH'
+      ),
+      dragCard(page, snoozedCard, 0.6),
+    ]);
+    await expect(pill).toHaveText(`${afterSnooze} to zero`);
+    await expect(badge).toHaveText(String(afterSnooze));
+
+    // Undo the archive -- Finding 1: must not increment either (the
+    // decrement it would be "undoing" never happened).
+    const toast = page.locator('#undo-toast');
+    await expect(toast).toBeVisible();
+    await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/articles/${targetId}/read`) && res.request().method() === 'PATCH'
+      ),
+      toast.locator('.undo-toast-btn').click(),
+    ]);
+    await expect(pill).toHaveText(`${afterSnooze} to zero`);
+    await expect(badge).toHaveText(String(afterSnooze));
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
