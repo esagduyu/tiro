@@ -810,15 +810,23 @@ async function performArchive(articleId) {
     const article = cachedArticles.find((a) => Number(a.id) === id);
     const wasRead = !!(article && article.is_read);
 
+    // Same reorder as rateSelected's fix: mutate the cached read state
+    // optimistically before the await so a rapid second action on this
+    // article reads this action's post-state as its "prior", not the stale
+    // pre-action one. Rolled back below on PATCH failure.
+    if (article) article.is_read = true;
+
     try {
         const res = await fetch(`/api/articles/${id}/read`, { method: "PATCH" });
         const json = await res.json();
         if (!json.success) {
+            if (article) article.is_read = wasRead;
             showToast("Failed to archive article", "error");
             return;
         }
     } catch (err) {
         console.error("Archive failed:", err);
+        if (article) article.is_read = wasRead;
         showToast("Failed to archive article", "error");
         return;
     }
@@ -1822,8 +1830,18 @@ async function rateSelected(cards, rating) {
     // (restored via the rate API's `{"rating": null}` clear).
     const priorRating = article && article.rating !== undefined ? article.rating : null;
 
-    if (!(await patchRating(id, rating))) return;
+    // Mutate the cache optimistically IMMEDIATELY (before the await) so a
+    // second rapid rating keypress on the same card — fired before this
+    // PATCH round-trip resolves — captures THIS action's rating as its own
+    // "prior" value, not the stale pre-action one (the race the undo target
+    // corruption bug came from). Rolled back below on PATCH failure.
     if (article) article.rating = rating;
+
+    if (!(await patchRating(id, rating))) {
+        if (article) article.rating = priorRating;
+        showToast("Failed to rate article", "error");
+        return;
+    }
     updateCardRatingUI(card, rating);
 
     const labels = { "-1": "Rated: dislike", 1: "Rated: like", 2: "Rated: love" };

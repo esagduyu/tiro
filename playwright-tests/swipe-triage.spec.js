@@ -295,4 +295,137 @@ test.describe('M3.2 keyboard rate undo (desktop)', () => {
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
+
+  // M3.2 Task 3 review fix (wave 1): rateSelected() used to capture
+  // `priorRating` from cachedArticles synchronously but only mutate the
+  // cache AFTER the awaited PATCH resolved. Two rapid rating keypresses (the
+  // second fired before the first's round-trip lands) meant the second
+  // capture read the ORIGINAL pre-action value, not the first action's
+  // result — so undoing the second action restored past the first one
+  // entirely. Fixed by moving the cache mutation to immediately after the
+  // capture, before the await.
+  //
+  // Made deterministic (not a real timing race) via route interception that
+  // holds the FIRST rate PATCH for 1.5s — same delay pattern as
+  // annotations.spec.js's fetchToken regression test. Key `1` (dislike, -1)
+  // fires first and is held; key `2` (like, 1) fires immediately after
+  // (before the held response lands) and is NOT delayed, so it completes
+  // first. Undo is triggered while the first request is STILL held, so it
+  // exercises exactly the single active undo entry (the second action's) —
+  // whether a late-arriving, now-stale response clobbering that entry is a
+  // separate, pre-existing, out-of-scope race (last-network-response-wins
+  // for which offerUndo call stays active) is NOT what this test is
+  // pinning; it is confirmed accepted/unchanged, see the report.
+  test('rapid keyboard 1 then 2 -> undo restores to the FIRST action\'s rating, not the original', async ({ page }) => {
+    const consoleErrors = collectConsoleErrors(page);
+    await loginOrSetup(page);
+
+    const id = await saveArticleViaApi(page, `${Date.now()}-rapid-rate`);
+    await page.goto('/inbox');
+    const card = page.locator(`.article-card[data-id="${id}"]`);
+    await expect(card).toBeVisible();
+
+    let rateCallCount = 0;
+    await page.route('**/api/articles/*/rate', async (route) => {
+      rateCallCount += 1;
+      if (rateCallCount === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await route.continue();
+    });
+
+    await page.keyboard.press('j');
+    const selected = page.locator('.article-card.kb-selected');
+    await expect(selected).toHaveAttribute('data-id', String(id));
+    expect((await getArticle(page, id)).rating).toBe(null);
+
+    // Fire dislike (held) then IMMEDIATELY like (fast) — the race.
+    await page.keyboard.press('1');
+    await page.keyboard.press('2');
+
+    // The fast (second) action's PATCH lands first.
+    const secondResp = await page.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/articles/${id}/rate`) &&
+        res.request().method() === 'PATCH' &&
+        JSON.parse(res.request().postData()).rating === 1
+    );
+    expect(secondResp.status()).toBe(200);
+    expect((await getArticle(page, id)).rating).toBe(1);
+    await expect(page.locator('#undo-toast')).toContainText('Rated: like');
+
+    // Undo NOW, while the first (dislike) PATCH is still held in flight —
+    // this is the single active undo entry, and per the fix it must restore
+    // to -1 (what the FIRST action set), not null (the original, pre-race
+    // value a buggy capture would have stored).
+    const [undoResp] = await Promise.all([
+      page.waitForResponse(
+        (res) =>
+          res.url().includes(`/api/articles/${id}/rate`) &&
+          res.request().method() === 'PATCH' &&
+          JSON.parse(res.request().postData()).rating === -1
+      ),
+      page.keyboard.press('u'),
+    ]);
+    expect(undoResp.status()).toBe(200);
+    expect((await getArticle(page, id)).rating).toBe(-1);
+    await expect(page.locator('#undo-toast')).toHaveCount(0);
+
+    // Drain the held first request so it doesn't leak past the test.
+    await page.waitForTimeout(1600);
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
+
+  // M3.2 Task 3 review fix (wave 1), rollback half: the optimistic cache
+  // mutation added above must be rolled back on PATCH failure, with the
+  // existing "Failed to rate article" error toast surfaced (new — the path
+  // was previously silent) so the rollback is coherent with what the user
+  // sees.
+  test('rating PATCH failure rolls back the optimistic cache mutation', async ({ page }) => {
+    const consoleErrors = collectConsoleErrors(page);
+    await loginOrSetup(page);
+
+    const id = await saveArticleViaApi(page, `${Date.now()}-rate-fail`);
+    await page.goto('/inbox');
+    const card = page.locator(`.article-card[data-id="${id}"]`);
+    await expect(card).toBeVisible();
+
+    await page.route('**/api/articles/*/rate', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: false }),
+      });
+    });
+
+    await page.keyboard.press('j');
+    const selected = page.locator('.article-card.kb-selected');
+    await expect(selected).toHaveAttribute('data-id', String(id));
+
+    const [rateResp] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/articles/${id}/rate`) && res.request().method() === 'PATCH'
+      ),
+      page.keyboard.press('2'),
+    ]);
+    expect(rateResp.status()).toBe(500);
+
+    // Error toast surfaced, no undo toast (nothing succeeded to undo).
+    await expect(page.locator('.settings-toast')).toContainText('Failed to rate article');
+    await expect(page.locator('#undo-toast')).toHaveCount(0);
+
+    // Server was never actually touched (fulfilled locally) — still
+    // unrated — and the optimistic mutation was rolled back, so the button
+    // does not show active.
+    expect((await getArticle(page, id)).rating).toBe(null);
+    await expect(selected.locator('.rate-btn.like')).not.toHaveClass(/active/);
+
+    // Chromium logs the fulfilled 500 itself as a console error ("Failed to
+    // load resource: ... 500") -- that's the expected side effect of the
+    // route.fulfill() above, not an application bug (same filtering
+    // rationale as save-queue.spec.js's net::ERR_FAILED case).
+    const unexpectedErrors = consoleErrors.filter((e) => !e.includes('500 (Internal Server Error)'));
+    expect(unexpectedErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
 });
