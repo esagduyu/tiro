@@ -324,11 +324,27 @@ async def lifespan(app: FastAPI):
     # registered there; a direct call wrapped in try/except is the simplest
     # correct shape (mirrors the wiki/annotations reconcile calls above --
     # best-effort, must never block startup).
+    #
+    # MUST run via asyncio.to_thread, not a direct call: register_mdns()
+    # constructs a real Zeroconf() and calls its blocking register_service(),
+    # which internally does a thread-safe round-trip back onto whatever
+    # asyncio loop Zeroconf attached itself to. Called directly from this
+    # coroutine, that loop IS this lifespan's loop, on this same thread --
+    # register_service() would block waiting for a callback that can only
+    # run once THIS coroutine yields control, which it can't while blocked.
+    # That's a self-deadlock (zeroconf's own EventLoopBlocked guard fires
+    # after ~10s, and with the collision retry in mdns.py that's ~21s of a
+    # server that isn't serving anything, after which registration still
+    # fails). `tiro/mdns.py` additionally forces `use_asyncio=False` on its
+    # Zeroconf() construction as a second, independent layer of defense --
+    # see its docstring -- but running off the loop thread via to_thread is
+    # required regardless, since a worker thread has no running loop for
+    # zeroconf to autodetect and attach to in the first place.
     if config.mdns_enabled and app.state.lan_mode:
         try:
             from tiro.mdns import register_mdns
 
-            register_mdns(config, config.host, config.port)
+            await asyncio.to_thread(register_mdns, config, config.host, config.port)
         except Exception as e:
             logger.warning("mDNS registration failed (non-fatal): %s", e)
     elif config.mdns_enabled:
@@ -341,11 +357,13 @@ async def lifespan(app: FastAPI):
 
     # Unconditional and best-effort: unregister_mdns() is a no-op when
     # registration was never attempted or failed, so no need to track
-    # whether the register call above actually succeeded.
+    # whether the register call above actually succeeded. Runs via
+    # asyncio.to_thread for the same self-deadlock reason as register_mdns
+    # above -- unregister_service() has the same blocking round-trip shape.
     try:
         from tiro.mdns import unregister_mdns
 
-        unregister_mdns()
+        await asyncio.to_thread(unregister_mdns)
     except Exception as e:
         logger.warning("mDNS unregister failed (non-fatal): %s", e)
 

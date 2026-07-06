@@ -74,7 +74,33 @@ def register_mdns(config, host: str, port: int) -> bool:
         return True
 
     try:
-        zc = Zeroconf()
+        # use_asyncio=False is load-bearing, not cosmetic. zeroconf 0.150.0's
+        # Zeroconf.__init__ autodetects a running asyncio loop via
+        # get_running_loop() and, if found, attaches itself to it (see
+        # zeroconf/_core.py: `self.loop = None if use_asyncio is False else
+        # get_running_loop()`). register_mdns() is called from inside
+        # tiro/app.py's async lifespan, so without this flag Zeroconf would
+        # attach to the SAME event loop this coroutine is running on; then
+        # register_service()'s blocking `run_coroutine_threadsafe(...).result()`
+        # would deadlock waiting on that loop's own thread, which can't
+        # service the coroutine while it's blocked waiting -- zeroconf's own
+        # 10s EventLoopBlocked guard fires (~21s wall time across the
+        # collision retry below) and registration ALWAYS fails. Forcing
+        # `use_asyncio=False` makes Zeroconf run its own private event loop
+        # on its own background thread instead, so `register_service()`'s
+        # blocking wait resolves normally. Callers additionally run
+        # `register_mdns`/`unregister_mdns` via `asyncio.to_thread(...)`
+        # (tiro/app.py) so this function never executes on the FastAPI
+        # event-loop thread in the first place -- belt and suspenders.
+        # DO NOT remove use_asyncio=False on the theory that "we're already
+        # off the loop thread via to_thread" -- to_thread workers can still
+        # see a running loop via contextvars in some asyncio internals, and
+        # this constructor argument is the one zeroconf actually documents
+        # and tests against. Reproduced-and-verified by a Phase 3 M3.0
+        # reviewer against a real zeroconf install: without this flag,
+        # startup froze for ~21s and registration never succeeded; with it,
+        # register_service() completed in ~1.6s.
+        zc = Zeroconf(use_asyncio=False)
     except Exception as e:
         logger.warning("mDNS unavailable, skipping registration: %s", e)
         return False

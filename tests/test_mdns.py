@@ -9,6 +9,7 @@ tiro/app.py's decision logic (enabled + non-loopback gating, failure
 isolation, unconditional unregister on shutdown).
 """
 
+import asyncio
 import socket
 
 import pytest
@@ -59,7 +60,7 @@ def _reset_mdns_module_state():
 
 def test_register_mdns_builds_correct_service_info(monkeypatch):
     fake_zc = FakeZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: ["192.168.1.50"])
 
@@ -78,7 +79,7 @@ def test_register_mdns_folds_in_concrete_host(monkeypatch):
     """A concrete effective bind host (not 0.0.0.0/loopback) is unioned into
     the advertised addresses alongside `_detect_lan_ips()`."""
     fake_zc = FakeZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: ["192.168.1.50"])
 
@@ -91,7 +92,7 @@ def test_register_mdns_folds_in_concrete_host(monkeypatch):
 
 def test_register_mdns_wildcard_host_not_duplicated(monkeypatch):
     fake_zc = FakeZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: ["192.168.1.50"])
 
@@ -109,7 +110,7 @@ def test_register_mdns_collision_retries_with_suffix(monkeypatch):
             super().register_service(info)
 
     fake_zc = CollidingZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: [])
 
@@ -126,7 +127,7 @@ def test_register_mdns_gives_up_quietly_after_retry_fails(monkeypatch):
             raise Exception("still colliding")
 
     fake_zc = AlwaysFailZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: [])
 
@@ -137,7 +138,7 @@ def test_register_mdns_gives_up_quietly_after_retry_fails(monkeypatch):
 
 
 def test_register_mdns_zeroconf_constructor_failure_isolated(monkeypatch):
-    def boom():
+    def boom(**kwargs):
         raise OSError("no multicast support in this sandbox")
 
     monkeypatch.setattr(mdns_mod, "Zeroconf", boom)
@@ -152,7 +153,7 @@ def test_register_mdns_malformed_host_isolated(monkeypatch):
     uncaught (regression test: an earlier draft built ServiceInfo outside
     the try block)."""
     fake_zc = FakeZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: [])
 
@@ -165,7 +166,7 @@ def test_register_mdns_malformed_host_isolated(monkeypatch):
 def test_register_mdns_idempotent(monkeypatch):
     constructed = []
 
-    def make_zc():
+    def make_zc(**kwargs):
         zc = FakeZeroconf()
         constructed.append(zc)
         return zc
@@ -182,7 +183,7 @@ def test_register_mdns_idempotent(monkeypatch):
 
 def test_unregister_mdns_calls_unregister_and_close(monkeypatch):
     fake_zc = FakeZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: [])
 
@@ -210,7 +211,7 @@ def test_unregister_mdns_isolates_failures(monkeypatch):
             raise Exception("boom again")
 
     fake_zc = FailingZeroconf()
-    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda: fake_zc)
+    monkeypatch.setattr(mdns_mod, "Zeroconf", lambda **kw: fake_zc)
     monkeypatch.setattr(mdns_mod, "ServiceInfo", FakeServiceInfo)
     monkeypatch.setattr(mdns_mod, "_detect_lan_ips", lambda: [])
 
@@ -259,6 +260,66 @@ def test_lifespan_registers_when_enabled_and_lan(tmp_path, monkeypatch, _shared_
     with TestClient(app, base_url="http://localhost"):
         assert calls == [("register", "0.0.0.0", config.port)]
     assert calls[-1] == ("unregister",)
+
+
+def test_lifespan_calls_mdns_via_to_thread(tmp_path, monkeypatch, _shared_embeddings):
+    """Structural regression test for the mdns event-loop deadlock (Phase 3
+    M3.0 fix wave 1, CRITICAL finding): tiro/app.py's lifespan MUST invoke
+    register_mdns/unregister_mdns via `asyncio.to_thread(...)`, never call
+    them directly on the event-loop thread. Calling zeroconf's blocking
+    register_service()/unregister_service() directly from this coroutine
+    self-deadlocks (Zeroconf autodetects and attaches to the running loop,
+    then blocks that same loop's thread waiting on a callback that can only
+    run once this coroutine yields) -- fully-mocked functional tests like
+    `test_lifespan_registers_when_enabled_and_lan` above cannot see this
+    because they never exercise real zeroconf/asyncio interaction.
+
+    This probes the call-site wiring instead: a worker thread spawned by
+    `asyncio.to_thread` has no running asyncio loop, so
+    `asyncio.get_running_loop()` raises RuntimeError there. Called directly
+    from the lifespan coroutine (the bug this guards against), the
+    surrounding event loop IS considered "running" on that same OS thread
+    while the coroutine's synchronous code executes, so
+    `get_running_loop()` would succeed. DO NOT add a test that touches real
+    zeroconf/sockets to reproduce the deadlock itself in CI.
+    """
+    import tiro.app as app_mod
+
+    config = _build_lan_config(tmp_path, host="0.0.0.0", mdns_enabled=True)
+    monkeypatch.setattr(app_mod, "_detect_lan_ips", lambda: ["192.168.1.50"])
+
+    ran_off_loop_thread = {"register": None, "unregister": None}
+
+    def probe_register(cfg, host, port):
+        try:
+            asyncio.get_running_loop()
+            ran_off_loop_thread["register"] = False
+        except RuntimeError:
+            ran_off_loop_thread["register"] = True
+        return True
+
+    def probe_unregister():
+        try:
+            asyncio.get_running_loop()
+            ran_off_loop_thread["unregister"] = False
+        except RuntimeError:
+            ran_off_loop_thread["unregister"] = True
+
+    monkeypatch.setattr(mdns_mod, "register_mdns", probe_register)
+    monkeypatch.setattr(mdns_mod, "unregister_mdns", probe_unregister)
+
+    app = app_mod.create_app(config)
+    with TestClient(app, base_url="http://localhost"):
+        pass
+
+    assert ran_off_loop_thread["register"] is True, (
+        "register_mdns ran on the event-loop thread -- must be wrapped in "
+        "asyncio.to_thread(...) in tiro/app.py's lifespan (self-deadlock risk)"
+    )
+    assert ran_off_loop_thread["unregister"] is True, (
+        "unregister_mdns ran on the event-loop thread -- must be wrapped in "
+        "asyncio.to_thread(...) in tiro/app.py's lifespan (self-deadlock risk)"
+    )
 
 
 def test_lifespan_skips_registration_when_disabled(tmp_path, monkeypatch, _shared_embeddings):
