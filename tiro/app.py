@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -557,6 +557,27 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
     templates.env.globals["static_v"] = STATIC_VERSION
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        """PWA manifest (M3.1 Task 1): deliberately UNAUTHENTICATED, same
+        ceremony as /login/qr below. A browser/OS evaluates installability
+        (and a phone's "Add to Home Screen" prompt fetches this) before the
+        user necessarily has a session -- an install prompt that 401s can't
+        install anything. Unlike /login/qr there's no secret or user data
+        here at all: this is a 100% static file (name/icons/colors only), so
+        there's no confidentiality question, just the allowlist ceremony
+        needed to keep the route-walk invariant (test_route_walk_everything_
+        gated) honest about which routes are intentionally open. Served via
+        an explicit route (not folded into the already-open /static mount)
+        so the content-type is exactly `application/manifest+json`, the path
+        matches what base.html's <link rel="manifest"> and the binding spec
+        both expect, and this docstring has a place to live.
+        """
+        return FileResponse(
+            FRONTEND_DIR / "static" / "manifest.webmanifest",
+            media_type="application/manifest+json",
+        )
 
     @app.get("/healthz")
     async def healthz(request: Request):

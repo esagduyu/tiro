@@ -1,0 +1,22 @@
+{
+  "name": "Tiro",
+  "short_name": "Tiro",
+  "description": "A local-first, open-source reading OS for the AI age.",
+  "start_url": "/inbox",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FAF6F0",
+  "theme_color": "#C45B3E",
+  "icons": [
+    {
+      "src": "/static/icons/tiro-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icons/tiro-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

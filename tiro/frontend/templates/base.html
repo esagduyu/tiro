@@ -6,6 +6,13 @@
     <title>{% block title %}Tiro{% endblock %}</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any">
     <link rel="icon" href="/static/favicon-32.png" type="image/png" sizes="32x32">
+    <!-- PWA (M3.1 Task 1): manifest served unauthenticated at /manifest.webmanifest
+         (see tiro/app.py's route docstring + tests/test_auth.py's allowlist entry).
+         theme-color mirrors the manifest's theme_color (--tiro-accent terra cotta),
+         apple-touch-icon covers iOS's "Add to Home Screen" (which ignores manifest icons). -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#C45B3E">
+    <link rel="apple-touch-icon" href="/static/icons/tiro-192.png" sizes="192x192">
     <link id="theme-css" rel="stylesheet" href="{{ theme_light_href }}"
           data-light-href="{{ theme_light_href }}" data-dark-href="{{ theme_dark_href }}">
     <link rel="stylesheet" href="/static/styles.css?v={{ static_v }}">

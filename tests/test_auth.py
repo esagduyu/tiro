@@ -336,6 +336,14 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         # auth.consume_login_token (atomic single-use, short TTL, generic
         # failure) rather than in a gate here; see tests/test_qr_login.py.
         "/login/qr",
+        # M3.1 Task 1: PWA manifest is deliberately unauthenticated -- a
+        # browser/OS evaluating installability (or a phone's "Add to Home
+        # Screen" prompt) fetches this before the user necessarily has a
+        # session. Unlike /login/qr there's no secret to protect at all:
+        # the file is 100% static (name/icons/theme colors), zero user
+        # data, so there's no confidentiality question -- just this
+        # allowlist ceremony. See the route's docstring in tiro/app.py.
+        "/manifest.webmanifest",
     }
     ALLOWED_PREFIXES = ("/static", "/library/themes")
     failures = []
