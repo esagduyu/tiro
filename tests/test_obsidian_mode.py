@@ -145,6 +145,12 @@ def test_flag_on_related_wikilinks_reference_real_stems(initialized_library, fak
     post_b = fm.load(md_path_b)
     expected_stem_a = Path(article_a["markdown_path"]).stem
     assert post_b.metadata["related"] == [f"[[{expected_stem_a}]]"]
+    # Body identity: the third frontmatter rewrite (post.metadata["related"]
+    # + md_path.write_text(frontmatter.dumps(post))) reuses the SAME `post`
+    # object mutated across all three writes -- its .content must still be
+    # exactly the original content_md, since highlight anchors' content_hash
+    # (tiro/anchors.py) depends on byte-stable article bodies across ingest.
+    assert post_b.content == "Synchronization strategies for local-first apps, continuing the discussion."
 
     # A was ingested first, alone in the library -- relations are computed
     # (and stored/written) once, at ingest time, with no background

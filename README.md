@@ -169,7 +169,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 
 ### Intelligence (Opus 4.6)
 
-- **Daily digest** — Three digest variants: ranked by importance, grouped by topic, grouped by entity. Opus finds contradictions between sources, connects threads, and surfaces insights you'd miss. Schedulable for automatic daily generation + email delivery.
+- **Daily digest** — Three digest variants: ranked by importance, grouped by topic, grouped by entity. Opus finds contradictions between sources, connects threads, and surfaces insights you'd miss. Schedulable for automatic daily generation + email delivery. The ranked variant also gets a "Highlights this week" recap section — a short synthesis of the last 7 days' highlights and notes — but only when you've actually highlighted something; zero highlights means zero extra API calls.
 - **Ingenuity analysis** — On-demand bias detection, factual confidence scoring, and novelty assessment for any article. Only runs when you ask (saves tokens).
 - **Learned preferences** — Rate a few articles, and Opus classifies the rest into must-read / summary-enough / discard tiers based on your demonstrated taste.
 
@@ -182,6 +182,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Related articles** — Auto-computed on save with AI-generated connection notes
 - **Knowledge graph** — Interactive d3.js force-directed graph showing entities and tags connected by article co-occurrence. Density slider, click-to-explore article panel.
 - **Content decay** — Unengaged articles naturally fade from digests over time
+- **Reading telemetry (opt-in, local-only)** — Off by default; when enabled from Settings, the reader records scroll depth, active reading time, and per-section dwell for each visit, sent once per page load and stored only in your local SQLite database. Nothing leaves your machine, and it's not in any export or backup — this is a future signal for wiki/digest ranking, not a consumer-facing feature yet.
 
 ### Library Wiki (alpha)
 
@@ -387,7 +388,7 @@ Tiro's articles are already plain markdown files with YAML frontmatter, so an [O
 - `related: ["[[stem]]", ...]` — Tiro's auto-computed related articles, written as Obsidian `[[wikilinks]]` (by markdown filename stem) instead of `/articles/{id}` URLs, so they're clickable inside Obsidian's own graph and backlink views.
 - `tags:` was already a plain YAML list before this flag existed — nothing changes there.
 
-**Format-only, and existing articles are untouched.** Flipping the flag only changes how future ingests write frontmatter; it does not rewrite your library, and it does not require Obsidian to be installed — it just lays out files so Obsidian opens them cleanly if you want. There's no live sync yet: if Tiro recomputes an article's related articles later (e.g. after a fresh ingest, or `POST /api/recompute-relations`), older articles' `related:` frontmatter is **not** retroactively rewritten — only newly-written frontmatter reflects it. Full bidirectional sync (a background file watcher that reconciles edits made directly in Obsidian) is planned for a later phase (Phase 2b in `PRODUCT_ROADMAP.md`) and does not exist yet.
+**Format-only, and existing articles are untouched.** Flipping the flag only changes how future ingests write frontmatter; it does not rewrite your library, and it does not require Obsidian to be installed — it just lays out files so Obsidian opens them cleanly if you want. There's no live sync yet: if Tiro recomputes an article's related articles later (e.g. after a fresh ingest, or `POST /api/recompute-relations`), older articles' `related:` frontmatter is **not** retroactively rewritten — only newly-written frontmatter reflects it. Full bidirectional sync (a background file watcher that reconciles edits made directly in Obsidian) is planned for a later phase (Phase 2b in `PRODUCT_ROADMAP.md`) and does not exist yet. One more honest edge case: the `related:` key can be silently **absent** (not an empty `related: []`) on a freshly-ingested article if the non-fatal related-articles step raises before that write happens — a rare failure mode, but if you notice a missing `related:` key on a new note, that's why.
 
 To use Tiro and Obsidian together today, point `library_path` in `config.yaml` at a subdirectory of an existing Obsidian vault (e.g. `~/ObsidianVault/tiro/`) — **Tiro owns that subdirectory** (its SQLite database, ChromaDB vectors, and audio cache live there too, alongside the markdown), so don't point it at your vault root if you'd rather keep those out of Obsidian's way.
 
@@ -502,12 +503,12 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.3.5 alpha to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.4.0 `reader-memory-beta` to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
-- **Phase 2 — Highlights & notes (0.4):** anchored highlights and markdown notes stored as human-readable sidecar files next to your articles — Tiro becomes a place to think, not just to save.
-- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this.
+- **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
+- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.4.0 is either this or Phase 3.)
 - **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine.
 - **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
 - **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion once Phase 3 ships.
