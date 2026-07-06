@@ -523,8 +523,9 @@ def cmd_doctor(args):
                 print(f"{key}: {report[key]}")
         if report.get("annotations_guarded"):
             print(
-                "annotations_guarded: a highlights/notes sidecar directory is missing "
-                "while index rows still reference it — not deleting rows automatically. "
+                "annotations_guarded: a highlights/notes sidecar directory is missing or "
+                "effectively empty while index rows still reference it — not deleting rows "
+                "automatically. "
                 "Restore the directory (annotations/ or notes/) and re-run."
             )
         if report.get("reembed_failures"):

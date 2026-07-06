@@ -379,47 +379,56 @@ def fix(config: TiroConfig) -> dict:
             f"{wiki_result['duplicate_uids']} duplicate uid(s))"
         )
 
-    # (g) annotations (highlights/notes, Phase 2 M2.1) index drift/guard ->
-    # reconcile_annotations() (files win). NEVER writes or deletes sidecar
-    # file CONTENT -- only moves true orphans into .orphaned/ and repairs
-    # the derived highlights/notes rows. A guard event (a whole sidecar
-    # directory missing while rows reference it) still runs the reconcile
-    # -- reconcile_annotations() itself is what holds the guard and reports
-    # it back via the 'guarded' count, same "refuse, don't delete" posture
-    # as the markdown mass-delete guard above.
-    if report["annotations_index_drift"] or report["annotations_guarded"]:
-        ann_result = reconcile_annotations(config)
-        actions.append(
-            "reconciled annotations: "
-            f"{ann_result['highlights_inserted']} highlight(s) inserted, "
-            f"{ann_result['highlights_updated']} updated, "
-            f"{ann_result['highlights_deleted']} deleted; "
-            f"{ann_result['notes_inserted']} note(s) inserted, "
-            f"{ann_result['notes_updated']} updated, "
-            f"{ann_result['notes_deleted']} deleted; "
-            f"{ann_result['orphaned_files']} orphaned sidecar(s) moved, "
-            f"{ann_result['malformed_lines']} malformed line(s) skipped"
-            + (
-                f"; {ann_result['unreadable_files']} unreadable sidecar(s) skipped "
-                "(permissions/decode error — check logs)"
-                if ann_result["unreadable_files"]
-                else ""
-            )
-            + (
-                f"; {ann_result['uid_mismatch_lines']} line(s) with a mismatched "
-                "article_uid indexed under their stem-resolved article anyway"
-                if ann_result["uid_mismatch_lines"]
-                else ""
-            )
-            + (
-                f"; {ann_result['guarded']} guard(s) held — a sidecar "
-                "directory is missing or effectively empty while rows still "
-                "reference it, restore it and re-run"
-                if ann_result["guarded"]
-                else ""
-            )
+    # (g) annotations (highlights/notes, Phase 2 M2.1) -> reconcile_annotations()
+    # (files win), run UNCONDITIONALLY. It's idempotent and cheap, and gating
+    # it on presence-based drift (annotations_index_drift only compares file
+    # stems vs. row-bearing stems) misses pure CONTENT drift -- a hand-edited
+    # quote/color/note where the row and file both exist for the same stem
+    # never trips that drift counter, so --fix would silently skip healing
+    # it. Running it every time also still covers the guard case (a whole
+    # sidecar directory missing while rows reference it) -- reconcile_
+    # annotations() itself is what holds the guard and reports it back via
+    # the 'guarded' count, same "refuse, don't delete" posture as the
+    # markdown mass-delete guard above. NEVER writes or deletes sidecar file
+    # CONTENT -- only moves true orphans into .orphaned/ and repairs the
+    # derived highlights/notes rows.
+    ann_result = reconcile_annotations(config)
+    actions.append(
+        "reconciled annotations: "
+        f"{ann_result['highlights_inserted']} highlight(s) inserted, "
+        f"{ann_result['highlights_updated']} updated, "
+        f"{ann_result['highlights_deleted']} deleted; "
+        f"{ann_result['notes_inserted']} note(s) inserted, "
+        f"{ann_result['notes_updated']} updated, "
+        f"{ann_result['notes_deleted']} deleted; "
+        f"{ann_result['orphaned_files']} orphaned sidecar(s) moved, "
+        f"{ann_result['malformed_lines']} malformed line(s) skipped"
+        + (
+            f"; {ann_result['duplicate_uid_lines']} duplicate-uid line(s) skipped"
+            if ann_result["duplicate_uid_lines"]
+            else ""
         )
-        report["annotations_reconcile"] = ann_result
+        + (
+            f"; {ann_result['unreadable_files']} unreadable sidecar(s) skipped "
+            "(permissions/decode error — check logs)"
+            if ann_result["unreadable_files"]
+            else ""
+        )
+        + (
+            f"; {ann_result['uid_mismatch_lines']} line(s) with a mismatched "
+            "article_uid indexed under their stem-resolved article anyway"
+            if ann_result["uid_mismatch_lines"]
+            else ""
+        )
+        + (
+            f"; {ann_result['guarded']} guard(s) held — a sidecar "
+            "directory is missing or effectively empty while rows still "
+            "reference it, restore it and re-run"
+            if ann_result["guarded"]
+            else ""
+        )
+    )
+    report["annotations_reconcile"] = ann_result
 
     report["actions"] = actions
     return report

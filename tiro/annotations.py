@@ -62,6 +62,7 @@ not something new introduced by this module.
 import json
 import logging
 import os
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -134,9 +135,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _parse_jsonl_lines(path: Path) -> tuple[list[dict], int]:
     """Parse `path` line-by-line. Malformed lines (invalid JSON, non-object,
-    or missing the required `uid`) are skipped and counted, never raised --
-    one corrupt line can't block the rest of the file or crash the caller.
-    The file itself is never rewritten by this function."""
+    missing the required `uid`, or missing/empty `quote` -- mirrors the
+    NOT NULL `highlights.quote_text` column this feeds) are skipped and
+    counted, never raised -- one corrupt line can't block the rest of the
+    file or crash the caller. The file itself is never rewritten by this
+    function."""
     lines: list[dict] = []
     malformed = 0
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
@@ -147,6 +150,8 @@ def _parse_jsonl_lines(path: Path) -> tuple[list[dict], int]:
             obj = json.loads(raw)
             if not isinstance(obj, dict) or not obj.get("uid"):
                 raise ValueError("not an object with a 'uid' field")
+            if not isinstance(obj.get("quote"), str) or not obj.get("quote"):
+                raise ValueError("missing or empty 'quote' field")
         except Exception as e:
             logger.warning("Skipping malformed annotation line %d in %s: %s", lineno, path, e)
             malformed += 1
@@ -337,6 +342,18 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
 
     for line in lines:
         uid = line.get("uid")
+        if uid in seen_uids:
+            # Duplicate uid WITHIN this file (e.g. a templated/copy-pasted
+            # line) -- only the first occurrence is indexed. A corrupt or
+            # colliding line can't be allowed to block the rest of the file,
+            # same posture as malformed_lines.
+            logger.warning(
+                "Skipping duplicate annotation line uid=%s in stem for article "
+                "id=%s (uid already seen earlier in this file)",
+                uid, article_id,
+            )
+            counts["duplicate_uid_lines"] += 1
+            continue
         seen_uids.add(uid)
         line_article_uid = line.get("article_uid")
         if line_article_uid and line_article_uid != article["uid"]:
@@ -352,39 +369,17 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
             counts["uid_mismatch_lines"] += 1
         note_markdown = line.get("note_markdown")
         row = existing.get(uid)
-        if row is None:
-            cur = conn.execute(
-                """INSERT INTO highlights
-                   (uid, article_id, quote_text, prefix_context, suffix_context,
-                    text_position_start, text_position_end, content_hash, color,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    uid,
-                    article_id,
-                    line.get("quote"),
-                    line.get("prefix"),
-                    line.get("suffix"),
-                    line.get("position_start"),
-                    line.get("position_end"),
-                    line.get("content_hash"),
-                    line.get("color") or "yellow",
-                    line.get("created_at") or now,
-                    line.get("updated_at") or now,
-                ),
-            )
-            highlight_id = cur.lastrowid
-            counts["highlights_inserted"] += 1
-        else:
-            highlight_id = row["id"]
-            if _highlight_drifted(row, line):
-                conn.execute(
-                    """UPDATE highlights
-                       SET quote_text = ?, prefix_context = ?, suffix_context = ?,
-                           text_position_start = ?, text_position_end = ?,
-                           content_hash = ?, color = ?, updated_at = ?
-                       WHERE id = ?""",
+        try:
+            if row is None:
+                cur = conn.execute(
+                    """INSERT INTO highlights
+                       (uid, article_id, quote_text, prefix_context, suffix_context,
+                        text_position_start, text_position_end, content_hash, color,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
+                        uid,
+                        article_id,
                         line.get("quote"),
                         line.get("prefix"),
                         line.get("suffix"),
@@ -392,15 +387,53 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
                         line.get("position_end"),
                         line.get("content_hash"),
                         line.get("color") or "yellow",
+                        line.get("created_at") or now,
                         line.get("updated_at") or now,
-                        highlight_id,
                     ),
                 )
-                counts["highlights_updated"] += 1
+                highlight_id = cur.lastrowid
+                counts["highlights_inserted"] += 1
             else:
-                counts["highlights_matched"] += 1
+                highlight_id = row["id"]
+                if _highlight_drifted(row, line):
+                    conn.execute(
+                        """UPDATE highlights
+                           SET quote_text = ?, prefix_context = ?, suffix_context = ?,
+                               text_position_start = ?, text_position_end = ?,
+                               content_hash = ?, color = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (
+                            line.get("quote"),
+                            line.get("prefix"),
+                            line.get("suffix"),
+                            line.get("position_start"),
+                            line.get("position_end"),
+                            line.get("content_hash"),
+                            line.get("color") or "yellow",
+                            line.get("updated_at") or now,
+                            highlight_id,
+                        ),
+                    )
+                    counts["highlights_updated"] += 1
+                else:
+                    counts["highlights_matched"] += 1
 
-        _reconcile_highlight_note(conn, article_id, highlight_id, note_markdown, counts, now)
+            _reconcile_highlight_note(conn, article_id, highlight_id, note_markdown, counts, now)
+        except sqlite3.IntegrityError as e:
+            # Cross-FILE duplicate: this uid collides with a highlight row
+            # from a DIFFERENT article's sidecar processed earlier in this
+            # same reconcile run (the uid namespace is library-wide, but
+            # `existing`/`seen_uids` are only scoped to this file). Per-file
+            # dedup above can't catch this -- the UNIQUE constraint is the
+            # only thing that notices. Log + count + move on rather than
+            # letting one bad line abort the whole reconcile.
+            logger.warning(
+                "Skipping annotation line uid=%s for article id=%s: %s "
+                "(likely a cross-file duplicate uid)",
+                uid, article_id, e,
+            )
+            counts["duplicate_uid_lines"] += 1
+            continue
 
     vanished = set(existing) - seen_uids
     for uid in vanished:
@@ -627,7 +660,19 @@ def reconcile_annotations(config: TiroConfig) -> dict:
         synced against the one row with `highlight_id IS NULL` for that
         article.
       - malformed JSONL lines are skipped, counted, and logged -- never
-        raised, and the file is never rewritten to "fix" them.
+        raised, and the file is never rewritten to "fix" them. A line with
+        a `uid` but a missing/empty `quote` is malformed for this purpose
+        (mirrors the NOT NULL `highlights.quote_text` column it would
+        otherwise crash on).
+      - a line whose `uid` duplicates another line already processed is
+        skipped, counted (`duplicate_uid_lines`), and logged -- never
+        raised. This covers both a duplicate WITHIN one file (only the
+        first occurrence is indexed) and a duplicate ACROSS two different
+        articles' files in the same reconcile run (caught via
+        `sqlite3.IntegrityError` on the `highlights.uid` UNIQUE
+        constraint, since the per-file `seen_uids` check can't see across
+        files) -- one corrupt/colliding line never blocks the rest of the
+        file or the run.
       - a line whose `article_uid` disagrees with the stem-resolved
         article's actual uid is still indexed under the stem-resolved
         article (stem wins, see module docstring) -- the disagreement is
@@ -659,11 +704,13 @@ def reconcile_annotations(config: TiroConfig) -> dict:
       `notes_matched`/`inserted`/`updated`/`deleted` (covers both note
       kinds combined), `orphaned_files` (sidecars moved to `.orphaned/`,
       both directories combined), `malformed_lines` (JSONL lines skipped),
-      `unreadable_files` (sidecars that raised on read, both directories
-      combined), `uid_mismatch_lines` (JSONL lines whose `article_uid`
-      disagreed with the stem-resolved article), `guarded` (mass-deletion
-      guard events: 0, 1, or 2 -- one per directory that was either
-      missing, or present-but-empty relative to >1 article's rows)."""
+      `duplicate_uid_lines` (JSONL lines skipped because their `uid`
+      duplicated one already processed, within a file or across files in
+      this run), `unreadable_files` (sidecars that raised on read, both
+      directories combined), `uid_mismatch_lines` (JSONL lines whose
+      `article_uid` disagreed with the stem-resolved article), `guarded`
+      (mass-deletion guard events: 0, 1, or 2 -- one per directory that was
+      either missing, or present-but-empty relative to >1 article's rows)."""
     counts = {
         "highlights_matched": 0,
         "highlights_inserted": 0,
@@ -675,6 +722,7 @@ def reconcile_annotations(config: TiroConfig) -> dict:
         "notes_deleted": 0,
         "orphaned_files": 0,
         "malformed_lines": 0,
+        "duplicate_uid_lines": 0,
         "unreadable_files": 0,
         "uid_mismatch_lines": 0,
         "guarded": 0,

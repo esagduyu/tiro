@@ -607,6 +607,53 @@ def test_fix_reconciles_annotations_drift(initialized_library):
     assert report["structurally_consistent"] is True
 
 
+def test_fix_heals_pure_content_drift_even_with_zero_presence_drift(initialized_library):
+    """Final-review finding 2: annotations_index_drift is presence-based
+    only (file stem present/absent vs. row-bearing stem present/absent) --
+    a hand-edited quote/color where BOTH the row and the file already exist
+    for the same stem trips zero drift, so gating --fix's reconcile call on
+    `annotations_index_drift or annotations_guarded` silently skips healing
+    it. --fix must run reconcile_annotations() unconditionally (idempotent,
+    cheap) so pure content drift heals too."""
+    from tiro.annotations import sidecar_stem, write_annotations
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    aid, md_path = _make_article(config, "Content Drift Article")
+    stem = sidecar_stem(md_path)
+
+    # Seed a highlight row AND its matching sidecar file in sync first, via
+    # a normal reconcile, so presence-based drift is zero afterward.
+    write_annotations(
+        config, stem, [{"uid": "H-CONTENT-DRIFT", "quote": "original quote", "color": "yellow"}]
+    )
+    fix(config)  # first pass: inserts the row, presence now matches
+    report = scan(config)
+    assert report["annotations_index_drift"] == 0  # presence drift is gone
+
+    # Hand-edit the sidecar's CONTENT only -- same stem, same file, still
+    # present -- so presence-based drift stays zero even though the row is
+    # now stale.
+    write_annotations(
+        config, stem, [{"uid": "H-CONTENT-DRIFT", "quote": "hand-edited quote", "color": "blue"}]
+    )
+    report = scan(config)
+    assert report["annotations_index_drift"] == 0  # still zero: this is the gap
+
+    result = fix(config)
+    assert any("reconciled annotations" in a for a in result["actions"]), result["actions"]
+
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-CONTENT-DRIFT",)
+        ).fetchone()
+        assert row["quote_text"] == "hand-edited quote"
+        assert row["color"] == "blue"
+    finally:
+        conn.close()
+
+
 def test_scan_detects_annotations_guard(initialized_library):
     """A highlight row with the annotations/ directory missing entirely is a
     directory mishap, not "delete everything" -- structural (fails the

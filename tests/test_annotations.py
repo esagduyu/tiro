@@ -500,6 +500,172 @@ def test_read_annotations_also_skips_malformed_lines(db_config):
     assert result[0]["uid"] == "H1"
 
 
+# --- reconcile_annotations: quote-less lines (final-review finding 1a) -------
+# A line with a uid but no quote (or an empty one) used to sail past
+# _parse_jsonl_lines' validity check (which only required uid) and then
+# crash the whole reconcile with a NOT NULL constraint failure on
+# highlights.quote_text. It must now be treated as malformed instead.
+
+
+def test_reconcile_treats_quote_less_line_as_malformed_not_a_crash(db_config):
+    aid, article_uid = _seed_article(db_config, stem="no-quote-stem")
+    ann_dir = annotations_dir(db_config)
+    ann_dir.mkdir(parents=True)
+    path = ann_dir / "no-quote-stem.jsonl"
+    raw = (
+        '{"uid": "H-OK", "article_uid": "' + article_uid + '", "quote": "ok"}\n'
+        '{"uid": "H-NO-QUOTE", "article_uid": "' + article_uid + '"}\n'
+        '{"uid": "H-EMPTY-QUOTE", "article_uid": "' + article_uid + '", "quote": ""}\n'
+    )
+    path.write_text(raw)
+
+    counts = reconcile_annotations(db_config)  # must not raise
+
+    assert counts["malformed_lines"] == 2
+    assert counts["highlights_inserted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-OK",)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-NO-QUOTE",)
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-EMPTY-QUOTE",)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_read_annotations_also_skips_quote_less_lines(db_config):
+    ann_dir = annotations_dir(db_config)
+    ann_dir.mkdir(parents=True)
+    (ann_dir / "no-quote-read.jsonl").write_text(
+        '{"uid": "H1", "quote": "ok"}\n{"uid": "H2"}\n{"uid": "H3", "quote": ""}\n'
+    )
+    result = read_annotations(db_config, "no-quote-read")
+    assert len(result) == 1
+    assert result[0]["uid"] == "H1"
+
+
+# --- reconcile_annotations: duplicate uid (final-review finding 1b/1c) -------
+# A JSONL line whose uid duplicates another line's -- same file, or across
+# two different files in one reconcile run -- used to crash the whole
+# reconcile with "UNIQUE constraint failed: highlights.uid" on the second
+# INSERT, rolling back every other article's healing too. Must now be
+# skipped + counted + logged, never raised.
+
+
+def test_reconcile_skips_duplicate_uid_within_one_file(db_config):
+    aid, article_uid = _seed_article(db_config, stem="dup-in-file-stem")
+    ann_dir = annotations_dir(db_config)
+    ann_dir.mkdir(parents=True)
+    path = ann_dir / "dup-in-file-stem.jsonl"
+    raw = (
+        '{"uid": "H-DUP", "article_uid": "' + article_uid + '", "quote": "first"}\n'
+        '{"uid": "H-OK", "article_uid": "' + article_uid + '", "quote": "ok"}\n'
+        '{"uid": "H-DUP", "article_uid": "' + article_uid + '", "quote": "second"}\n'
+    )
+    path.write_text(raw)
+
+    counts = reconcile_annotations(db_config)  # must not raise
+
+    assert counts["duplicate_uid_lines"] == 1
+    assert counts["highlights_inserted"] == 2  # H-DUP (first occurrence) + H-OK
+
+    conn = get_connection(db_config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-DUP",)
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["quote_text"] == "first"  # first occurrence wins
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-OK",)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_skips_duplicate_uid_across_two_articles_files(db_config):
+    """Per-file `seen_uids` dedup can't see across files -- this exercises
+    the sqlite3.IntegrityError fallback for a uid collision between two
+    DIFFERENT articles' sidecars in the same reconcile run."""
+    aid1, uid1 = _seed_article(db_config, stem="cross-file-a")
+    aid2, uid2 = _seed_article(db_config, stem="cross-file-b")
+    write_annotations(
+        db_config,
+        "cross-file-a",
+        [{"uid": "H-CROSS-DUP", "article_uid": uid1, "quote": "from a"}],
+    )
+    write_annotations(
+        db_config,
+        "cross-file-b",
+        [
+            {"uid": "H-CROSS-DUP", "article_uid": uid2, "quote": "from b"},
+            {"uid": "H-B-ONLY", "article_uid": uid2, "quote": "b only"},
+        ],
+    )
+
+    counts = reconcile_annotations(db_config)  # must not raise, must not abort
+
+    assert counts["duplicate_uid_lines"] >= 1
+    # The rest of the run must still heal: H-B-ONLY (processed alongside the
+    # colliding line in the same file) must still be indexed.
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-B-ONLY",)
+        ).fetchone() is not None
+        # Exactly one row exists for the colliding uid (whichever file's
+        # sidecar was processed first, files are processed in sorted stem
+        # order so cross-file-a wins).
+        rows = conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-CROSS-DUP",)
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["article_id"] == aid1
+    finally:
+        conn.close()
+
+
+def test_reconcile_duplicate_uid_across_files_does_not_abort_other_articles(db_config):
+    """The whole-transaction-rollback blast radius from the finding: a
+    cross-file uid collision must not prevent an UNRELATED third article's
+    drift from healing in the same run."""
+    aid1, uid1 = _seed_article(db_config, stem="cross-abort-a")
+    aid2, uid2 = _seed_article(db_config, stem="cross-abort-b")
+    aid3, uid3 = _seed_article(db_config, stem="cross-abort-c")
+    write_annotations(
+        db_config,
+        "cross-abort-a",
+        [{"uid": "H-ABORT-DUP", "article_uid": uid1, "quote": "from a"}],
+    )
+    write_annotations(
+        db_config,
+        "cross-abort-b",
+        [{"uid": "H-ABORT-DUP", "article_uid": uid2, "quote": "from b"}],
+    )
+    write_annotations(
+        db_config,
+        "cross-abort-c",
+        [{"uid": "H-UNRELATED", "article_uid": uid3, "quote": "unrelated"}],
+    )
+
+    counts = reconcile_annotations(db_config)  # must not raise
+
+    assert counts["duplicate_uid_lines"] >= 1
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-UNRELATED",)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
 # --- reconcile_annotations: missing-dir mass-deletion guard -------------------
 
 

@@ -21,6 +21,16 @@ ARTICLE list shape only (`ARTICLE_COLUMNS`/`ARTICLE_FROM`/`SORT_SQL`/
 `build_article_filters`); highlights are a different row shape with a much
 smaller filter set, so a second tiny builder living next to its one caller
 is simpler than widening queries.py's contract.
+
+No-await invariant: these sidecar read-modify-write handlers (read file,
+mutate, write file, then update the row) are lost-update-safe ONLY because
+every handler below contains ZERO `await` points between its read and its
+write -- Python's single-threaded event loop runs each `async def` handler
+to completion, uninterrupted, once it starts. Inserting an `await` inside a
+mutation handler (e.g. an accidental async I/O call between the read and
+the write) would open a window where a second request could interleave and
+clobber the first's write -- a lost update. Keep these handlers await-free
+across their read-modify-write span.
 """
 
 import logging
