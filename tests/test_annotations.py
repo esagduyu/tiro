@@ -542,6 +542,272 @@ def test_reconcile_guards_notes_dir_missing_with_rows(db_config):
         conn.close()
 
 
+# --- reconcile_annotations: widened guard (dir EXISTS but empty) -------------
+# Reviewer finding 1 (CRITICAL): the guard above only caught a fully-missing
+# directory. `rm -rf annotations/*` / a botched restore leaves the directory
+# present but with zero matching files, which the old code treated as "every
+# article legitimately lost its sidecar" and mass-deleted. These tests pin
+# the widened guard: present-but-empty-for->1-article is now guarded too,
+# single-article libraries still get ordinary files-win deletion, and the
+# guard must not overfire when only SOME files are missing.
+
+
+def test_reconcile_guards_annotations_dir_exists_but_empty_for_multiple_articles(db_config):
+    aid1, _ = _seed_article(db_config, stem="empty-dir-highlights-1")
+    _seed_highlight(db_config, aid1, uid="H-EMPTY-DIR-1")
+    aid2, _ = _seed_article(db_config, stem="empty-dir-highlights-2")
+    _seed_highlight(db_config, aid2, uid="H-EMPTY-DIR-2")
+
+    ann_dir = annotations_dir(db_config)
+    ann_dir.mkdir(parents=True)  # dir exists, zero sidecar files in it
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["guarded"] >= 1
+    assert counts["highlights_deleted"] == 0
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-EMPTY-DIR-1",)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-EMPTY-DIR-2",)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_guards_notes_dir_exists_but_empty_for_multiple_articles(db_config):
+    aid1, _ = _seed_article(db_config, stem="empty-dir-notes-1")
+    _seed_note(db_config, aid1, highlight_id=None, body="note 1")
+    aid2, _ = _seed_article(db_config, stem="empty-dir-notes-2")
+    _seed_note(db_config, aid2, highlight_id=None, body="note 2")
+
+    nt_dir = notes_dir(db_config)
+    nt_dir.mkdir(parents=True)  # dir exists, zero sidecar files in it
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["guarded"] >= 1
+    assert counts["notes_deleted"] == 0
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (aid1,)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (aid2,)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_guard_does_not_overfire_when_some_files_present(db_config):
+    """Two articles have highlight rows; one has a matching (unchanged) file,
+    the other has none at all. The widened guard must NOT fire (not every
+    article's file is missing) -- the one legitimately-vanished article's
+    rows are deleted normally, the other is untouched."""
+    aid_has_file, uid_has_file = _seed_article(db_config, stem="guard-no-overfire-has-file")
+    _seed_highlight(db_config, aid_has_file, uid="H-KEEP", quote="hello world")
+    aid_no_file, _ = _seed_article(db_config, stem="guard-no-overfire-no-file")
+    _seed_highlight(db_config, aid_no_file, uid="H-VANISH")
+
+    write_annotations(
+        db_config,
+        "guard-no-overfire-has-file",
+        [
+            {
+                "uid": "H-KEEP",
+                "article_uid": uid_has_file,
+                "quote": "hello world",
+                "prefix": "pre",
+                "suffix": "suf",
+                "position_start": 0,
+                "position_end": 11,
+                "content_hash": "hash1",
+                "color": "yellow",
+            }
+        ],
+    )
+    # "guard-no-overfire-no-file" deliberately gets no sidecar file at all,
+    # while the directory (created above) exists and is non-empty.
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["guarded"] == 0
+    assert counts["highlights_deleted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-KEEP",)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-VANISH",)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_reconcile_single_article_library_vanished_file_still_deletes(db_config):
+    """Files-win is preserved for the ordinary single-article case: the
+    directory exists (possibly empty), exactly one article has rows, and
+    its sidecar is gone -- that's a legitimate delete, not a guard."""
+    aid, _ = _seed_article(db_config, stem="lone-article-highlights")
+    _seed_highlight(db_config, aid, uid="H-LONE")
+    annotations_dir(db_config).mkdir(parents=True)  # exists, empty
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["guarded"] == 0
+    assert counts["highlights_deleted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-LONE",)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_reconcile_single_article_library_vanished_note_still_deletes(db_config):
+    aid, _ = _seed_article(db_config, stem="lone-article-note")
+    _seed_note(db_config, aid, highlight_id=None, body="lone note")
+    notes_dir(db_config).mkdir(parents=True)  # exists, empty
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["guarded"] == 0
+    assert counts["notes_deleted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (aid,)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+# --- reconcile_annotations: unreadable sidecar files (finding 2) -------------
+# A directory created where a sidecar file is expected reproduces an
+# unreadable file portably (path.read_text() raises IsADirectoryError, an
+# OSError subclass) without permission bits that root/CI may ignore.
+
+
+def test_reconcile_skips_unreadable_annotation_sidecar_without_aborting_others(db_config):
+    aid_bad, _ = _seed_article(db_config, stem="unreadable-annotations")
+    _seed_highlight(db_config, aid_bad, uid="H-UNTOUCHED")
+    aid_ok, uid_ok = _seed_article(db_config, stem="readable-annotations")
+
+    ann_dir = annotations_dir(db_config)
+    ann_dir.mkdir(parents=True)
+    (ann_dir / "unreadable-annotations.jsonl").mkdir()  # unreadable as a file
+    write_annotations(
+        db_config,
+        "readable-annotations",
+        [{"uid": "H-STILL-PROCESSED", "article_uid": uid_ok, "quote": "fine"}],
+    )
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["unreadable_files"] == 1
+    assert counts["guarded"] == 0
+    # The other article's file is still processed -- one bad file doesn't
+    # abort the reconcile.
+    assert counts["highlights_inserted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        # The unreadable article's existing row is untouched (not deleted).
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-UNTOUCHED",)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-STILL-PROCESSED",)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_skips_unreadable_note_sidecar_without_aborting_others(db_config):
+    aid_bad, _ = _seed_article(db_config, stem="unreadable-notes")
+    _seed_note(db_config, aid_bad, highlight_id=None, body="untouched note")
+    aid_ok, _ = _seed_article(db_config, stem="readable-notes")
+
+    nt_dir = notes_dir(db_config)
+    nt_dir.mkdir(parents=True)
+    (nt_dir / "unreadable-notes.md").mkdir()  # unreadable as a file
+    write_note(db_config, "readable-notes", "processed fine")
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["unreadable_files"] == 1
+    assert counts["guarded"] == 0
+    assert counts["notes_inserted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (aid_bad,)
+        ).fetchone()
+        assert row is not None
+        assert row["body_markdown"] == "untouched note"
+        assert conn.execute(
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (aid_ok,)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+# --- reconcile_annotations: article_uid mismatch (finding 3) -----------------
+
+
+def test_reconcile_stem_wins_on_article_uid_mismatch(db_config):
+    """A hand-edited line whose article_uid disagrees with the stem-resolved
+    article is still indexed under the stem-resolved article -- stem wins,
+    per the module docstring -- with the disagreement logged and counted,
+    never used to relocate the line."""
+    aid, real_uid = _seed_article(db_config, stem="mismatch-stem")
+    write_annotations(
+        db_config,
+        "mismatch-stem",
+        [{"uid": "H-MISMATCH", "article_uid": "totally-unrelated-uid", "quote": "q"}],
+    )
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["uid_mismatch_lines"] == 1
+    assert counts["highlights_inserted"] == 1
+
+    conn = get_connection(db_config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM highlights WHERE uid = ?", ("H-MISMATCH",)
+        ).fetchone()
+        assert row is not None
+        assert row["article_id"] == aid  # stem-resolved article, not the claimed uid
+    finally:
+        conn.close()
+
+
+def test_reconcile_no_mismatch_counted_when_article_uid_agrees(db_config):
+    aid, real_uid = _seed_article(db_config, stem="match-stem")
+    write_annotations(
+        db_config,
+        "match-stem",
+        [{"uid": "H-MATCH", "article_uid": real_uid, "quote": "q"}],
+    )
+
+    counts = reconcile_annotations(db_config)
+
+    assert counts["uid_mismatch_lines"] == 0
+    assert counts["highlights_inserted"] == 1
+
+
 # --- startup wiring: app.py lifespan calls reconcile_annotations() -----------
 
 

@@ -40,6 +40,23 @@ SQLite). `reconcile_annotations()` is the primary files-→index direction
 these -- they write files directly then update rows, using the small read/
 write primitives here (`read_annotations`/`write_annotations`/`read_note`/
 `write_note`/`delete_note`) as their plumbing.
+
+**Stem-wins / uid-mismatch rule.** Sidecars are matched to articles by
+filename STEM only (`sidecar_stem()`, derived from `markdown_path`) -- a
+JSONL line's own `article_uid` field is informational, never authoritative
+for routing. If a hand-edited line's `article_uid` disagrees with the
+stem-resolved article's actual uid, the stem still wins: the line is
+indexed under the stem-resolved article regardless, and the disagreement
+is only logged and counted (`uid_mismatch_lines`), never used to relocate
+the line or rewrite the file. This matches the module's broader
+never-rewrite-sidecar-content posture -- reconcile corrects DERIVED rows,
+never file content, even to fix an inconsistency within the file itself.
+
+**Global stem uniqueness assumption.** Because sidecars are keyed purely by
+stem, `markdown_path` stems are assumed globally unique across the whole
+library. This is a pre-existing assumption carried over from the rest of
+the codebase (article filenames, wiki page slugs are also stem/slug-keyed),
+not something new introduced by this module.
 """
 
 import json
@@ -321,6 +338,18 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
     for line in lines:
         uid = line.get("uid")
         seen_uids.add(uid)
+        line_article_uid = line.get("article_uid")
+        if line_article_uid and line_article_uid != article["uid"]:
+            # Stem wins (see module docstring): index under the
+            # stem-resolved article regardless, just log + count the
+            # disagreement. Never relocate the line or touch the file.
+            logger.warning(
+                "Annotation line uid=%s claims article_uid=%s but its stem "
+                "resolves to article uid=%s -- indexing under the "
+                "stem-resolved article (stem wins)",
+                uid, line_article_uid, article["uid"],
+            )
+            counts["uid_mismatch_lines"] += 1
         note_markdown = line.get("note_markdown")
         row = existing.get(uid)
         if row is None:
@@ -385,6 +414,22 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
         counts["highlights_deleted"] += 1
 
 
+def _resolve_missing_stems(rows_article_ids, id_to_article: dict, file_stems: set[str]) -> list:
+    """Of `rows_article_ids` (articles with derived rows in the table under
+    reconciliation), return the subset whose stem-resolved sidecar has no
+    matching entry in `file_stems`. An id with no matching article row
+    (`id_to_article.get()` -> None -- references a since-deleted article)
+    is skipped, not this function's concern, same as before."""
+    missing = []
+    for article_id in rows_article_ids:
+        article = id_to_article.get(article_id)
+        if article is None:
+            continue
+        if sidecar_stem(article) not in file_stems:
+            missing.append(article_id)
+    return missing
+
+
 def _reconcile_highlights(config: TiroConfig, conn, id_to_article: dict, counts: dict) -> None:
     ann_dir = annotations_dir(config)
     dir_exists = ann_dir.exists()
@@ -399,8 +444,17 @@ def _reconcile_highlights(config: TiroConfig, conn, id_to_article: dict, counts:
                 _move_to_orphaned(config, path)
                 counts["orphaned_files"] += 1
                 continue
+            try:
+                lines, malformed = _parse_jsonl_lines(path)
+            except (OSError, UnicodeDecodeError) as e:
+                # Unreadable != absent: skip this article entirely (no row
+                # deletions for it) rather than let one bad file abort the
+                # whole reconcile or get treated as "the file is gone".
+                logger.warning("Skipping unreadable annotation sidecar %s: %s", path, e)
+                counts["unreadable_files"] += 1
+                file_stems.add(stem)
+                continue
             file_stems.add(stem)
-            lines, malformed = _parse_jsonl_lines(path)
             counts["malformed_lines"] += malformed
             _reconcile_highlight_rows_for_article(conn, article, lines, counts)
 
@@ -419,13 +473,27 @@ def _reconcile_highlights(config: TiroConfig, conn, id_to_article: dict, counts:
             counts["guarded"] += 1
         return
 
-    for article_id in highlight_article_ids:
-        article = id_to_article.get(article_id)
-        if article is None:
-            continue  # row references a since-deleted article; not this function's concern
-        stem = sidecar_stem(article)
-        if stem in file_stems:
-            continue
+    missing_ids = _resolve_missing_stems(highlight_article_ids, id_to_article, file_stems)
+
+    # Widened mass-deletion guard: the directory EXISTS but every article
+    # with highlight rows has no matching file in it at all (`rm -rf
+    # annotations/*`, a botched restore that leaves the dir present but
+    # empty, ...) is just as destructive as the directory being fully
+    # absent above, and files-win would otherwise silently wipe every
+    # highlight row in the library. A single-article library is exempt --
+    # deleting that one article's rows when its lone sidecar vanished is
+    # the legitimate files-win case, not a mishap (that's why `> 1` here,
+    # mirroring `tiro/doctor.py fix()`'s own `total_articles > 1` guard for
+    # the markdown mass-delete refusal).
+    if (
+        missing_ids
+        and len(missing_ids) == len(highlight_article_ids)
+        and len(highlight_article_ids) > 1
+    ):
+        counts["guarded"] += 1
+        return
+
+    for article_id in missing_ids:
         highlight_ids = [
             r["id"]
             for r in conn.execute(
@@ -460,8 +528,16 @@ def _reconcile_article_notes(config: TiroConfig, conn, id_to_article: dict, coun
                 _move_to_orphaned(config, path)
                 counts["orphaned_files"] += 1
                 continue
+            try:
+                body = path.read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                # Unreadable != absent: skip this article entirely (no row
+                # deletions for it), same posture as the highlights side.
+                logger.warning("Skipping unreadable note sidecar %s: %s", path, e)
+                counts["unreadable_files"] += 1
+                file_stems.add(stem)
+                continue
             file_stems.add(stem)
-            body = path.read_text()
             existing = conn.execute(
                 "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL",
                 (article["id"],),
@@ -496,13 +572,21 @@ def _reconcile_article_notes(config: TiroConfig, conn, id_to_article: dict, coun
             counts["guarded"] += 1
         return
 
-    for article_id in note_article_ids:
-        article = id_to_article.get(article_id)
-        if article is None:
-            continue
-        stem = sidecar_stem(article)
-        if stem in file_stems:
-            continue
+    missing_ids = _resolve_missing_stems(note_article_ids, id_to_article, file_stems)
+
+    # Widened guard, same rationale as `_reconcile_highlights`: the dir
+    # EXISTS but every article with an article-level note row has no
+    # matching file at all -- refuse, don't wipe every note row. Exempt
+    # single-article libraries (legitimate files-win case).
+    if (
+        missing_ids
+        and len(missing_ids) == len(note_article_ids)
+        and len(note_article_ids) > 1
+    ):
+        counts["guarded"] += 1
+        return
+
+    for article_id in missing_ids:
         cur = conn.execute(
             "DELETE FROM notes WHERE article_id = ? AND highlight_id IS NULL", (article_id,)
         )
@@ -529,6 +613,17 @@ def reconcile_annotations(config: TiroConfig) -> dict:
         article.
       - malformed JSONL lines are skipped, counted, and logged -- never
         raised, and the file is never rewritten to "fix" them.
+      - a line whose `article_uid` disagrees with the stem-resolved
+        article's actual uid is still indexed under the stem-resolved
+        article (stem wins, see module docstring) -- the disagreement is
+        only logged and counted (`uid_mismatch_lines`), never used to
+        relocate the line or touch the file.
+      - a sidecar file that can't be read at all (permissions, decode
+        error, ...) is skipped entirely -- unreadable is treated like
+        malformed content, not like "the file is gone": no rows are
+        deleted for that article, the failure is logged and counted
+        (`unreadable_files`), and reconcile continues with every other
+        article rather than letting one bad file abort the whole run.
       - a sidecar whose stem matches no known article is moved to
         `.orphaned/`, collision-safe.
       - if the `annotations/` (resp. `notes/`) directory itself does not
@@ -536,15 +631,24 @@ def reconcile_annotations(config: TiroConfig) -> dict:
         this is treated as a directory mishap, not "the user deleted every
         highlight" -- rows are left untouched and a guard is counted
         instead of a mass deletion (mirrors doctor's all-articles-missing
-        guard for markdown).
+        guard for markdown). The SAME guard also fires when the directory
+        DOES exist but contains zero matching files for MORE THAN ONE
+        article with rows (e.g. `rm -rf annotations/*`, a botched restore)
+        -- a present-but-effectively-empty directory is just as dangerous
+        as an absent one. A single article whose lone sidecar vanished
+        while the directory is otherwise present/populated is NOT guarded
+        -- that's the ordinary, legitimate files-win delete.
 
     Returns counts:
       `highlights_matched`/`inserted`/`updated`/`deleted`,
       `notes_matched`/`inserted`/`updated`/`deleted` (covers both note
       kinds combined), `orphaned_files` (sidecars moved to `.orphaned/`,
       both directories combined), `malformed_lines` (JSONL lines skipped),
-      `guarded` (mass-deletion guard events: 0, 1, or 2 -- one per
-      directory that was missing-with-rows-present)."""
+      `unreadable_files` (sidecars that raised on read, both directories
+      combined), `uid_mismatch_lines` (JSONL lines whose `article_uid`
+      disagreed with the stem-resolved article), `guarded` (mass-deletion
+      guard events: 0, 1, or 2 -- one per directory that was either
+      missing, or present-but-empty relative to >1 article's rows)."""
     counts = {
         "highlights_matched": 0,
         "highlights_inserted": 0,
@@ -556,6 +660,8 @@ def reconcile_annotations(config: TiroConfig) -> dict:
         "notes_deleted": 0,
         "orphaned_files": 0,
         "malformed_lines": 0,
+        "unreadable_files": 0,
+        "uid_mismatch_lines": 0,
         "guarded": 0,
     }
 

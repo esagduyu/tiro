@@ -391,9 +391,21 @@ def fix(config: TiroConfig) -> dict:
             f"{ann_result['orphaned_files']} orphaned sidecar(s) moved, "
             f"{ann_result['malformed_lines']} malformed line(s) skipped"
             + (
+                f"; {ann_result['unreadable_files']} unreadable sidecar(s) skipped "
+                "(permissions/decode error — check logs)"
+                if ann_result["unreadable_files"]
+                else ""
+            )
+            + (
+                f"; {ann_result['uid_mismatch_lines']} line(s) with a mismatched "
+                "article_uid indexed under their stem-resolved article anyway"
+                if ann_result["uid_mismatch_lines"]
+                else ""
+            )
+            + (
                 f"; {ann_result['guarded']} guard(s) held — a sidecar "
-                "directory is missing while rows still reference it, "
-                "restore it and re-run"
+                "directory is missing or effectively empty while rows still "
+                "reference it, restore it and re-run"
                 if ann_result["guarded"]
                 else ""
             )
