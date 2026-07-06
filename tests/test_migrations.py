@@ -463,3 +463,120 @@ def test_m009_highlights_notes_schema_columns(tmp_path):
         "created_at", "updated_at",
     }
     conn.close()
+
+
+def test_m010_fresh_schema_has_reading_sessions_table(tmp_path):
+    """Fresh DB path: init_db() runs SCHEMA directly (no migration involved)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "reading_sessions" in names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(reading_sessions)").fetchall()}
+    assert "idx_reading_sessions_article" in index_names
+    conn.close()
+
+
+def test_m010_legacy_db_at_version_9_gains_reading_sessions_table(tmp_path):
+    """A DB stamped at user_version 9 (pre-telemetry) must gain
+    reading_sessions via run_migrations, with no backfill (fresh telemetry
+    tables start empty)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("DROP TABLE reading_sessions")
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+    conn.close()
+
+    applied = run_migrations(db)
+    assert any("reading_sessions" in a for a in applied)
+
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "reading_sessions" in names
+    assert conn.execute("SELECT COUNT(*) FROM reading_sessions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_m010_reading_sessions_migration_is_idempotent(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+    assert run_migrations(db) == []  # re-run: nothing pending
+
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'web')")
+    conn.execute(
+        "INSERT INTO articles (uid, source_id, title, slug, markdown_path)"
+        " VALUES ('01AAAAAAAAAAAAAAAAAAAAAAAA', 1, 't', 'sl', 'f.md')"
+    )
+    conn.execute(
+        "INSERT INTO reading_sessions (uid, article_id) VALUES ('01S1', 1)"
+    )
+    conn.commit()
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)  # re-running the migration must not raise or wipe data
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM reading_sessions").fetchone()[0] == 1
+    conn.close()
+
+
+def test_m010_fresh_schema_and_legacy_migration_produce_identical_tables(tmp_path):
+    """Cross-path schema equality: the SCHEMA path (fresh DB) and the
+    migrate_db/_m010 path (legacy DB upgraded from user_version 9) are two
+    independently-maintained copies of the same CREATE TABLE DDL."""
+    fresh_db = tmp_path / "fresh.db"
+    init_db(fresh_db)
+
+    legacy_db = tmp_path / "legacy.db"
+    init_db(legacy_db)
+    conn = get_connection(legacy_db)
+    conn.execute("DROP TABLE reading_sessions")
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+    conn.close()
+    run_migrations(legacy_db)
+
+    def xinfo(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            return {(r["name"], r["type"], r["notnull"], r["dflt_value"]) for r in rows}
+        finally:
+            conn.close()
+
+    def index_list(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA index_list({table})").fetchall()
+            return {(r["name"], r["unique"]) for r in rows}
+        finally:
+            conn.close()
+
+    assert xinfo(fresh_db, "reading_sessions") == xinfo(legacy_db, "reading_sessions")
+    assert index_list(fresh_db, "reading_sessions") == index_list(legacy_db, "reading_sessions")
+
+
+def test_m010_reading_sessions_schema_columns(tmp_path):
+    """Column-level check against the brief's exact schema (both convergence
+    paths use the same CREATE TABLE, so checking the fresh path suffices)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(reading_sessions)").fetchall()}
+    assert cols == {
+        "id", "uid", "article_id", "started_at", "ended_at",
+        "max_scroll_pct", "active_seconds", "dwell_json",
+    }
+    conn.close()

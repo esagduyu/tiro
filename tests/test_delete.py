@@ -298,6 +298,85 @@ def test_delete_removes_highlight_and_note_rows_and_sidecars(authenticated_clien
         conn.close()
 
 
+# --- Reading-session telemetry cascade (Phase 2 M2.3 Task 1, review fix) ----
+
+
+def test_delete_removes_reading_sessions_rows(authenticated_client, configured_library):
+    """reading_sessions.article_id REFERENCES articles(id) with no cascade
+    (migration 010) -- delete_article must clean these rows or the final
+    DELETE FROM articles raises IntegrityError (foreign_keys=ON)."""
+    from tiro.lifecycle import delete_article
+    from tiro.migrations import new_ulid
+
+    config = configured_library
+    article_id = _ingest_one(authenticated_client)
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO reading_sessions
+                (uid, article_id, started_at, ended_at, max_scroll_pct, active_seconds, dwell_json)
+            VALUES (?, ?, '2026-07-05T10:00:00Z', '2026-07-05T10:01:00Z', 50, 60, '[]')
+            """,
+            (new_ulid(), article_id),
+        )
+        conn.commit()
+        assert conn.execute(
+            "SELECT 1 FROM reading_sessions WHERE article_id = ?", (article_id,)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+    assert delete_article(config, article_id) is True
+
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM reading_sessions WHERE article_id = ?", (article_id,)
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM articles WHERE id = ?", (article_id,)
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_delete_source_cascade_cleans_reading_sessions(authenticated_client, configured_library):
+    """Source delete loops delete_article per article -- must not 500 when
+    one of the source's articles has reading_sessions rows."""
+    from tiro.migrations import new_ulid
+
+    config = configured_library
+    article_id = _ingest_one(authenticated_client)
+    conn = get_connection(config.db_path)
+    try:
+        source_id = conn.execute(
+            "SELECT source_id FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()["source_id"]
+        conn.execute(
+            """
+            INSERT INTO reading_sessions
+                (uid, article_id, started_at, ended_at, max_scroll_pct, active_seconds, dwell_json)
+            VALUES (?, ?, '2026-07-05T10:00:00Z', '2026-07-05T10:01:00Z', 50, 60, '[]')
+            """,
+            (new_ulid(), article_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = authenticated_client.delete(f"/api/sources/{source_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["deleted_articles"] == 1
+
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute("SELECT 1 FROM reading_sessions").fetchone() is None
+    finally:
+        conn.close()
+
+
 def test_delete_source_cascade_cleans_annotation_sidecars(authenticated_client, configured_library):
     """Source delete loops delete_article per article -- highlight/note
     sidecars for every one of the source's articles must be cleaned too."""

@@ -217,6 +217,11 @@ async function loadArticle(id) {
             });
         }
 
+        // Reading-session telemetry (M2.3 Task 2) — must run AFTER the body's
+        // innerHTML is set (dwell tracking walks #reader-body's H2/H3s). No-ops
+        // entirely when the server rendered data-telemetry="off".
+        setupTelemetry(a.id);
+
         // Annotations (highlights + selection toolbar) — must run AFTER the
         // body's innerHTML is set (buildTextIndex walks the rendered DOM).
         setupAnnotations(a.id, a.content || "");
@@ -1059,6 +1064,203 @@ function formatAudioTime(seconds) {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* --- Reading-session telemetry (M2.3 Task 2) ---
+ *
+ * Opt-in, strictly local-only (see `tiro/api/routes_sessions.py` for the
+ * server side, which double-checks `reading_telemetry_enabled` itself — this
+ * client gate is belt-and-suspenders, not the only enforcement point).
+ * `reader.html` renders `data-telemetry="on"|"off"` on `#reader` from
+ * `config.reading_telemetry_enabled` (threaded through the `/articles/{id}`
+ * route in `tiro/app.py`, the same way `_theme_context` threads theme
+ * hrefs); when it's "off", `setupTelemetry` returns immediately and NOTHING
+ * below ever registers a listener or a timer.
+ *
+ * Three signals are tracked, matching `SessionPayload` in
+ * routes_sessions.py:
+ *   - max_scroll_pct: high-watermark of (scrollTop+viewportH)/scrollHeight,
+ *     clamped 0-100. Short articles (the whole thing fits without scrolling)
+ *     are scored 100 immediately on render — there's no meaningful "depth"
+ *     concept when there's nothing to scroll, and treating it as 0 would
+ *     make short-but-fully-read articles look unread to the future ranking
+ *     signal this feeds (Decision #8).
+ *   - active_seconds: a 1s interval accumulator gated on the tab being
+ *     visible AND a qualifying interaction (scroll/keydown/pointermove/
+ *     pointerdown) within the last 30s — an open-but-idle background tab
+ *     (or an open-but-ignored foreground tab) doesn't count as reading time.
+ *   - dwell: active seconds attributed to "the current section" — the last
+ *     H2/H3 in #reader-body whose top has scrolled above the viewport
+ *     (plain scroll-position math via getBoundingClientRect, re-evaluated
+ *     every tick — simpler and more directly testable than an
+ *     IntersectionObserver for a single "which heading are we past" query).
+ *     Time before the first heading (or when there are no headings at all)
+ *     attributes to a synthetic "(intro)" bucket. Keyed by heading
+ *     textContent (truncated 200 chars, mirroring the server's clamp) —
+ *     articles with duplicate heading text merge into one dwell bucket, an
+ *     accepted simplification (the payload only round-trips heading TEXT,
+ *     not DOM identity, since that's what routes_sessions.py stores).
+ *
+ * Sent exactly once per page load, on the first of visibilitychange->hidden
+ * or pagehide, via `navigator.sendBeacon` (a Blob with
+ * `type: "application/json"` — routes_sessions.py reads it with
+ * `request.json()`, which works fine off a Blob-POSTed body since the
+ * Content-Type header is what FastAPI/Starlette keys off, not the sender
+ * being fetch vs sendBeacon) falling back to `fetch(..., {method: "POST",
+ * keepalive: true})` when sendBeacon is unavailable or returns false (queue
+ * full). A `sent` flag on the per-load state object makes both trigger paths
+ * (visibilitychange and pagehide can both fire on some browsers/OSes) safe —
+ * whichever runs first wins, the second is a no-op.
+ *
+ * Empty-session guard: if the tab is hidden/closed with active_seconds === 0
+ * AND max_scroll_pct === 0 (opened and instantly backgrounded, or a
+ * prefetch/bot hit that never rendered to a human), nothing is sent at all —
+ * that row would be pure noise for the ranking signal this feeds, not a
+ * " 0-effort read" worth recording.
+ */
+
+let telemetryState = null; // reset per page load; stays null for the life of the page when disabled
+
+function setupTelemetry(articleId) {
+    const reader = document.getElementById("reader");
+    if (!reader || reader.dataset.telemetry !== "on") return; // disabled: zero listeners, zero timers
+
+    const bodyEl = document.getElementById("reader-body");
+    const headings = bodyEl ? Array.from(bodyEl.querySelectorAll("h2, h3")) : [];
+
+    telemetryState = {
+        articleId,
+        startedAt: new Date().toISOString(),
+        maxScrollPct: 0,
+        activeSeconds: 0,
+        dwell: new Map(), // heading text (or "(intro)") -> accumulated seconds
+        lastInteraction: Date.now(),
+        sent: false,
+        headings,
+        intervalId: null,
+    };
+
+    updateTelemetryScrollDepth(); // short articles: score 100 immediately, before any scroll event
+    window.addEventListener("scroll", updateTelemetryScrollDepth, { passive: true });
+    window.addEventListener("resize", updateTelemetryScrollDepth);
+
+    ["scroll", "keydown", "pointermove", "pointerdown"].forEach((evt) => {
+        document.addEventListener(evt, markTelemetryInteraction, { passive: true });
+    });
+
+    telemetryState.intervalId = setInterval(tickTelemetry, 1000);
+
+    document.addEventListener("visibilitychange", handleTelemetryVisibilityChange);
+    window.addEventListener("pagehide", sendTelemetry);
+}
+
+function updateTelemetryScrollDepth() {
+    if (!telemetryState) return;
+    const doc = document.documentElement;
+    const viewportH = window.innerHeight || doc.clientHeight || 0;
+    const scrollHeight = doc.scrollHeight || 0;
+    const scrollTop = window.scrollY || doc.scrollTop || 0;
+
+    let pct;
+    if (scrollHeight <= viewportH) {
+        pct = 100; // nothing to scroll: the whole article is already on screen
+    } else {
+        pct = ((scrollTop + viewportH) / scrollHeight) * 100;
+    }
+    pct = Math.max(0, Math.min(100, Math.round(pct)));
+    if (pct > telemetryState.maxScrollPct) telemetryState.maxScrollPct = pct;
+}
+
+function markTelemetryInteraction() {
+    if (telemetryState) telemetryState.lastInteraction = Date.now();
+}
+
+function tickTelemetry() {
+    if (!telemetryState) return;
+    const idleMs = Date.now() - telemetryState.lastInteraction;
+    const active = document.visibilityState === "visible" && idleMs <= 30000;
+    if (!active) return;
+
+    telemetryState.activeSeconds += 1;
+
+    const heading = currentTelemetrySection();
+    telemetryState.dwell.set(heading, (telemetryState.dwell.get(heading) || 0) + 1);
+}
+
+function currentTelemetrySection() {
+    if (!telemetryState || telemetryState.headings.length === 0) return "(intro)";
+
+    let current = null;
+    for (const h of telemetryState.headings) {
+        if (h.getBoundingClientRect().top <= 0) {
+            current = h;
+        } else {
+            break; // headings are in document order; the first one still below viewport top ends the scan
+        }
+    }
+    if (!current) return "(intro)";
+    return (current.textContent || "").trim().slice(0, 200) || "(intro)";
+}
+
+function handleTelemetryVisibilityChange() {
+    if (document.visibilityState === "hidden") sendTelemetry();
+}
+
+function sendTelemetry() {
+    if (!telemetryState || telemetryState.sent) return;
+
+    if (telemetryState.activeSeconds === 0 && telemetryState.maxScrollPct === 0) {
+        // Empty-session guard — see module comment above. Checked BEFORE the
+        // sent flag/teardown below: an instant hide that trips this guard
+        // must not burn the page load's once-per-load send budget, so a
+        // returning-visible user later in the same load can still send.
+        return;
+    }
+    telemetryState.sent = true; // set BEFORE any early return past this point: never send twice, never retry
+
+    teardownTelemetryListeners();
+
+    const dwell = Array.from(telemetryState.dwell.entries())
+        .slice(0, 100)
+        .map(([heading, seconds]) => ({ heading, seconds }));
+
+    const payload = {
+        started_at: telemetryState.startedAt,
+        max_scroll_pct: telemetryState.maxScrollPct,
+        active_seconds: telemetryState.activeSeconds,
+        dwell,
+    };
+    const body = JSON.stringify(payload);
+    const url = `/api/articles/${telemetryState.articleId}/session`;
+
+    let beaconSent = false;
+    if (navigator.sendBeacon) {
+        try {
+            beaconSent = navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+        } catch (err) {
+            beaconSent = false;
+        }
+    }
+    if (!beaconSent) {
+        fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+            keepalive: true,
+        }).catch(() => {});
+    }
+}
+
+function teardownTelemetryListeners() {
+    if (!telemetryState) return;
+    if (telemetryState.intervalId) clearInterval(telemetryState.intervalId);
+    window.removeEventListener("scroll", updateTelemetryScrollDepth);
+    window.removeEventListener("resize", updateTelemetryScrollDepth);
+    ["scroll", "keydown", "pointermove", "pointerdown"].forEach((evt) => {
+        document.removeEventListener(evt, markTelemetryInteraction);
+    });
+    document.removeEventListener("visibilitychange", handleTelemetryVisibilityChange);
+    window.removeEventListener("pagehide", sendTelemetry);
 }
 
 /* --- Annotations: selection -> highlight -> paint (M2.2 Task 2) --- */

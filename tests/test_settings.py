@@ -108,6 +108,55 @@ def test_appearance_settings_accepts_custom_theme_name(authenticated_client, con
     assert configured_library.theme_light == "custom-x"
 
 
+def test_telemetry_settings_default_disabled(authenticated_client):
+    r = authenticated_client.get("/api/settings/telemetry")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == {"enabled": False}
+
+
+def test_telemetry_settings_round_trip_persists_to_config_path(authenticated_client, configured_library):
+    r = authenticated_client.post("/api/settings/telemetry", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == {"enabled": True}
+
+    # Live config updated immediately.
+    assert configured_library.reading_telemetry_enabled is True
+
+    # And actually written to the config file, not just the in-memory object.
+    assert "reading_telemetry_enabled: true" in _cfg_text(configured_library)
+    from tiro.config import load_config
+    reloaded = load_config(configured_library.config_path)
+    assert reloaded.reading_telemetry_enabled is True
+
+    r = authenticated_client.get("/api/settings/telemetry")
+    assert r.json()["data"] == {"enabled": True}
+
+    r = authenticated_client.post("/api/settings/telemetry", json={"enabled": False})
+    assert r.status_code == 200, r.text
+    assert configured_library.reading_telemetry_enabled is False
+    assert "reading_telemetry_enabled: false" in _cfg_text(configured_library)
+
+
+def test_telemetry_settings_requires_auth(auth_client):
+    r = auth_client.get("/api/settings/telemetry")
+    assert r.status_code == 401
+    r = auth_client.post("/api/settings/telemetry", json={"enabled": True})
+    assert r.status_code == 401
+
+
+def test_settings_page_has_telemetry_card(authenticated_client):
+    """Pin for the M2.3 Task 2 "Reading Telemetry" settings card: status
+    display + toggle button wired to GET/POST /api/settings/telemetry, with
+    copy stating the local-only/opt-in posture."""
+    r = authenticated_client.get("/settings")
+    assert r.status_code == 200
+    assert "Reading Telemetry" in r.text
+    assert 'id="telemetry-status"' in r.text
+    assert 'id="btn-toggle-telemetry"' in r.text
+    assert "never leaves your machine" in r.text
+    assert "Off by default" in r.text
+
+
 def test_digest_schedule_persists_to_config_path(authenticated_client, configured_library):
     r = authenticated_client.post("/api/settings/digest-schedule", json={
         "enabled": False, "time": "08:30", "unread_only": True, "timezone_offset": -60,

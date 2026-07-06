@@ -92,6 +92,27 @@ def daily_digest_prompt(
     )
 
 
+def highlight_recap_prompt(highlights: list[dict]) -> str:
+    """Build the "Highlights this week" recap prompt for Opus 4.6.
+
+    Args:
+        highlights: List of dicts with keys: article_id, article_title,
+            quote, note (note may be None/empty when the highlight has no
+            attached note). Order is preserved as given (digest.py passes
+            newest-first, already capped).
+    """
+    lines = []
+    for h in highlights:
+        note_line = f"\n  Note: {h['note']}" if h.get("note") else ""
+        lines.append(
+            f"- Article ID: {h['article_id']} | \"{h['article_title']}\"\n"
+            f"  Quote: \"{h['quote']}\"{note_line}"
+        )
+    highlights_str = "\n".join(lines)
+
+    return load_template("highlight_recap").format(highlights_str=highlights_str)
+
+
 def ingenuity_analysis_prompt(full_article_text: str, source_name: str) -> str:
     """Build the ingenuity/trust analysis prompt for Opus 4.6.
 

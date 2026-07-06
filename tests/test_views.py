@@ -240,6 +240,9 @@ def test_static_version_bumped_for_saved_views_ui():
     # live constant instead of membership in a list that has to be
     # remembered and extended by every future closeout task. The canonical
     # "what changed at this exact version" pins live in
-    # test_wiki_views.py's test_static_version_is_61 and
+    # test_wiki_views.py's test_static_version_is_62 and
     # test_static_version.py's import-map test.
-    assert STATIC_VERSION == "61"
+    #
+    # Bumped 61 -> 62 in M2.3 Task 2 (reader telemetry tracker landed in
+    # reader.js under the old "61" pin).
+    assert STATIC_VERSION == "62"

@@ -188,6 +188,63 @@ def test_restore_round_trips_highlight_and_note_rows_and_files(initialized_libra
     assert note is not None and note["body_markdown"] == "article note"
 
 
+def test_snapshot_scrubs_reading_sessions(initialized_library, tmp_path):
+    """Finding 1 (MAJOR, controller decision O-6): docs promise backups
+    exclude reading_sessions telemetry -- make that promise TRUE by scrubbing
+    the throwaway DB copy before it's tarred, rather than just weakening the
+    docs. Snapshot -> restore (into a fresh library dir, since restore
+    displaces the old one) must come back with zero reading_sessions rows
+    while unrelated article/highlight rows and files survive untouched."""
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    config = initialized_library
+    article_id = _seed_article_with_annotations(config)
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO reading_sessions
+                (uid, article_id, started_at, ended_at, max_scroll_pct, active_seconds, dwell_json)
+            VALUES (?, ?, '2026-07-05T10:00:00Z', '2026-07-05T10:01:00Z', 50, 60, '[]')
+            """,
+            (new_ulid(), article_id),
+        )
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM reading_sessions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+
+    # The live DB must never be touched by the scrub -- only the throwaway
+    # tempdir copy that gets tarred.
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM reading_sessions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    from tiro.backup import restore_snapshot
+
+    restore_snapshot(config, snap)  # restore into a fresh library dir (old one is displaced)
+
+    conn = get_connection(config.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM reading_sessions").fetchone()[0] == 0
+        article = conn.execute(
+            "SELECT title FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        highlight = conn.execute(
+            "SELECT quote_text FROM highlights WHERE article_id = ?", (article_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert article is not None and article["title"] == "T1"
+    assert highlight is not None and highlight["quote_text"] == "quote"
+
+
 def test_snapshot_strips_secrets(initialized_library, tmp_path):
     config = initialized_library
     config.anthropic_api_key = "sk-ant-SECRET"

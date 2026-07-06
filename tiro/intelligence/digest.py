@@ -3,11 +3,11 @@
 import json
 import logging
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.intelligence.prompts import daily_digest_prompt
+from tiro.intelligence.prompts import daily_digest_prompt, highlight_recap_prompt
 from tiro.llm import llm_call
 from tiro.sanitize import sanitize_markdown
 
@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 RATING_LABELS = {-1: "Dislike", 1: "Like", 2: "Love"}
 DIGEST_TYPES = ("ranked", "by_topic", "by_entity")
+
+# Highlights-this-week recap (Phase 2 M2.3, Task 4): a short additional
+# section appended to the "ranked" digest variant only -- see
+# `generate_digest`'s docstring for why not all three.
+HIGHLIGHT_RECAP_WINDOW_DAYS = 7
+MAX_HIGHLIGHTS_FOR_RECAP = 50  # cap by recency, same rationale as MAX_ARTICLES_FOR_DIGEST
 
 # Section header patterns to split Opus's response into three digest types
 SECTION_PATTERNS = [
@@ -128,6 +134,56 @@ def _gather_articles(
         vip_authors = [r["name"] for r in vip_author_rows]
 
         return articles, vip_sources, vip_authors, recent_ratings
+    finally:
+        conn.close()
+
+
+def _gather_highlights(config: TiroConfig) -> list[dict]:
+    """Gather highlights from the last `HIGHLIGHT_RECAP_WINDOW_DAYS` days for
+    the digest's "Highlights this week" recap section.
+
+    Reads the derived `highlights`/`notes` SQLite index only (same posture
+    as the rest of digest.py, which never touches sidecar files directly --
+    `reconcile_annotations()` keeps the index honest). Scope is deliberately
+    HIGHLIGHTS, not "everything annotation-shaped": a highlight's own
+    anchored note (`notes.highlight_id = highlights.id`) is included when
+    present, since it's the user's own gloss on that exact quote, but
+    whole-article notes (`notes.highlight_id IS NULL`) are out of scope --
+    an article can have a standalone note with zero highlights, and pulling
+    those in would blur "highlights this week" into "everything I annotated
+    this week."
+
+    Returns a list of dicts (article_id, article_title, quote, note),
+    newest-highlight-first, capped to `MAX_HIGHLIGHTS_FOR_RECAP`. Windowing
+    and the cap both key on `highlights.created_at` (ISO 8601 UTC strings,
+    so lexicographic and chronological order agree)."""
+    conn = get_connection(config.db_path)
+    try:
+        cutoff = (datetime.now(UTC) - timedelta(days=HIGHLIGHT_RECAP_WINDOW_DAYS)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        rows = conn.execute(
+            """
+            SELECT h.article_id, h.quote_text, a.title AS article_title,
+                   n.body_markdown AS note_markdown
+            FROM highlights h
+            JOIN articles a ON a.id = h.article_id
+            LEFT JOIN notes n ON n.highlight_id = h.id
+            WHERE h.created_at >= ?
+            ORDER BY h.created_at DESC
+            LIMIT ?
+            """,
+            (cutoff, MAX_HIGHLIGHTS_FOR_RECAP),
+        ).fetchall()
+        return [
+            {
+                "article_id": row["article_id"],
+                "article_title": row["article_title"],
+                "quote": row["quote_text"],
+                "note": row["note_markdown"],
+            }
+            for row in rows
+        ]
     finally:
         conn.close()
 
@@ -285,6 +341,25 @@ def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
     # returned to the caller) — surgically strips raw script/iframe HTML
     # islands and javascript: links without touching markdown syntax.
     sections = {dtype: sanitize_markdown(content) for dtype, content in sections.items()}
+
+    # Highlights this week: an OPTIONAL additional llm_call, made only when
+    # there's at least one highlight in the window -- zero highlights means
+    # zero extra calls (and no section), not an empty/placeholder recap.
+    # Appended to "ranked" only: the three variants are cached as three
+    # independent digests-table rows (not re-derived from one another), and
+    # duplicating the recap into all three would make it appear three times
+    # in `send_digest_email(all_sections=True)`'s combined email. "ranked"
+    # is both the digest page's default tab and what the non-all_sections
+    # email sends, so it's the one place a reader is guaranteed to see it.
+    highlights = _gather_highlights(config)
+    if highlights:
+        recap_prompt = highlight_recap_prompt(highlights)
+        recap_result = llm_call(
+            config, "heavy", recap_prompt,
+            purpose="highlight_recap", max_tokens=1024,
+        )
+        recap_content = sanitize_markdown(recap_result.text.strip())
+        sections["ranked"] = f"{sections['ranked']}\n\n---\n\n{recap_content}"
 
     # Cache
     today = date.today().isoformat()

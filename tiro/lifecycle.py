@@ -99,6 +99,11 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
         # highlight-anchored), so this one DELETE clears both.
         conn.execute("DELETE FROM notes WHERE article_id = ?", (article_id,))
         conn.execute("DELETE FROM highlights WHERE article_id = ?", (article_id,))
+        # Reading-session telemetry (Phase 2 M2.3): reading_sessions.article_id
+        # REFERENCES articles(id) with foreign_keys=ON, same pattern as the
+        # highlights/notes cleanup above -- must go before the article row is
+        # deleted below or the DELETE FROM articles raises IntegrityError.
+        conn.execute("DELETE FROM reading_sessions WHERE article_id = ?", (article_id,))
 
         # Wiki (Phase 1b): wiki_page_articles.article_id REFERENCES articles(id)
         # with foreign_keys=ON, so any page citing this article would make the

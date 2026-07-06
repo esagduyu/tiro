@@ -720,7 +720,16 @@ def main():
     )
 
     parser = argparse.ArgumentParser(prog="tiro", description="Tiro — reading OS for the AI age")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    # Mirrors run.py's _config_path() and tiro/mcp/server.py's _config_path():
+    # honor TIRO_CONFIG (absolute path) as the default so a CLI invoked with a
+    # CWD that doesn't contain config.yaml doesn't silently fall back to
+    # defaults. An explicit --config still wins (argparse default is only
+    # used when the flag is omitted). Regression: run.py made this same
+    # mistake once already (see test_run_py_config_path_honors_tiro_config).
+    parser.add_argument(
+        "--config", default=os.environ.get("TIRO_CONFIG", "config.yaml"),
+        help="Path to config.yaml (default: $TIRO_CONFIG or ./config.yaml)",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("init", help="Initialize a new Tiro library")
