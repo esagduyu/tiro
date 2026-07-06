@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}Tiro ⁊ Mobile Login{% endblock %}
+{% block nav_settings %}active{% endblock %}
+
+{% block content %}
+<section class="settings-header">
+    <div class="settings-title-row">
+        <h2>Mobile Login</h2>
+    </div>
+</section>
+
+<div class="settings-section">
+    <h3 class="settings-section-title">Scan to sign in</h3>
+    <p class="settings-section-desc">
+        Scan this code with your phone's camera to open Tiro there, already
+        signed in &mdash; no password to type. The code is single-use and
+        expires in {{ qr_ttl_minutes }} minutes.
+    </p>
+
+    <div class="qr-setup-card">
+        <div class="qr-setup-svg">{{ qr_svg | safe }}</div>
+        <p class="qr-setup-url">{{ qr_url }}</p>
+        <p class="qr-setup-countdown" id="qr-countdown" data-ttl-seconds="{{ qr_ttl_minutes * 60 }}">
+            Expires in <span id="qr-countdown-value">{{ qr_ttl_minutes }}:00</span>
+        </p>
+    </div>
+</div>
+
+<form method="post" action="/setup/qr" class="settings-configure">
+    <button type="submit" class="settings-configure-btn settings-configure-btn-secondary">
+        Generate new code
+    </button>
+</form>
+
+<style>
+.qr-setup-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.5rem;
+    max-width: 320px;
+}
+.qr-setup-svg {
+    background: #fff;
+    padding: 1rem;
+    border-radius: 8px;
+    line-height: 0;
+}
+.qr-setup-svg svg {
+    display: block;
+    width: 220px;
+    height: 220px;
+}
+.qr-setup-url {
+    font-size: 0.8rem;
+    font-family: monospace;
+    color: var(--tiro-muted);
+    word-break: break-all;
+    text-align: center;
+    margin: 0;
+}
+.qr-setup-countdown {
+    font-size: 0.85rem;
+    color: var(--tiro-muted);
+    margin: 0;
+}
+.qr-setup-countdown.qr-setup-expired {
+    color: var(--tiro-tier-must-read, #B5334D);
+    font-weight: 600;
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    // Deliberately a plain inline script, not a `type="module"` file under
+    // static/js/ — this page is self-contained (one countdown, no shared
+    // state with any other view), so a full ES module + STATIC_VERSION
+    // cache-bust entry would be pure overhead. See M3.0 Task 2 report for
+    // the judgment call.
+    var el = document.getElementById('qr-countdown');
+    var valueEl = document.getElementById('qr-countdown-value');
+    if (!el || !valueEl) return;
+    var remaining = parseInt(el.getAttribute('data-ttl-seconds'), 10) || 0;
+    function render() {
+        if (remaining <= 0) {
+            valueEl.textContent = 'expired';
+            el.classList.add('qr-setup-expired');
+            return;
+        }
+        var m = Math.floor(remaining / 60);
+        var s = remaining % 60;
+        valueEl.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    render();
+    var timer = setInterval(function () {
+        remaining -= 1;
+        render();
+        if (remaining <= 0) clearInterval(timer);
+    }, 1000);
+})();
+</script>
+{% endblock %}

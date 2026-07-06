@@ -53,6 +53,36 @@ def _theme_context(config: TiroConfig) -> dict:
     }
 
 
+def _qr_svg(data: str) -> str:
+    """Render `data` as an inline SVG string (no XML declaration/namespace,
+    no width/height so CSS controls sizing) — embedded directly into the
+    /setup/qr template body, no external asset or data: URI needed. Fixed
+    black-on-white module colors regardless of the active theme: QR
+    scanners rely on maximum contrast, and this SVG is only ever shown
+    inside a light card in the template (see qr_setup.html)."""
+    import io
+
+    import segno
+
+    qr = segno.make(data, error="m")
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", xmldecl=False, svgns=False, omitsize=True, border=2, scale=6)
+    return buf.getvalue().decode()
+
+
+def _login_qr_target(request: Request, token: str) -> str:
+    """URL a phone should hit to redeem a QR login token. Deliberately uses
+    the raw `Host` request header (not `request.url.netloc`) and the
+    request's own scheme (honors LAN http / any future https) — by design,
+    this embeds whatever host the USER'S browser reached the server through
+    (LAN IP, Tailscale hostname, ...), matching how Phase 3 LAN access
+    works. The Host-header validation middleware (see `_validate_host`
+    below) has already rejected unrecognized hosts by the time this runs,
+    so no additional validation is needed here."""
+    host = request.headers.get("host", "")
+    return f"{request.url.scheme}://{host}/login/qr?token={token}"
+
+
 _DIR_SIZE_CACHE_TTL = 30  # seconds
 _dir_size_cache: dict[Path, tuple[float, int]] = {}
 
@@ -454,6 +484,31 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     async def login_page(request: Request):
         return templates.TemplateResponse(request, "login.html", _theme_context(request.app.state.config))
 
+    @app.get("/login/qr")
+    async def login_via_qr(request: Request, token: str = ""):
+        """Redeem a one-time QR-login token minted by /setup/qr. Deliberately
+        NOT gated behind require_page_auth (this IS how an unauthenticated
+        phone gets its first session) and deliberately does NOT call
+        auth._check_csrf — like /login above, this is a top-level browser
+        navigation (the phone's camera/QR app opening a link), which
+        legitimately carries Sec-Fetch-Site: cross-site; CSRF checks exist to
+        stop *mutating* cross-site requests riding an existing session, not
+        to stop a bare link click that presents its own bearer of proof (the
+        token) instead of ambient cookie auth.
+
+        Every failure path (missing token, garbage token, expired, already
+        used) redirects to the same generic /login with no distinguishing
+        detail — consume_login_token's docstring covers why (no oracle)."""
+        from fastapi.responses import RedirectResponse
+
+        config = request.app.state.config
+        if not auth.consume_login_token(config, token):
+            return RedirectResponse(url="/login", status_code=302)
+        session_token = auth.create_session(config.db_path)
+        response = RedirectResponse(url="/inbox", status_code=302)
+        auth.attach_session_cookie(response, request, session_token)
+        return response
+
     @app.exception_handler(auth.NotAuthenticated)
     async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
         from fastapi.responses import RedirectResponse
@@ -499,6 +554,38 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def sources_page(request: Request):
         return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+
+    async def _qr_setup_response(request: Request) -> HTMLResponse:
+        config = request.app.state.config
+        token = auth.create_login_token(config)
+        qr_url = _login_qr_target(request, token)
+        return templates.TemplateResponse(
+            request,
+            "qr_setup.html",
+            {
+                "qr_svg": _qr_svg(qr_url),
+                "qr_url": qr_url,
+                "qr_ttl_minutes": auth.LOGIN_TOKEN_TTL_MINUTES,
+                **_theme_context(config),
+            },
+        )
+
+    @app.get("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def qr_setup_page(request: Request):
+        """Every render mints a fresh login token (simplest correct option —
+        old ones just expire naturally via their own 15-minute TTL, no
+        cleanup needed here)."""
+        return await _qr_setup_response(request)
+
+    @app.post("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def qr_setup_regenerate(request: Request):
+        """'Generate new code' button: a same-origin form POST (CSRF-checked
+        like any other authenticated mutation) that re-renders the whole
+        page with a fresh token — a full reload is the simplest correct
+        shape here (no separate JSON+SVG-fragment endpoint to keep in
+        sync)."""
+        auth._check_csrf(request)
+        return await _qr_setup_response(request)
 
     @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_list_page(request: Request):

@@ -37,6 +37,14 @@ def scan(config: TiroConfig) -> dict:
         expired_sessions = conn.execute(
             "SELECT COUNT(*) AS n FROM sessions WHERE expires_at < datetime('now')"
         ).fetchone()["n"]
+        # M3.0 Task 2: QR-login tokens are single-use and short-TTL by
+        # design (see tiro/auth.py create_login_token/consume_login_token);
+        # once used or expired they're pure housekeeping, same bucket as
+        # expired sessions above -- not a structural inconsistency.
+        expired_login_tokens = conn.execute(
+            "SELECT COUNT(*) AS n FROM login_tokens "
+            "WHERE expires_at < datetime('now') OR used_at IS NOT NULL"
+        ).fetchone()["n"]
         unreferenced_tags = conn.execute(
             "SELECT COUNT(*) AS n FROM tags WHERE id NOT IN "
             "(SELECT tag_id FROM article_tags WHERE tag_id IS NOT NULL)"
@@ -172,6 +180,7 @@ def scan(config: TiroConfig) -> dict:
         "unreferenced_entities": unreferenced_entities,
         "unreferenced_authors": unreferenced_authors,
         "expired_sessions": expired_sessions,
+        "expired_login_tokens": expired_login_tokens,
         "wiki_index_drift": wiki_index_drift,
         "annotations_index_drift": annotations_index_drift,
         "annotations_guarded": annotations_guarded,
@@ -192,6 +201,7 @@ def scan(config: TiroConfig) -> dict:
     report["clean"] = report["structurally_consistent"] and \
         unreferenced_tags == 0 and unreferenced_entities == 0 and \
         unreferenced_authors == 0 and expired_sessions == 0 and \
+        expired_login_tokens == 0 and \
         wiki_index_drift == 0 and annotations_index_drift == 0
     return report
 
@@ -360,6 +370,11 @@ def fix(config: TiroConfig) -> dict:
         cur = conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')")
         if cur.rowcount:
             actions.append(f"purged {cur.rowcount} expired session(s)")
+        cur = conn.execute(
+            "DELETE FROM login_tokens WHERE expires_at < datetime('now') OR used_at IS NOT NULL"
+        )
+        if cur.rowcount:
+            actions.append(f"purged {cur.rowcount} expired/used login token(s)")
         conn.commit()
     finally:
         conn.close()
