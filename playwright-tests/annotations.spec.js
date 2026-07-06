@@ -159,6 +159,47 @@ test.describe('M2.2 reader annotation UI', () => {
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
 
+  // Final-review fix wave (Finding 1): Escape must dismiss the open
+  // selection toolbar instead of falling through to the reader's global
+  // "b"/Escape -> /inbox navigation, which would silently drop the user's
+  // reading position. Before the fix, setupReaderKeyboard's handler had no
+  // toolbar guard, so its switch statement's Escape case always won.
+  test('Escape dismisses the open selection toolbar without navigating away', async ({ page }) => {
+    const consoleErrors = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+    await loginOrSetup(page);
+    await saveAndOpenTestArticle(page);
+    const articleUrl = page.url();
+
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.getElementById('reader-body').dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true })
+      );
+    });
+
+    const toolbar = page.locator('#annotate-toolbar.open');
+    await expect(toolbar).toHaveCount(1, { timeout: 5000 });
+
+    await page.keyboard.press('Escape');
+
+    await expect(page.locator('#annotate-toolbar.open')).toHaveCount(0);
+    // The load-bearing assertion: still on the SAME article, not redirected
+    // to /inbox by the reader's global Escape case.
+    await expect(page).toHaveURL(articleUrl);
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
+
   // M2.2 Task 3 addition: the soft-fail case folded in from T2's review —
   // a selection whose text CANNOT be anchored must toast and post nothing.
   test('unanchorable selection shows a toast and posts nothing', async ({ page }) => {

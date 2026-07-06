@@ -32,10 +32,14 @@ def test_pages_render_with_current_version(authenticated_client):
     # .superpowers/sdd/task-5-report.md for the full reasoning.
     assert f"/static/js/sidebar.js?v={STATIC_VERSION}" in resp.text
     assert f"/static/js/inbox.js?v={STATIC_VERSION}" in resp.text
-    # Import map pins: both mapped specifiers must resolve to the current
-    # STATIC_VERSION, so nobody can silently remove or desync the map (which
-    # would resurrect the double-instantiation bug).
+    # Import map pins: all three mapped specifiers must resolve to the
+    # current STATIC_VERSION, so nobody can silently remove or desync the map
+    # (which would resurrect the double-instantiation bug, or — for
+    # annotate.js, added in M2.2 as reader.js's relative-imported
+    # markdown<->plain-text projection core — reintroduce the cache-bust gap
+    # a stale unversioned import would leave open).
     assert 'type="importmap"' in resp.text
     assert f'"/static/js/core.js": "/static/js/core.js?v={STATIC_VERSION}"' in resp.text
     assert f'"/static/js/sidebar.js": "/static/js/sidebar.js?v={STATIC_VERSION}"' in resp.text
+    assert f'"/static/js/annotate.js": "/static/js/annotate.js?v={STATIC_VERSION}"' in resp.text
     assert "?v=56" not in resp.text or STATIC_VERSION == "56"

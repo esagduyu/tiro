@@ -677,6 +677,22 @@ function setupReaderKeyboard(articleId) {
             return;
         }
 
+        // If the selection toolbar is open, Escape dismisses it instead of
+        // falling through to the "b"/"Escape" case below (which would
+        // navigate away and silently drop the user's reading position) —
+        // same guard pattern as the panels above. setupAnnotationToolbar
+        // registers its own keydown listener with the identical Escape
+        // check, but since both listeners are plain (non-capturing, no
+        // stopPropagation) document-level handlers, this one still runs
+        // even after that one fires; hideAnnotationToolbar is idempotent
+        // (safe to call twice), so no double-handling bug results.
+        const annotateToolbar = document.getElementById("annotate-toolbar");
+        if (annotateToolbar && annotateToolbar.classList.contains("open") && e.key === "Escape") {
+            hideAnnotationToolbar(annotateToolbar);
+            e.preventDefault();
+            return;
+        }
+
         switch (e.key) {
             case "b":
             case "Escape":
@@ -1935,14 +1951,21 @@ function unpaintHighlight(uid) {
 }
 
 async function deleteHighlightRow(uid) {
-    const confirmed = await confirmDialog(
-        "Delete this highlight? This cannot be undone.",
-        { title: "Delete highlight", confirmText: "Delete", cancelText: "Cancel", danger: true }
-    );
-    if (!confirmed) return;
+    // Guard must be acquired BEFORE the confirm dialog, not after — two rapid
+    // clicks on the delete button both got past a post-confirm guard check
+    // (each opened its own confirmDialog before either could set the flag),
+    // and confirming both stacked dialogs fired two DELETEs (the second
+    // 404s, a spurious error toast). Acquiring here means the second click's
+    // dialog never even opens; releasing in `finally` covers cancel and
+    // error paths the same as the confirmed-success path.
     if (highlightActionInFlight.has(uid)) return;
     highlightActionInFlight.add(uid);
     try {
+        const confirmed = await confirmDialog(
+            "Delete this highlight? This cannot be undone.",
+            { title: "Delete highlight", confirmText: "Delete", cancelText: "Cancel", danger: true }
+        );
+        if (!confirmed) return;
         const res = await fetch(`/api/highlights/${uid}`, { method: "DELETE" });
         const json = await res.json().catch(() => null);
         if (!res.ok || !json || !json.success) {
