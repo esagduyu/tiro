@@ -51,6 +51,29 @@ def test_manifest_icon_files_exist_on_disk():
     assert (icons_dir / "tiro-512.png").is_file()
 
 
+def _png_dimensions(path):
+    # PNG header: bytes 16-24 of the IHDR chunk are width/height (big-endian).
+    header = path.read_bytes()[:24]
+    assert header[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+
+
+def test_manifest_icons_have_declared_dimensions():
+    """A regenerated icon with wrong dimensions must fail CI, not ship."""
+    icons_dir = FRONTEND_DIR / "static" / "icons"
+    assert _png_dimensions(icons_dir / "tiro-192.png") == (192, 192)
+    assert _png_dimensions(icons_dir / "tiro-512.png") == (512, 512)
+
+
+def test_login_page_carries_pwa_tags():
+    """login.html is standalone (doesn't extend base.html) but is the
+    first-run surface on a phone — installability must start there."""
+    login_html = (FRONTEND_DIR / "templates" / "login.html").read_text()
+    assert '<link rel="manifest" href="/manifest.webmanifest">' in login_html
+    assert '<meta name="theme-color" content="#C45B3E">' in login_html
+    assert 'apple-touch-icon' in login_html
+
+
 def test_base_html_has_manifest_link_and_icon_tags():
     base_html = (FRONTEND_DIR / "templates" / "base.html").read_text()
     assert '<link rel="manifest" href="/manifest.webmanifest">' in base_html
