@@ -1096,6 +1096,18 @@ function setupAnnotations(articleId, articleContent) {
 }
 
 async function loadAnnotations(articleId) {
+    // M2.2 Task 4 review fix: consume the /highlights click-through handoff
+    // key UNCONDITIONALLY, before the fetch, regardless of whether it
+    // succeeds. Previously this was only consumed after a successful
+    // `loadAnnotations()` (inside the try, after render) — a failed fetch
+    // (network blip, 500, etc.) left the sessionStorage key in place, so it
+    // would incorrectly flash on a LATER, unrelated article's load once the
+    // network recovered. Reading+removing first means the handoff is used at
+    // most once no matter what happens to this fetch; the captured uid is
+    // only acted on (via `flashHighlightRange`) after annotations have
+    // actually painted, further below.
+    const flashUid = consumeFlashHandoffKey();
+
     try {
         const res = await fetch(`/api/articles/${articleId}/annotations`);
         const json = await res.json();
@@ -1107,7 +1119,11 @@ async function loadAnnotations(articleId) {
         // than issuing a second fetch.
         articleNoteState = json.data.note || null;
         renderHighlightsPanel();
-        consumeFlashHandoff();
+        // M2.2 Task 4: reuses T3's `flashHighlightRange` verbatim — no new
+        // scroll/flash mechanism — so if the uid isn't a currently-painted
+        // Range (unanchored highlight, or a stale/foreign uid), it already
+        // no-ops gracefully.
+        if (flashUid) flashHighlightRange(flashUid);
     } catch (err) {
         console.error("Failed to load annotations:", err);
     }
@@ -1115,21 +1131,19 @@ async function loadAnnotations(articleId) {
 
 /**
  * M2.2 Task 4: /highlights review view hands off a click-through via
- * `sessionStorage['tiro:flash-highlight']` (set to the highlight's uid,
- * removed here so a later reload/navigation doesn't re-flash it). Reuses
- * T3's `flashHighlightRange` verbatim — no new scroll/flash mechanism — so
- * if the uid isn't a currently-painted Range (unanchored highlight, or a
- * stale/foreign uid), it already no-ops gracefully.
+ * `sessionStorage['tiro:flash-highlight']` (set to the highlight's uid).
+ * Read-and-remove happens here, UNCONDITIONALLY and before the annotations
+ * fetch — see the review-fix comment in `loadAnnotations` for why the old
+ * "consume only on success" ordering was wrong.
  */
-function consumeFlashHandoff() {
-    let uid;
+function consumeFlashHandoffKey() {
     try {
-        uid = sessionStorage.getItem("tiro:flash-highlight");
+        const uid = sessionStorage.getItem("tiro:flash-highlight");
         if (uid) sessionStorage.removeItem("tiro:flash-highlight");
+        return uid;
     } catch (err) {
-        return; // sessionStorage unavailable — nothing to consume
+        return null; // sessionStorage unavailable — nothing to consume
     }
-    if (uid) flashHighlightRange(uid);
 }
 
 /**

@@ -371,4 +371,98 @@ test.describe('M2.2 reader annotation UI', () => {
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
+
+  // M2.2 Task 4 review fix (wave 1): latest-wins request token in
+  // highlights.js's fetchHighlights(). A fast filter flip (blue -> pink,
+  // second click fired before the first's response lands) must render
+  // pink's result; a stale, later-arriving blue response must not clobber
+  // it once it finally shows up. Made deterministic (not a real timing
+  // race) by intercepting the color=blue request and injecting an
+  // artificial delay, so blue is GUARANTEED to resolve after pink — without
+  // the fetchToken guard, that delayed response would repaint the blue row
+  // back into view after the fact.
+  test('/highlights: rapid filter flip renders the latest filter, not a stale delayed response', async ({ page }) => {
+    const consoleErrors = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+    await loginOrSetup(page);
+    await saveAndOpenTestArticle(page);
+
+    // Create a blue highlight so /highlights?color=blue has a real row to
+    // filter to (and to later assert stays HIDDEN once color=pink wins).
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.getElementById('reader-body').dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true })
+      );
+    });
+    const toolbar = page.locator('#annotate-toolbar.open');
+    await expect(toolbar).toHaveCount(1, { timeout: 5000 });
+    const blueBtn = page.locator('.annotate-color-btn[data-color="blue"]');
+    const [createResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes('/highlights') && res.request().method() === 'POST'
+      ),
+      blueBtn.click(),
+    ]);
+    const created = await createResponse.json();
+    const uid = created.data.uid;
+
+    await page.locator('a[href="/highlights"]').first().click();
+    await expect(page).toHaveURL(/\/highlights/);
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toBeVisible({ timeout: 10000 });
+
+    // Delay ONLY the color=blue request (added after the page already
+    // loaded, so it can't affect the initial/unfiltered fetch above).
+    await page.route(
+      (url) => url.pathname === '/api/highlights',
+      async (route) => {
+        if (route.request().url().includes('color=blue')) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+        await route.continue();
+      }
+    );
+
+    // Fire blue, then IMMEDIATELY fire pink — without awaiting blue's
+    // (deliberately slow) response in between. This is the race.
+    await page.locator('.hl-filter-chip[data-color="blue"]').click();
+    const [pinkRes] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes('/api/highlights?') && res.url().includes('color=pink')
+      ),
+      page.locator('.hl-filter-chip[data-color="pink"]').click(),
+    ]);
+    expect(pinkRes.status()).toBe(200);
+
+    // Pink's (fast, un-delayed) response has landed and rendered. No pink
+    // highlight exists, so the blue row must NOT be visible.
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toHaveCount(0);
+    await expect(page.locator('.hl-filter-chip[data-color="pink"]')).toHaveClass(/active/);
+
+    // Now wait out the deliberately delayed blue response and confirm it
+    // did NOT clobber the pink view once it finally arrives — this is the
+    // actual assertion the fetchToken guard exists for.
+    await page.waitForResponse(
+      (res) => res.url().includes('/api/highlights?') && res.url().includes('color=blue'),
+      { timeout: 5000 }
+    );
+    // Give the resolved promise's .then chain (json parse + render) a beat
+    // to run before re-checking — this is bounded by the already-awaited
+    // network response, not an arbitrary sleep-and-hope.
+    await page.waitForTimeout(200);
+    await expect(page.locator(`.hl-list-row[data-uid="${uid}"]`)).toHaveCount(0);
+    await expect(page.locator('.hl-filter-chip[data-color="pink"]')).toHaveClass(/active/);
+
+    await page.unroute((url) => url.pathname === '/api/highlights');
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
 });

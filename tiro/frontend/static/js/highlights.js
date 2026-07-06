@@ -45,7 +45,21 @@ let offset = 0;
 let total = 0;
 let groups = new Map(); // article_id -> { article_id, article_title, source_name, items: [] }
 let groupOrder = []; // article_id insertion order = first-seen order in the sorted list
-let fetchInFlight = false;
+
+// Latest-wins request token (review fix, M2.2 Task 4 wave 1). Concurrent
+// fetches are allowed to run — no in-flight early-return — but a response is
+// only applied (rendered + folded into offset/total bookkeeping) if its
+// captured token is still the current `fetchToken` when it resolves. Any
+// state-changing call (filter click, clear, initial load, or Load more) bumps
+// the token, so a fast filter-flip that fires a second request before the
+// first's response lands can no longer have the first (now-stale) response
+// clobber the second's result — whichever response arrives, only the one
+// matching the LATEST call's token gets rendered. This also makes Load more
+// safe against a filter change landing mid-request: the filter change bumps
+// the token (and resets offset/groups), so a late Load-more response for the
+// abandoned filter combination is dropped instead of appending stale rows
+// onto the freshly reset list.
+let fetchToken = 0;
 
 const filters = {
     color: null,
@@ -75,8 +89,7 @@ function buildParams() {
 }
 
 async function fetchHighlights(reset) {
-    if (fetchInFlight) return;
-    fetchInFlight = true;
+    const token = ++fetchToken;
 
     if (reset) {
         offset = 0;
@@ -104,6 +117,11 @@ async function fetchHighlights(reset) {
         const res = await fetch(`/api/highlights?${buildParams().toString()}`);
         const json = await res.json();
         if (!json.success) throw new Error("Invalid response");
+
+        // Stale response guard: a newer call (filter click, clear, or another
+        // Load more) already bumped fetchToken past ours — discard silently,
+        // the newer call owns rendering the current state.
+        if (token !== fetchToken) return;
 
         const rows = json.data.highlights || [];
         total = json.data.total || 0;
@@ -143,11 +161,11 @@ async function fetchHighlights(reset) {
         renderGroups();
         loadMoreWrap.style.display = totalLoaded < total ? "flex" : "none";
     } catch (err) {
+        if (token !== fetchToken) return; // stale error — a newer request already owns the view
         console.error("Failed to load highlights:", err);
         statusEl.style.display = "block";
         statusEl.innerHTML = '<p class="settings-error">Failed to load highlights.</p>';
     } finally {
-        fetchInFlight = false;
         if (loadMoreBtn) {
             loadMoreBtn.disabled = false;
             loadMoreBtn.textContent = "Load more";
