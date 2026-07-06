@@ -1,22 +1,30 @@
-/* Tiro — Reader view */
+/* Tiro — Reader view (M2.0 module split, Task 3).
+ *
+ * Imports esc/num/formatDate/renderMarkdown/showToast/timeAgo from core.js
+ * (this file's local copies of esc/renderMarkdown/showReaderToast were
+ * verified byte-identical to core.js's versions before deletion — see
+ * .superpowers/sdd/task-3-report.md for the diff) and showShortcuts/
+ * hideShortcuts from sidebar.js (loaded on every page via base.html, so the
+ * import is always satisfied by the time this module runs).
+ *
+ * reader.js is a LEAF entry module — nothing else imports it — so unlike
+ * sidebar.js it keeps the normal `?v={{ static_v }}` cache-bust query in
+ * reader.html's <script type="module"> tag (see the T2 double-instantiation
+ * note in sidebar.js/core.js for why sidebar.js is the one exception).
+ *
+ * `showReaderDeleteConfirm` (the `delete-overlay`/`delete-cancel`/
+ * `delete-confirm` dialog) is intentionally NOT migrated to core.js's
+ * `confirmDialog` — same judgment call T2 made for inbox.js's delete
+ * confirm (see .superpowers/sdd/task-2-report.md): this file's keyboard
+ * handler checks for `#delete-overlay` by id directly, while confirmDialog
+ * uses different ids (`core-confirm-*`). Migrating would mean rewiring that
+ * guard too, which isn't part of a behavior-identical dedup task.
+ */
 
-function renderMarkdown(md) {
-    var raw = marked.parse(md || '');
-    return DOMPurify.sanitize(raw, {
-        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'style'],
-        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover'],
-        ADD_ATTR: ['loading'],
-    });
-}
+import { esc, num, formatDate, renderMarkdown, showToast, timeAgo } from "./core.js";
+import { showShortcuts, hideShortcuts } from "./sidebar.js";
 
 document.addEventListener("DOMContentLoaded", () => {
-    // reader.js is loaded (via base.html's {% block content %}) before the
-    // marked/DOMPurify vendor scripts at the bottom of base.html, so `marked`
-    // isn't defined until later in the document parse. DOMContentLoaded only
-    // fires after the whole document (including those later scripts) has
-    // parsed, so it's safe to configure marked here.
-    marked.setOptions({ breaks: false, gfm: true });
-
     const reader = document.getElementById("reader");
     const articleId = reader.dataset.articleId;
     loadArticle(articleId);
@@ -245,53 +253,17 @@ async function deleteReaderArticle(articleId) {
         const res = await fetch(`/api/articles/${articleId}`, { method: "DELETE" });
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            showReaderToast(err.detail || "Failed to delete article", "error");
+            showToast(err.detail || "Failed to delete article", "error");
             return;
         }
-        showReaderToast("Article deleted", "success");
+        showToast("Article deleted", "success");
         setTimeout(() => {
             window.location.href = "/inbox";
         }, 500);
     } catch (err) {
         console.error("Delete failed:", err);
-        showReaderToast("Failed to delete article", "error");
+        showToast("Failed to delete article", "error");
     }
-}
-
-function showReaderToast(message, type) {
-    const existing = document.querySelector(".settings-toast");
-    if (existing) existing.remove();
-
-    const toast = document.createElement("div");
-    toast.className = "settings-toast settings-toast-" + (type || "info");
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    setTimeout(() => toast.classList.add("show"), 10);
-    setTimeout(() => {
-        toast.classList.remove("show");
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
-}
-
-function formatDate(isoStr) {
-    if (!isoStr) return "";
-    const d = new Date(isoStr);
-    const now = new Date();
-    const months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    if (d.getFullYear() === now.getFullYear()) {
-        return `${months[d.getMonth()]} ${d.getDate()}`;
-    }
-    return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-}
-
-function esc(str) {
-    const el = document.createElement("span");
-    el.textContent = str;
-    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* --- Ingenuity Analysis Panel --- */
@@ -413,24 +385,17 @@ function aggregateScoreColor(avg) {
     return "analysis-summary-concern";
 }
 
+/**
+ * Reader-local wrapper over core.js's timeAgo(): analysis-panel timestamps
+ * are handed an ISO string (or empty), while core's timeAgo takes a Date
+ * and has no falsy short-circuit. Not a semantic divergence in the shared
+ * logic (the diffMin/diffHr/diffDay bucketing below is core's timeAgo
+ * itself) — just a different call-site shape, so this stays a thin local
+ * function rather than a core.js export change.
+ */
 function analysisTimeAgo(isoStr) {
     if (!isoStr) return "";
-    const then = new Date(isoStr);
-    const diffMs = Date.now() - then;
-    const diffMin = Math.floor(diffMs / 60000);
-    const diffHr = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHr / 24);
-
-    if (diffMin < 1) return "just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHr < 24) return `${diffHr}h ago`;
-    if (diffDay === 1) return "yesterday";
-    return `${diffDay} days ago`;
-}
-
-function num(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : "?";
+    return timeAgo(new Date(isoStr));
 }
 
 function renderAnalysis(data) {
@@ -566,14 +531,12 @@ function setupReaderKeyboard(articleId) {
     // Shortcuts overlay close
     const closeBtn = document.getElementById("shortcuts-close");
     if (closeBtn) {
-        closeBtn.addEventListener("click", () => {
-            if (typeof hideShortcuts === "function") hideShortcuts();
-        });
+        closeBtn.addEventListener("click", hideShortcuts);
     }
     const shortcutsOverlay = document.getElementById("shortcuts-overlay");
     if (shortcutsOverlay) {
         shortcutsOverlay.addEventListener("click", (e) => {
-            if (e.target === shortcutsOverlay && typeof hideShortcuts === "function") hideShortcuts();
+            if (e.target === shortcutsOverlay) hideShortcuts();
         });
     }
 
@@ -591,7 +554,7 @@ function setupReaderKeyboard(articleId) {
         // If shortcuts overlay is open, only ? and Escape close it
         if (shortcutsOverlay && shortcutsOverlay.style.display !== "none") {
             if (e.key === "?" || e.key === "Escape") {
-                if (typeof hideShortcuts === "function") hideShortcuts();
+                hideShortcuts();
                 e.preventDefault();
             }
             return;
@@ -667,7 +630,7 @@ function setupReaderKeyboard(articleId) {
                 break;
             case "?":
                 e.preventDefault();
-                if (typeof showShortcuts === "function") showShortcuts("reader");
+                showShortcuts("reader");
                 break;
         }
     });

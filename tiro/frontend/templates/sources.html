@@ -64,6 +64,8 @@
         </div>
     </div>
 </section>
+{% endblock %}
 
-<script src="/static/sources.js?v={{ static_v }}"></script>
+{% block scripts %}
+<script type="module" src="/static/js/sources.js?v={{ static_v }}"></script>
 {% endblock %}

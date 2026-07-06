@@ -25,4 +25,5 @@ jobs:
           key: hf-all-MiniLM-L6-v2
       - run: uv sync
       - run: uv run ruff check .
+      - run: node --test tiro/frontend/static/js/tests/*.test.mjs
       - run: uv run pytest -q

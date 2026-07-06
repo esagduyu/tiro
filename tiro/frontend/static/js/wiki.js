@@ -1,29 +1,54 @@
-/* Tiro — Wiki views (/wiki list, /wiki/{slug} page) */
+/* Tiro — Wiki views (/wiki list, /wiki/{slug} page) (M2.0 module split, Task 4).
+ *
+ * Imports esc/num/renderMarkdown/timeAgo from core.js (this file's local
+ * copies of esc/renderMarkdown were verified byte-identical to core.js's
+ * versions before deletion — same DOM-trick esc(), same marked.parse() +
+ * DOMPurify.sanitize() FORBID_TAGS/FORBID_ATTR/ADD_ATTR option set for
+ * renderMarkdown — see .superpowers/sdd/task-4-report.md for the
+ * confirmation).
+ *
+ * wiki.js is a LEAF entry module — nothing else imports it — so it keeps the
+ * normal `?v={{ static_v }}` cache-bust query in wiki.html's/wiki_page.html's
+ * <script type="module"> tags (same reasoning as reader.js in Task 3).
+ *
+ * Previously this file was a classic (non-module) script and consumed
+ * `window.timeAgo` (re-exposed by sidebar.js, guarded with
+ * `typeof timeAgo === "function"`) since classic scripts can't `import`.
+ * Now that this file is a module, it imports `timeAgo` directly from
+ * core.js — an ES import is guaranteed to resolve or fail at module-load
+ * time, so the `typeof` guards are no longer meaningful and were removed
+ * (same judgment Task 3 made for reader.js's showShortcuts/hideShortcuts
+ * imports).
+ *
+ * `resolveWikilinks`/`escapeMarkdownLinkText` are exported (per the task
+ * brief) for direct node:test coverage of the pure link-resolution/escaping
+ * logic — see js/tests/wiki.test.mjs. They stay in this file (not core.js)
+ * since they are wiki-citation-specific, not generic frontend helpers.
+ */
+
+import { esc, num, renderMarkdown, timeAgo } from "./core.js";
 
 let wikiPageData = null; // cached GET /api/wiki/{slug} response for the page view
 let wikiRegenerating = false; // in-flight guard so rapid clicks can't fire concurrent POSTs
 
-document.addEventListener("DOMContentLoaded", () => {
-    // wiki.js is loaded (via base.html's {% block content %}) before the
-    // marked/DOMPurify vendor scripts at the bottom of base.html, so `marked`
-    // isn't defined until later in the document parse. DOMContentLoaded only
-    // fires after the whole document (including those later scripts) has
-    // parsed, so it's safe to configure marked here — same pattern as
-    // reader.js.
-    if (document.getElementById("wiki-page")) {
-        marked.setOptions({ breaks: false, gfm: true });
-    }
+// Guarded so importing this module under node:test (js/tests/wiki.test.mjs,
+// which imports resolveWikilinks/escapeMarkdownLinkText — pure functions
+// with no DOM dependency) doesn't throw just from module evaluation in an
+// environment with no `document`. In the browser `document` is always
+// defined, so this is a no-op there — behavior unchanged.
+if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", () => {
+        if (document.getElementById("wiki-content")) {
+            setupWikiListKeyboard();
+            loadWikiList();
+        }
 
-    if (document.getElementById("wiki-content")) {
-        setupWikiListKeyboard();
-        loadWikiList();
-    }
-
-    if (document.getElementById("wiki-page")) {
-        setupWikiPageKeyboard();
-        loadWikiPage();
-    }
-});
+        if (document.getElementById("wiki-page")) {
+            setupWikiPageKeyboard();
+            loadWikiPage();
+        }
+    });
+}
 
 /* --- List view (/wiki) --- */
 
@@ -86,7 +111,7 @@ function renderWikiKindSection(kind, pages) {
 
 function wikiRowHtml(p) {
     const staleBadge = p.status === "stale" ? '<span class="wiki-stale-badge">Stale</span>' : "";
-    const updatedRaw = typeof timeAgo === "function" && p.updated_at
+    const updatedRaw = p.updated_at
         ? timeAgo(new Date(p.updated_at.replace(" ", "T")))
         : (p.updated_at || "");
     return `
@@ -135,7 +160,7 @@ function renderWikiPage(data) {
     document.getElementById("wiki-page-sources").textContent =
         `${num(data.source_count)} source${data.source_count === 1 ? "" : "s"}`;
 
-    const updatedText = typeof timeAgo === "function" && data.updated_at
+    const updatedText = data.updated_at
         ? "Updated " + timeAgo(new Date(data.updated_at.replace(" ", "T")))
         : "";
     document.getElementById("wiki-page-updated").textContent = updatedText;
@@ -171,10 +196,13 @@ function renderWikiPage(data) {
  * regardless — this escaping prevents a *content-integrity* / phishing
  * issue (a citation link silently pointing somewhere other than the
  * cited article), not a distinct DOMPurify bypass.
+ *
+ * EXPORTED for node:test coverage (js/tests/wiki.test.mjs) of the pure
+ * link-resolution/escaping logic — no DOM involved in either function.
  */
 const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
 
-function resolveWikilinks(body, citations) {
+export function resolveWikilinks(body, citations) {
     citations = citations || {};
     return String(body).replace(WIKILINK_RE, (match, stem, label) => {
         let displayLabel = (label !== undefined ? label : stem).trim();
@@ -197,7 +225,7 @@ function resolveWikilinks(body, citations) {
     });
 }
 
-function escapeMarkdownLinkText(text) {
+export function escapeMarkdownLinkText(text) {
     return String(text)
         .replace(/\\/g, "\\\\")
         .replace(/\[/g, "\\[")
@@ -387,26 +415,4 @@ function renderWikiShortcuts(shortcuts) {
         .join("");
 
     overlay.style.display = "flex";
-}
-
-/* --- Escaping helpers --- */
-
-function esc(str) {
-    const el = document.createElement("span");
-    el.textContent = str == null ? "" : String(str);
-    return el.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
-function num(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : "?";
-}
-
-function renderMarkdown(md) {
-    const raw = marked.parse(md || "");
-    return DOMPurify.sanitize(raw, {
-        FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "style"],
-        FORBID_ATTR: ["onerror", "onclick", "onload", "onmouseover"],
-        ADD_ATTR: ["loading"],
-    });
 }

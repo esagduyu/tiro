@@ -293,7 +293,7 @@ def test_sources_page_has_both_tabs(authenticated_client):
 
 def test_sources_page_loads_sources_js(authenticated_client):
     r = authenticated_client.get("/sources")
-    assert "/static/sources.js?v=" in r.text
+    assert "/static/js/sources.js?v=" in r.text
 
 
 def test_sidebar_has_sources_link(authenticated_client):
