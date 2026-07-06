@@ -316,10 +316,38 @@ async def lifespan(app: FastAPI):
         scheduler.start("vector_retry", _vector_retry_loop(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
+    # mDNS/Bonjour advertisement (Phase 3 M3.0): opt-in, and only meaningful
+    # when the server is actually reachable from other devices on the LAN
+    # -- a loopback-only bind gets nothing out of advertising itself, so
+    # skip with a debug log rather than starting zeroconf for no reason.
+    # Not an asyncio loop like the Scheduler's tasks above, so it's not
+    # registered there; a direct call wrapped in try/except is the simplest
+    # correct shape (mirrors the wiki/annotations reconcile calls above --
+    # best-effort, must never block startup).
+    if config.mdns_enabled and app.state.lan_mode:
+        try:
+            from tiro.mdns import register_mdns
+
+            register_mdns(config, config.host, config.port)
+        except Exception as e:
+            logger.warning("mDNS registration failed (non-fatal): %s", e)
+    elif config.mdns_enabled:
+        logger.debug("mDNS enabled but bind host %r is loopback; skipping advertisement", config.host)
+
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
     await scheduler.shutdown()
+
+    # Unconditional and best-effort: unregister_mdns() is a no-op when
+    # registration was never attempted or failed, so no need to track
+    # whether the register call above actually succeeded.
+    try:
+        from tiro.mdns import unregister_mdns
+
+        unregister_mdns()
+    except Exception as e:
+        logger.warning("mDNS unregister failed (non-fatal): %s", e)
 
 
 def create_app(config: TiroConfig | None = None) -> FastAPI:

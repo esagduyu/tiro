@@ -645,6 +645,9 @@ def cmd_status(args):
     print(f"Password: {'set' if config.auth_password_hash else 'NOT SET'} | "
           f"IMAP sync: {'on' if config.imap_enabled else 'off'} | "
           f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
+    mdns_status = f"on ({config.mdns_hostname}.local)" if config.mdns_enabled else "disabled"
+    remote_status = config.remote_url if config.remote_url else "not set"
+    print(f"mDNS: {mdns_status} | Remote URL: {remote_status}")
 
     from tiro.llm import resolve_tier
     from tiro.llm_cli import check_cli_backend

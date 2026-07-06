@@ -82,6 +82,16 @@ class TiroConfig:
     # Notes/highlights sidecars already key off the article slug regardless
     # of this flag. Bidirectional sync is Phase 2b, not this flag.
     obsidian_compatible_mode: bool = False
+    # mDNS/Bonjour discovery (Phase 3 M3.0): opt-in LAN advertisement so
+    # phones on the same Wi-Fi can find the server as `{mdns_hostname}.local`
+    # instead of typing a raw LAN IP. Disabled by default per the roadmap.
+    mdns_enabled: bool = False
+    mdns_hostname: str = "tiro"
+    # Remote access URL (Phase 3 M3.0/M3.1): the user's Tailscale/remote URL.
+    # Set by the /setup/remote wizard (M3.1) or manually; purely
+    # informational today (surfaced by `tiro status`), not yet enforced or
+    # validated by the server.
+    remote_url: str | None = None
     auth_password_hash: str | None = None
     config_path: str | None = None  # set by load_config; never persisted to YAML
 
