@@ -115,18 +115,34 @@ async function trimArticleCache(cache) {
 
 async function articleNetworkFirst(request) {
     const cache = await caches.open(ARTICLES_CACHE);
+    let response;
     try {
-        const response = await fetch(request);
-        if (response.ok) {
-            await cache.put(request, response.clone());
-            await trimArticleCache(cache);
-        }
-        return response;
+        response = await fetch(request);
     } catch (err) {
+        // Network failed outright -- fall back to whatever's cached.
         const cached = await cache.match(request);
         if (cached) return cached;
         throw err;
     }
+    // The network succeeded: `response` is always returned below, no matter
+    // what happens in the cache-write path. That write is isolated in its
+    // own try/catch on purpose -- `cache.put()` (and the trim that follows
+    // it) can throw QuotaExceededError, plausible on iOS Safari's much
+    // tighter Cache Storage budget, and a cache-write failure must never
+    // discard a good, already-in-hand network response by falling through
+    // to a stale cached copy (or throwing) the way a shared try/block above
+    // would. `clone()` before `put()` is required regardless: a Response
+    // body can only be consumed once, and the caller below still needs the
+    // original to read/return.
+    if (response.ok) {
+        try {
+            await cache.put(request, response.clone());
+            await trimArticleCache(cache);
+        } catch (err) {
+            console.debug("Tiro: article cache write failed, serving network response anyway", err);
+        }
+    }
+    return response;
 }
 
 async function navigateWithOfflineFallback(request) {

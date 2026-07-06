@@ -108,7 +108,14 @@ def test_sw_js_embeds_current_static_version_and_no_placeholder_leaks(auth_clien
     assert f'const VERSION = "{STATIC_VERSION}"' in body
     assert "tiro-${VERSION}-static" in body
     assert "tiro-${VERSION}-articles" in body
+    # All three PRECACHE_URLS entries must carry the substituted version --
+    # not just core.js. offline.html's <script> tags fetch these exact URLs
+    # from the cache while offline (see test_offline_html_scripts_are_
+    # version_pinned below); a precache entry missing the version query
+    # string would be a silent cache miss at the worst possible moment.
     assert f"/static/js/core.js?v={STATIC_VERSION}" in body
+    assert f"/static/vendor/marked.min.js?v={STATIC_VERSION}" in body
+    assert f"/static/vendor/purify.min.js?v={STATIC_VERSION}" in body
 
 
 def test_sw_js_sets_service_worker_allowed_and_no_cache_headers(auth_client):
@@ -142,6 +149,20 @@ def test_offline_html_is_standalone_and_pulls_core_and_vendor():
     assert "/static/vendor/marked.min.js" in offline_html
     assert "/static/vendor/purify.min.js" in offline_html
     assert "renderMarkdown" in offline_html
+
+
+def test_offline_html_scripts_are_version_pinned():
+    """Regression pin for the bug this task's own live Playwright pass
+    caught: an unversioned script src is a silent cache MISS against the
+    versioned entries sw.js's PRECACHE_URLS actually cached, so the asset
+    falls through to a real fetch() and fails outright (net::ERR_FAILED)
+    while offline -- exactly when there's no fallback left. All three
+    <script> tags in the RAW template (before Jinja substitution) must
+    carry the `?v={{ static_v }}` placeholder verbatim, not a bare path."""
+    offline_html = (FRONTEND_DIR / "templates" / "offline.html").read_text()
+    assert '<script src="/static/vendor/marked.min.js?v={{ static_v }}"></script>' in offline_html
+    assert '<script src="/static/vendor/purify.min.js?v={{ static_v }}"></script>' in offline_html
+    assert 'from "/static/js/core.js?v={{ static_v }}"' in offline_html
 
 
 def test_sw_routing_module_exists_and_is_imported_by_sw_js():

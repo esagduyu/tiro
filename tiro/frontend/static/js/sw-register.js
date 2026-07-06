@@ -14,6 +14,13 @@
 // is a no-op per spec (the browser resolves to the existing registration),
 // so the "once" requirement doesn't need any extra dedup state here beyond
 // each page calling this exactly once on load.
+//
+// `{ type: "module" }` is an evergreen-browser bet (see sw.js's own header
+// comment for why it's worth taking): on an engine old enough to not
+// support module service workers, `.register()` rejects and lands in the
+// `.catch()` below like any other registration failure -- a graceful
+// no-op, not a crash. The app works fully without a service worker; this
+// call degrading to nothing is an acceptable failure mode, not a bug.
 export function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     navigator.serviceWorker
