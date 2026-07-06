@@ -440,18 +440,38 @@ def test_post_remote_config_allow_hostname_persists_bare_hostname_and_dedupes(
     assert r1.status_code == 200
     assert r1.json()["data"]["extra_allowed_hosts"] == ["myhost.example.com"]
 
-    # Same hostname again (different port in the URL) must not duplicate.
+    # Same hostname again with a NON-DEFAULT port: the bare form stays
+    # deduped, and the explicit host:port variant is added so a proxy on
+    # that port (Host: myhost.example.com:9000) passes the allowlist
+    # (final-review finding 2).
     r2 = authenticated_client.post(
         "/api/remote/config",
         json={"remote_url": "https://myhost.example.com:9000", "allow_hostname": True},
     )
     assert r2.status_code == 200
-    assert r2.json()["data"]["extra_allowed_hosts"] == ["myhost.example.com"]
+    assert r2.json()["data"]["extra_allowed_hosts"] == [
+        "myhost.example.com",
+        "myhost.example.com:9000",
+    ]
 
     from tiro.config import load_config
 
     reloaded = load_config(configured_library.config_path)
-    assert reloaded.extra_allowed_hosts == ["myhost.example.com"]
+    assert reloaded.extra_allowed_hosts == [
+        "myhost.example.com",
+        "myhost.example.com:9000",
+    ]
+
+
+def test_post_remote_config_default_port_stores_bare_hostname_only(
+    authenticated_client,
+):
+    r = authenticated_client.post(
+        "/api/remote/config",
+        json={"remote_url": "https://tidy.example.com:443", "allow_hostname": True},
+    )
+    assert r.status_code == 200
+    assert r.json()["data"]["extra_allowed_hosts"] == ["tidy.example.com"]
 
 
 def test_post_remote_config_allow_hostname_updates_live_allowlist_without_restart(

@@ -14,6 +14,7 @@ allowlist entry needed, and mutating POSTs get CSRF checking for free from
 `require_auth` (see auth._check_csrf).
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -78,7 +79,9 @@ def _detect_tailscale(port: int) -> dict:
 @router.get("/status")
 async def get_remote_status(request: Request):
     config = request.app.state.config
-    detection = _detect_tailscale(config.port)
+    # to_thread: the subprocess call blocks up to 3s on a hung tailscaled —
+    # never park the event loop on it (same convention as the LLM calls).
+    detection = await asyncio.to_thread(_detect_tailscale, config.port)
     return {
         "success": True,
         "data": {
@@ -119,6 +122,14 @@ async def post_remote_config(request: Request, body: RemoteConfigRequest):
         hostname = (parsed.hostname or "").lower()
         if hostname and hostname not in [h.lower() for h in extra_hosts]:
             extra_hosts.append(hostname)
+        # A proxy on a non-default port sends "host:port" as the Host header;
+        # the bare form only matches bare or :{this server's port}, so store
+        # the explicit host:port variant too when the URL names one.
+        default_port = 443 if parsed.scheme == "https" else 80
+        if parsed.port and parsed.port != default_port:
+            with_port = f"{hostname}:{parsed.port}"
+            if hostname and with_port not in [h.lower() for h in extra_hosts]:
+                extra_hosts.append(with_port)
         updates["extra_allowed_hosts"] = extra_hosts
 
     persist_config(config, updates)
