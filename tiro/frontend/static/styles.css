@@ -1296,6 +1296,59 @@ main {
     font-style: italic;
 }
 
+/* Triage-progress pill ("N to zero", M3.2 Task 4). Muted by default -- this
+   is a running tally, not an alert -- and quietly warms toward the gold
+   accent as the count gets small, mirroring the tier-badge language used
+   elsewhere without introducing a new color. */
+.triage-pill {
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: var(--tiro-bg-surface);
+    border: 1px solid var(--tiro-border);
+    color: var(--tiro-fg-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* --- Inbox-zero celebratory state (M3.2 Task 4) ---
+   Distinct treatment from .empty-state (onboarding) and the inline
+   .filter-loading "no matches" message -- warmer, quieter, a small reward
+   for reaching the bottom of the pile rather than a prompt to do
+   something. */
+.inbox-zero-state {
+    /* A "you're caught up" banner, not necessarily a full-page takeover --
+       older read/archived articles legitimately still render below it (see
+       updateInboxZeroState()'s header comment), so padding stays compact
+       enough to read well either way. */
+    text-align: center;
+    padding: 2.5rem 1rem 2rem;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid var(--tiro-border);
+    color: var(--tiro-fg-secondary);
+}
+
+.inbox-zero-mark {
+    font-size: 2.75rem;
+    line-height: 1;
+    color: var(--tiro-gold);
+    margin-bottom: 0.75rem;
+}
+
+.inbox-zero-state h2 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--tiro-fg);
+    margin-bottom: 0.4rem;
+}
+
+.inbox-zero-state p {
+    font-size: 0.85rem;
+    color: var(--tiro-muted);
+    max-width: 380px;
+    margin: 0 auto;
+}
+
 .sort-select {
     margin-left: auto;
     padding: 0.35rem 0.6rem;

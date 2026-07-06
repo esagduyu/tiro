@@ -26,10 +26,11 @@
  * See .superpowers/sdd/task-2-report.md for the full audit.
  */
 
-import { esc, formatDate, showToast } from "./core.js";
+import { esc, num, formatDate, showToast } from "./core.js";
 import {
     showShortcuts, hideShortcuts, openSaveModal, closeSaveModal,
     loadSavedViews as refreshSidebarViews,
+    updateUnreadBadge, getUnreadCount, adjustUnreadCount,
 } from "./sidebar.js";
 import { createSwipeState, swipeEvent } from "./swipe.js";
 import { createUndoManager, pushUndoable, takeUndo, clearUndo } from "./undo.js";
@@ -46,6 +47,17 @@ let activeFilters = {}; // e.g. { is_read: "false", ai_tier: "must-read", tag: "
 let filterPanelOpen = false;
 let filterData = null; // cached /api/filters response
 let selectedForDelete = new Set(); // article ids checked for bulk delete
+let searchActive = false; // whether a live search query is showing results (M3.2 Task 4)
+// Sticky flag (M3.2 Task 4): true once ANY loadInbox() fetch this session has
+// proven the library has at least one article (in any view -- filtered or
+// not). Distinct from `cachedArticles.length`, which the triage-removal
+// paths trim locally without a re-fetch: cachedArticles going to 0 by
+// swiping every loaded card away is exactly the "reached inbox zero"
+// condition worth celebrating, while a *server* response with zero rows on
+// a never-touched page is the ambiguous "could be a fresh install" case
+// that must NOT flip this (see loadInbox()'s early-return branch, which
+// never sets this true). Never reset to false once true this session.
+let libraryEverHadArticles = false;
 
 /* ---- Inbox (articles list) ---- */
 
@@ -128,16 +140,30 @@ async function loadInbox() {
         const json = await res.json();
 
         if (!json.success || !json.data.length) {
+            // Never the inbox-zero celebratory state here (M3.2 Task 4) --
+            // a server-side zero-results response is exactly the ambiguous
+            // case that state must NOT claim (could be a genuinely fresh,
+            // never-saved-anything library, which "no articles yet" already
+            // handles below). The celebratory state only ever turns on from
+            // the client-side triage-removal paths in performArchive/
+            // performSnooze; resetting cachedArticles + hiding it here
+            // keeps a stale banner from lingering across an unrelated
+            // reload/filter/toggle.
+            cachedArticles = [];
+            const zeroEl = document.getElementById("inbox-zero-state");
+            if (zeroEl) zeroEl.style.display = "none";
             emptyEl.style.display = Object.keys(activeFilters).length ? "none" : "block";
             if (toolbar) toolbar.style.display = Object.keys(activeFilters).length ? "flex" : "none";
             listEl.innerHTML = Object.keys(activeFilters).length
                 ? '<div class="filter-loading">No articles match these filters.</div>'
                 : "";
+            renderTriagePill();
             renderPagination(null);
             return;
         }
 
         cachedArticles = json.data;
+        libraryEverHadArticles = true;
         emptyEl.style.display = "none";
         renderArticleList(cachedArticles);
         updateToolbar(cachedArticles);
@@ -392,6 +418,12 @@ function attachListeners() {
         btn.addEventListener("click", async (e) => {
             e.stopPropagation();
             const articleId = btn.dataset.articleId;
+            // Wake-now only ever renders on a currently-snoozed card (see
+            // renderArticle's snoozedChip), so this article was excluded
+            // from the unread count while snoozed; waking an unread one
+            // brings it back in (M3.2 Task 4 pill live-update).
+            const article = cachedArticles.find((a) => Number(a.id) === Number(articleId));
+            const wasUnread = !!(article && !article.is_read);
             try {
                 const res = await fetch(`/api/articles/${articleId}/snooze`, {
                     method: "PATCH",
@@ -400,6 +432,7 @@ function attachListeners() {
                 });
                 const json = await res.json();
                 if (json.success) {
+                    if (wasUnread) adjustUnreadCount(1);
                     showToast("Article woken up", "success");
                     await loadInbox();
                 } else {
@@ -537,6 +570,14 @@ async function performSnooze(articleId, preset) {
         priorUntil && new Date(priorUntil.replace(" ", "T")) > new Date()
     );
 
+    // Live pill update (M3.2 Task 4): snoozing only changes the unread
+    // count when it's a genuine visible-unread -> hidden-snoozed
+    // transition. An article that was ALREADY snoozed (re-snoozed to a new
+    // preset via the Snoozed toggle) was already excluded from the count,
+    // so re-snoozing it is a no-op for this counter.
+    const priorWasUnread = !!(prior && !prior.is_read);
+    const leavesUnreadCount = priorWasUnread && !priorStillFuture;
+
     try {
         const res = await fetch(`/api/articles/${articleId}/snooze`, {
             method: "PATCH",
@@ -549,6 +590,8 @@ async function performSnooze(articleId, preset) {
             return;
         }
 
+        if (leavesUnreadCount) adjustUnreadCount(-1);
+
         // The undo toast replaces T1's plain success toast — same message,
         // now with the Undo affordance (single toast slot either way).
         offerUndo(
@@ -559,6 +602,7 @@ async function performSnooze(articleId, preset) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ until: priorStillFuture ? priorUntil : null }),
                 });
+                if (leavesUnreadCount) adjustUnreadCount(1);
                 await loadInbox();
             },
         );
@@ -836,6 +880,10 @@ async function performArchive(articleId) {
     // there is no separate archived state — so a later full reload may
     // legitimately show the article again as a read row.
     cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
+    // Live pill update (M3.2 Task 4): archiving an already-read article
+    // doesn't change the unread count -- only a genuine unread->read
+    // transition does.
+    if (!wasRead) adjustUnreadCount(-1);
     renderArticleList(cachedArticles);
     updateToolbar(cachedArticles);
 
@@ -851,6 +899,7 @@ async function performArchive(articleId) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ is_read: false }),
             });
+            adjustUnreadCount(1);
         }
         await loadInbox();
     });
@@ -916,6 +965,12 @@ async function runSearch(query) {
     const listEl = document.getElementById("article-list");
     const emptyEl = document.getElementById("empty-state");
 
+    // A live search is never the "default view" (M3.2 Task 4) -- hide the
+    // inbox-zero celebratory state immediately, before the request even
+    // resolves, rather than leaving it visible behind/above search results.
+    searchActive = true;
+    updateInboxZeroState();
+
     try {
         const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
         const json = await res.json();
@@ -941,9 +996,84 @@ async function runSearch(query) {
 }
 
 function exitSearch() {
+    searchActive = false;
     currentPage = 1;
     window.history.replaceState({}, "", "/inbox");
     loadInbox();
+}
+
+/* ---- Triage progress pill + inbox-zero state (M3.2 Task 4) ----
+
+   The pill's count is deliberately NOT derived from `cachedArticles` (which
+   only reflects whatever page/filter/sort is currently loaded, and is
+   sometimes trimmed client-side without a re-fetch -- see performArchive's
+   header comment). It mirrors the sidebar's global unread badge exactly via
+   sidebar.js's shared getUnreadCount()/adjustUnreadCount() state, so the
+   two can never drift: every triage call site below adjusts that ONE
+   counter, and both this pill and the sidebar badge just render whatever it
+   currently says.
+
+   The inbox-zero celebratory state answers "has the user triaged every
+   unread article away, in a view that has genuinely seen real data this
+   session" -- gated on `libraryEverHadArticles` (sticky once true) rather
+   than `cachedArticles.length`, deliberately: archive/snooze are mark-read/
+   hide, not delete, so a real user's default view usually still has READ
+   articles sitting in it even after the last unread one is triaged away,
+   and the banner is meant to show alongside them (a "you're caught up"
+   banner above older history), not only in the edge case where the loaded
+   page happens to be visually empty too. It never fires from loadInbox()'s
+   "server returned zero rows" branch (that's the pre-existing "no articles
+   yet" / filtered-empty handling, untouched by this task, and the one
+   place `libraryEverHadArticles` is deliberately never set) -- only once a
+   loadInbox() fetch has proven real data exists, refreshed on every
+   updateToolbar() call (loadInbox's happy path, and performArchive/
+   performSnooze/performDelete's local-removal paths). */
+
+function renderTriagePill() {
+    const pill = document.getElementById("triage-pill");
+    if (!pill) return;
+    const count = getUnreadCount();
+    if (count === null || count <= 0) {
+        pill.style.display = "none";
+        pill.textContent = "";
+        return;
+    }
+    pill.textContent = `${num(count)} to zero`;
+    pill.style.display = "inline-flex";
+}
+
+// "Default view" for inbox-zero purposes: no live search, no filter-panel
+// filters, and none of the toggles that pull extra (non-default) rows into
+// view. Matches the binding spec's "no search/filters active AND the
+// default view (not snoozed/archived toggles)" verbatim, plus VIP-only
+// (not named in the spec, but the same kind of client-side view filter --
+// showing the celebratory banner while the user is looking at a narrowed
+// VIP subset would be misleading).
+function isDefaultTriageView() {
+    return !searchActive
+        && Object.keys(activeFilters).length === 0
+        && !showArchived && !showSnoozed && !showVIPOnly;
+}
+
+function updateInboxZeroState() {
+    const zeroEl = document.getElementById("inbox-zero-state");
+    if (!zeroEl) return;
+    // `libraryEverHadArticles`, not `cachedArticles.length` -- a real user's
+    // default view usually still has READ articles sitting in it (archive is
+    // mark-read, not a separate hidden state) even after every unread one
+    // has been triaged away, and the banner should show alongside them, not
+    // only in the edge case where the loaded page happens to be visually
+    // empty too. See the flag's own declaration comment for why a
+    // server-confirmed empty response never sets it.
+    const shouldShow = isDefaultTriageView()
+        && libraryEverHadArticles
+        && getUnreadCount() === 0;
+    zeroEl.style.display = shouldShow ? "block" : "none";
+}
+
+function refreshTriageUI() {
+    renderTriagePill();
+    updateInboxZeroState();
 }
 
 /* ---- Tier toolbar (classify button + discard toggle) ---- */
@@ -1034,6 +1164,12 @@ function updateToolbar(articles) {
 
     // Bulk-delete toolbar button reflects current selection
     updateBulkDeleteToolbar();
+
+    // Triage pill + inbox-zero state (M3.2 Task 4) -- called from every
+    // updateToolbar() invocation (loadInbox's happy path, performArchive/
+    // performSnooze/performDelete's local-removal paths) so both stay
+    // fresh no matter which call site reached here.
+    refreshTriageUI();
 }
 
 async function classifyArticles() {
@@ -1117,6 +1253,10 @@ function toggleVIPOnly() {
     } else {
         renderArticleList(cachedArticles);
     }
+
+    // VIP-only is a view filter same as search/archived/snoozed (M3.2 Task
+    // 4) -- the inbox-zero celebratory state must not show while it's on.
+    updateInboxZeroState();
 }
 
 /* ---- Filter panel ---- */
@@ -1978,6 +2118,17 @@ async function performDelete(ids) {
 
     const succeeded = ids.filter((id) => !failed.includes(id));
     if (succeeded.length) {
+        // Live pill update (M3.2 Task 4): deleting an unread article removes
+        // it from the unread count same as archiving one -- it's no longer
+        // in the library at all. Not part of the undoable triage set
+        // (delete keeps its confirm dialog, by design), so this is a
+        // one-way adjustment with no undo counterpart.
+        const deletedUnread = succeeded.filter((id) => {
+            const a = cachedArticles.find((c) => Number(c.id) === Number(id));
+            return a && !a.is_read;
+        }).length;
+        if (deletedUnread > 0) adjustUnreadCount(-deletedUnread);
+
         cachedArticles = cachedArticles.filter((a) => !succeeded.includes(Number(a.id)));
         succeeded.forEach((id) => selectedForDelete.delete(id));
         renderArticleList(cachedArticles);
@@ -1999,12 +2150,24 @@ async function performDelete(ids) {
 
 /* ---- Init ---- */
 
+// Sidebar.js's own DOMContentLoaded handler runs its own unread-count fetch
+// (for its badge) on every page load, including this one -- but module init
+// order gives no guarantee it has resolved by the time this page's first
+// render wants the number. Awaiting this module's own call to the same
+// shared getter/fetch (sidebar.js's updateUnreadBadge()) is idempotent
+// (same endpoint, same shared state) and avoids racing it.
+async function initTriagePill() {
+    await updateUnreadBadge();
+    refreshTriageUI();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     if (!document.getElementById("article-list")) return;
 
     restoreFiltersFromURL();
     loadInbox();
     loadFilters();
+    initTriagePill();
     setupSearch();
     setupSort();
     setupFilterPanel();

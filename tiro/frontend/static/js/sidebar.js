@@ -88,22 +88,51 @@ function closeSidebar() {
     document.getElementById('sidebar-overlay')?.classList.remove('open');
 }
 
-/* ---- Unread badge ---- */
+/* ---- Unread count (shared with inbox.js's "N to zero" pill, M3.2 Task 4) ----
+   `unreadCount` is the single source of truth for BOTH this sidebar badge
+   (every page) and the inbox toolbar's triage-progress pill (/inbox only).
+   inbox.js never runs its own parallel count -- it reads getUnreadCount()
+   and mutates via adjustUnreadCount(), so the two can never drift apart.
+   `null` means "not fetched yet" (distinct from a real 0), which inbox.js
+   uses to decide whether to hide its pill for "data isn't loaded" rather
+   than "zero unread". */
+
+let unreadCount = null;
+
+function renderUnreadBadge() {
+    const badge = document.getElementById('unread-badge');
+    if (!badge) return;
+    if (unreadCount !== null && unreadCount > 0) {
+        badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+        badge.style.display = '';
+    } else {
+        badge.style.display = 'none';
+    }
+}
 
 async function updateUnreadBadge() {
     try {
         const res = await fetch('/api/articles?is_read=false&include_decayed=false&count_only=true');
         const json = await res.json();
-        const badge = document.getElementById('unread-badge');
-        if (!badge) return;
-        const count = json.data?.count ?? 0;
-        if (count > 0) {
-            badge.textContent = count > 99 ? '99+' : count;
-            badge.style.display = '';
-        } else {
-            badge.style.display = 'none';
-        }
+        unreadCount = json.data?.count ?? 0;
+        renderUnreadBadge();
     } catch (e) {}
+}
+
+function getUnreadCount() {
+    return unreadCount;
+}
+
+// Applies a local delta (e.g. -1 when an unread article leaves the inbox
+// via archive/snooze, +1 when undo or wake-now restores it) with no
+// network round-trip -- the whole point of "live-updating on every triage
+// action" (M3.2 Task 4 binding spec). No-op (returns null) if the count
+// hasn't been fetched yet, since there is nothing correct to adjust from.
+function adjustUnreadCount(delta) {
+    if (unreadCount === null) return null;
+    unreadCount = Math.max(0, unreadCount + delta);
+    renderUnreadBadge();
+    return unreadCount;
 }
 
 /* ---- Saved views (sidebar) ----
@@ -741,6 +770,7 @@ function hideShortcuts() {
 export {
     showShortcuts, hideShortcuts, INBOX_SHORTCUTS, READER_SHORTCUTS,
     loadSavedViews, openSaveModal, closeSaveModal,
+    updateUnreadBadge, getUnreadCount, adjustUnreadCount,
 };
 
 /* ---- Init (runs on every page) ---- */
@@ -754,8 +784,28 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById('mobile-menu-btn')?.addEventListener('click', openSidebar);
     document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
 
-    // Logout
-    document.getElementById('logout-btn')?.addEventListener('click', () => {
+    // Logout (M3.2 Task 4: SW article-cache hardening, M3.1 final-review
+    // adjudication). Tiro's auth posture is device possession, not cache
+    // secrecy -- logging out ends the session server-side regardless -- so
+    // this is defense-in-depth only: best-effort clear the service worker's
+    // article cache (which can hold previously-fetched /api/articles/{id}
+    // JSON bodies) before handing the device back. Feature-detected and
+    // wrapped in try/catch, and its own failure must NEVER block or delay
+    // the actual logout. The static cache (versioned, cookie-free assets)
+    // is deliberately left alone -- it's public content either way.
+    document.getElementById('logout-btn')?.addEventListener('click', async () => {
+        if ('caches' in window) {
+            try {
+                const keys = await caches.keys();
+                await Promise.all(
+                    keys
+                        .filter((k) => /^tiro-.*-articles$/.test(k))
+                        .map((k) => caches.delete(k))
+                );
+            } catch (e) {
+                // Best-effort only -- never blocks logout.
+            }
+        }
         fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
             window.location.href = '/login';
         });

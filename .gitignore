@@ -27,6 +27,7 @@ playwright-tests/*
 !playwright-tests/save-queue.spec.js
 !playwright-tests/snooze-ui.spec.js
 !playwright-tests/swipe-triage.spec.js
+!playwright-tests/triage-pill.spec.js
 !playwright-tests/package.json
 !playwright-tests/README.md
 .playwright-mcp/
