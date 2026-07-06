@@ -50,9 +50,11 @@ def _reset_mdns_module_state():
     leaks between tests."""
     mdns_mod._zeroconf = None
     mdns_mod._service_info = None
+    mdns_mod._registered_hostname = None
     yield
     mdns_mod._zeroconf = None
     mdns_mod._service_info = None
+    mdns_mod._registered_hostname = None
 
 
 # --- tiro/mdns.py unit tests ------------------------------------------------
@@ -391,6 +393,120 @@ def test_lifespan_survives_unregister_failure(tmp_path, monkeypatch, _shared_emb
     app = app_mod.create_app(config)
     with TestClient(app, base_url="http://localhost"):
         pass  # shutdown must not raise despite unregister_mdns blowing up
+
+
+# --- Host allowlist accepts the mDNS-advertised hostname (finding 1, M3.0
+# final review) -----------------------------------------------------------
+#
+# tiro/app.py:444-472 (pre-fix) built `allowed_hosts` from localhost
+# variants + config.host + `_detect_lan_ips()`, but never the
+# `{mdns_hostname}.local` name zeroconf actually advertises -- a phone
+# resolving the advertised name got a live-reproduced 400 "Unrecognized
+# Host header" on every request. These tests exercise the fix end-to-end
+# through a real TestClient request (not just unit-testing `_validate_host`
+# in isolation), since the bug was specifically about the deployed
+# middleware rejecting a real Host header.
+
+
+def _make_mdns_registered_app(tmp_path, monkeypatch, *, registered_as="tiro"):
+    """An app whose lifespan believes zeroconf successfully registered
+    `registered_as` -- mirrors `test_lifespan_registers_when_enabled_and_lan`
+    above but also stubs `get_registered_hostname()` so `app.state.mdns_name`
+    gets populated the way a real registration would populate it."""
+    import tiro.app as app_mod
+
+    config = _build_lan_config(tmp_path, host="0.0.0.0", mdns_enabled=True)
+    monkeypatch.setattr(app_mod, "_detect_lan_ips", lambda: [])
+    monkeypatch.setattr(mdns_mod, "register_mdns", lambda cfg, host, port: True)
+    monkeypatch.setattr(mdns_mod, "get_registered_hostname", lambda: registered_as)
+    monkeypatch.setattr(mdns_mod, "unregister_mdns", lambda: None)
+
+    return app_mod.create_app(config), config
+
+
+def test_host_allowlist_accepts_registered_mdns_hostname(tmp_path, monkeypatch, _shared_embeddings):
+    app, config = _make_mdns_registered_app(tmp_path, monkeypatch, registered_as="tiro")
+
+    with TestClient(app, base_url="http://localhost") as client:
+        assert app.state.mdns_name == "tiro"
+
+        ok = client.get("/healthz", headers={"Host": f"tiro.local:{config.port}"})
+        assert ok.status_code == 200
+
+        rejected = client.get("/healthz", headers={"Host": "evil.local"})
+        assert rejected.status_code == 400
+
+
+def test_host_allowlist_matches_only_actual_registered_name_on_collision(
+    tmp_path, monkeypatch, _shared_embeddings
+):
+    """When the primary `mdns_hostname` collides on the LAN and the `-2`
+    retry candidate is the one zeroconf actually registers, only
+    `tiro-2.local` may pass -- `tiro.local` was never claimed by this
+    server, so it must still 400 (this is the DNS-rebinding-safety half of
+    the fix: the allowlist tracks what was ACTUALLY registered, never the
+    originally-requested name)."""
+    app, config = _make_mdns_registered_app(tmp_path, monkeypatch, registered_as="tiro-2")
+
+    with TestClient(app, base_url="http://localhost") as client:
+        assert app.state.mdns_name == "tiro-2"
+
+        ok = client.get("/healthz", headers={"Host": f"tiro-2.local:{config.port}"})
+        assert ok.status_code == 200
+
+        still_rejected = client.get("/healthz", headers={"Host": f"tiro.local:{config.port}"})
+        assert still_rejected.status_code == 400
+
+
+def test_host_allowlist_mdns_match_is_case_insensitive(tmp_path, monkeypatch, _shared_embeddings):
+    app, config = _make_mdns_registered_app(tmp_path, monkeypatch, registered_as="tiro")
+
+    with TestClient(app, base_url="http://localhost") as client:
+        ok = client.get("/healthz", headers={"Host": f"TIRO.LOCAL:{config.port}"})
+        assert ok.status_code == 200
+
+
+def test_host_allowlist_rejects_mdns_hostname_when_mdns_disabled(
+    tmp_path, monkeypatch, _shared_embeddings
+):
+    """Unchanged behavior when mDNS is off entirely: `app.state.mdns_name`
+    stays None (never populated), so `tiro.local` gets no special
+    treatment and 400s like any other unrecognized Host, same as before
+    this fix."""
+    import tiro.app as app_mod
+
+    config = _build_lan_config(tmp_path, host="0.0.0.0", mdns_enabled=False)
+    monkeypatch.setattr(app_mod, "_detect_lan_ips", lambda: [])
+
+    app = app_mod.create_app(config)
+    with TestClient(app, base_url="http://localhost") as client:
+        assert app.state.mdns_name is None
+        rejected = client.get("/healthz", headers={"Host": f"tiro.local:{config.port}"})
+        assert rejected.status_code == 400
+
+
+def test_host_allowlist_mdns_name_cleared_after_registration_failure(
+    tmp_path, monkeypatch, _shared_embeddings
+):
+    """register_mdns() returning False (registration failed/gave up) must
+    leave `app.state.mdns_name` at its None default -- `get_registered_hostname`
+    is only consulted when `registered` is truthy (tiro/app.py's lifespan),
+    so a failed registration can't accidentally allowlist a name nothing
+    actually advertised."""
+    import tiro.app as app_mod
+
+    config = _build_lan_config(tmp_path, host="0.0.0.0", mdns_enabled=True)
+    monkeypatch.setattr(app_mod, "_detect_lan_ips", lambda: [])
+    monkeypatch.setattr(mdns_mod, "register_mdns", lambda cfg, host, port: False)
+    monkeypatch.setattr(
+        mdns_mod,
+        "get_registered_hostname",
+        lambda: (_ for _ in ()).throw(AssertionError("must not be called when registration failed")),
+    )
+
+    app = app_mod.create_app(config)
+    with TestClient(app, base_url="http://localhost"):
+        assert app.state.mdns_name is None
 
 
 # --- config -----------------------------------------------------------------

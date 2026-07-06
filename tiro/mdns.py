@@ -31,6 +31,14 @@ _SERVICE_TYPE = "_http._tcp.local."
 
 _zeroconf: Zeroconf | None = None
 _service_info: ServiceInfo | None = None
+# The hostname actually accepted by zeroconf (may carry the `-2` collision
+# suffix from register_mdns()'s retry below) -- distinct from
+# `config.mdns_hostname`, which is only the FIRST candidate tried. Callers
+# that need to know what `.local` name the server is actually reachable at
+# (tiro/app.py's Host-header allowlist, QR code generation) must read this
+# via `get_registered_hostname()` rather than assuming the configured name
+# won.
+_registered_hostname: str | None = None
 
 
 def _resolve_addresses(host: str) -> list[bytes]:
@@ -67,7 +75,7 @@ def register_mdns(config, host: str, port: int) -> bool:
     zeroconf `NonUniqueNameException` or similar), retries once with a
     `-2` numeric suffix, then gives up quietly.
     """
-    global _zeroconf, _service_info
+    global _zeroconf, _service_info, _registered_hostname
 
     if _zeroconf is not None:
         logger.debug("mDNS already registered; skipping duplicate registration")
@@ -115,6 +123,7 @@ def register_mdns(config, host: str, port: int) -> bool:
             continue
         _zeroconf = zc
         _service_info = info
+        _registered_hostname = candidate
         logger.info("mDNS advertised as %s on port %d", info.server, port)
         return True
 
@@ -132,12 +141,12 @@ def unregister_mdns() -> None:
     Safe to call unconditionally (e.g. every server shutdown) even when
     registration was never attempted or failed -- a no-op in that case.
     """
-    global _zeroconf, _service_info
+    global _zeroconf, _service_info, _registered_hostname
 
     if _zeroconf is None:
         return
     zc, info = _zeroconf, _service_info
-    _zeroconf, _service_info = None, None
+    _zeroconf, _service_info, _registered_hostname = None, None, None
     try:
         if info is not None:
             zc.unregister_service(info)
@@ -147,3 +156,15 @@ def unregister_mdns() -> None:
         zc.close()
     except Exception as e:
         logger.warning("mDNS close failed: %s", e)
+
+
+def get_registered_hostname() -> str | None:
+    """The hostname actually registered with zeroconf, or None.
+
+    None both before registration is attempted and after it fails/is
+    unregistered. May differ from `config.mdns_hostname` when the `-2`
+    collision-retry candidate is the one that succeeded (see
+    `register_mdns`). A plain in-memory read of module state -- no zeroconf
+    I/O -- so callers do not need `asyncio.to_thread` to call this safely.
+    """
+    return _registered_hostname
