@@ -15,6 +15,7 @@ auth lives — the entire point).
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 
@@ -33,6 +34,18 @@ def _sandbox_dir(config: TiroConfig):
 
 def _resolve_binary(path_or_name: str) -> str | None:
     return shutil.which(path_or_name)
+
+
+def _subscription_env(*keys_to_scrub: str) -> dict:
+    """Child env for CLI backends with inherited API keys removed. The CLIs
+    prefer an API key over the user's subscription login when one is present
+    (a stray direnv/shell ANTHROPIC_API_KEY silently flips claude to API
+    billing — or fails outright on a depleted key; live-verified 2026-07-05).
+    Users who want API-key billing use the direct API providers instead."""
+    env = dict(os.environ)
+    for key in keys_to_scrub:
+        env.pop(key, None)
+    return env
 
 
 def run_claude_cli(config: TiroConfig, model: str, prompt: str, *,
@@ -54,6 +67,7 @@ def run_claude_cli(config: TiroConfig, model: str, prompt: str, *,
     proc = subprocess.run(
         cmd, capture_output=True, text=True,
         timeout=CLI_TIMEOUT_SECONDS, cwd=_sandbox_dir(config),
+        env=_subscription_env("ANTHROPIC_API_KEY"),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {proc.stderr.strip()[:500]}")
@@ -125,6 +139,7 @@ def run_codex_cli(config: TiroConfig, model: str, prompt: str, *,
         cmd, capture_output=True, text=True,
         timeout=CLI_TIMEOUT_SECONDS, cwd=_sandbox_dir(config),
         stdin=subprocess.DEVNULL,
+        env=_subscription_env("OPENAI_API_KEY"),
     )
 
     text = None
