@@ -62,7 +62,7 @@ every other sidecar write path in the codebase).
 
 Top-level: `exported_at` (ISO 8601 timestamp), `tiro_version` (string), `filters`
 (the tag/source_id/rating_min/date_from filters used, any may be `null`), plus
-the ten data keys below. Each is a JSON array of row objects; column names match
+the twelve data keys below. Each is a JSON array of row objects; column names match
 the row's SQL source verbatim (snake_case).
 
 | Key | Row shape | Notes |

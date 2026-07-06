@@ -226,7 +226,9 @@ FastAPI Backend
 Storage Layer (all local)
   ├── articles/*.md      (markdown files with YAML frontmatter)
   ├── audio/*.mp3        (cached TTS audio files)
-  ├── tiro.db            (SQLite — metadata, preferences, stats, audio)
+  ├── annotations/*.jsonl (highlight sidecars, one per article — source of truth)
+  ├── notes/*.md         (article-level note sidecars, one per article — source of truth)
+  ├── tiro.db            (SQLite — metadata, preferences, stats, audio, highlights/notes index)
   ├── chroma/            (ChromaDB — vector embeddings)
   └── config.yaml
 ```

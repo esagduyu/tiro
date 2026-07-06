@@ -414,6 +414,37 @@ def _reconcile_highlight_rows_for_article(conn, article, lines: list[dict], coun
         counts["highlights_deleted"] += 1
 
 
+def annotations_mass_delete_guard(
+    dir_exists: bool, stems_with_rows: set[str], file_stems: set[str]
+) -> bool:
+    """Shared mass-deletion guard predicate, one sidecar kind at a time
+    (highlights' `annotations/` dir or notes' `notes/` dir -- call it once
+    per kind). Used by BOTH `reconcile_annotations()` (the real repair) and
+    `tiro/doctor.py scan()`'s cheap pre-check, so the two can never drift
+    apart on what counts as guard-worthy (a prior gap: scan() only checked
+    the whole-directory-missing case, while reconcile also refused when the
+    directory exists but is empty relative to every stem-with-rows).
+
+    True when applying files-win literally would wipe out every row for
+    this sidecar kind, in a way that looks like a directory mishap rather
+    than a legitimate delete:
+      - the directory is missing entirely while any stem has rows, or
+      - the directory exists but contains NO matching file for MORE THAN
+        ONE stem-with-rows (a present-but-effectively-empty directory,
+        e.g. a botched restore, is just as dangerous as an absent one). A
+        single-stem library is exempt -- deleting that one stem's rows
+        when its lone sidecar vanished is the ordinary, legitimate
+        files-win case, not a mishap.
+
+    `file_stems` is only consulted when `dir_exists` is True."""
+    if not stems_with_rows:
+        return False
+    if not dir_exists:
+        return True
+    missing = stems_with_rows - file_stems
+    return bool(missing) and len(missing) == len(stems_with_rows) and len(stems_with_rows) > 1
+
+
 def _resolve_missing_stems(rows_article_ids, id_to_article: dict, file_stems: set[str]) -> list:
     """Of `rows_article_ids` (articles with derived rows in the table under
     reconciliation), return the subset whose stem-resolved sidecar has no
@@ -462,36 +493,27 @@ def _reconcile_highlights(config: TiroConfig, conn, id_to_article: dict, counts:
         r["article_id"]
         for r in conn.execute("SELECT DISTINCT article_id FROM highlights").fetchall()
     }
+    stems_with_rows = {
+        sidecar_stem(id_to_article[aid])
+        for aid in highlight_article_ids
+        if aid in id_to_article
+    }
+
+    # Mass-deletion guard (shared with `tiro/doctor.py scan()`'s cheap
+    # pre-check via `annotations_mass_delete_guard` -- see its docstring):
+    # covers both "the annotations/ directory is missing entirely" and "the
+    # directory exists but is empty relative to every stem with rows".
+    # Files-win would otherwise wipe every highlight row in the library on
+    # what's really a directory mishap -- report instead, mirroring
+    # `tiro/doctor.py fix()`'s all-articles-missing guard for markdown.
+    if annotations_mass_delete_guard(dir_exists, stems_with_rows, file_stems):
+        counts["guarded"] += 1
+        return
 
     if not dir_exists:
-        # Mass-deletion guard: the annotations directory itself is missing
-        # (moved/unmounted/hand-deleted), not just individual sidecar files.
-        # Files-win would otherwise wipe every highlight row in the library
-        # on a simple directory mishap -- report instead, mirroring
-        # `tiro/doctor.py fix()`'s all-articles-missing guard for markdown.
-        if highlight_article_ids:
-            counts["guarded"] += 1
         return
 
     missing_ids = _resolve_missing_stems(highlight_article_ids, id_to_article, file_stems)
-
-    # Widened mass-deletion guard: the directory EXISTS but every article
-    # with highlight rows has no matching file in it at all (`rm -rf
-    # annotations/*`, a botched restore that leaves the dir present but
-    # empty, ...) is just as destructive as the directory being fully
-    # absent above, and files-win would otherwise silently wipe every
-    # highlight row in the library. A single-article library is exempt --
-    # deleting that one article's rows when its lone sidecar vanished is
-    # the legitimate files-win case, not a mishap (that's why `> 1` here,
-    # mirroring `tiro/doctor.py fix()`'s own `total_articles > 1` guard for
-    # the markdown mass-delete refusal).
-    if (
-        missing_ids
-        and len(missing_ids) == len(highlight_article_ids)
-        and len(highlight_article_ids) > 1
-    ):
-        counts["guarded"] += 1
-        return
 
     for article_id in missing_ids:
         highlight_ids = [
@@ -564,27 +586,20 @@ def _reconcile_article_notes(config: TiroConfig, conn, id_to_article: dict, coun
             "SELECT DISTINCT article_id FROM notes WHERE highlight_id IS NULL"
         ).fetchall()
     }
+    stems_with_rows = {
+        sidecar_stem(id_to_article[aid]) for aid in note_article_ids if aid in id_to_article
+    }
+
+    # Same shared mass-deletion guard as `_reconcile_highlights`, for the
+    # notes/ directory: report, don't delete every article-level note row.
+    if annotations_mass_delete_guard(dir_exists, stems_with_rows, file_stems):
+        counts["guarded"] += 1
+        return
 
     if not dir_exists:
-        # Same mass-deletion guard as `_reconcile_highlights`, for the notes/
-        # directory: report, don't delete every article-level note row.
-        if note_article_ids:
-            counts["guarded"] += 1
         return
 
     missing_ids = _resolve_missing_stems(note_article_ids, id_to_article, file_stems)
-
-    # Widened guard, same rationale as `_reconcile_highlights`: the dir
-    # EXISTS but every article with an article-level note row has no
-    # matching file at all -- refuse, don't wipe every note row. Exempt
-    # single-article libraries (legitimate files-win case).
-    if (
-        missing_ids
-        and len(missing_ids) == len(note_article_ids)
-        and len(note_article_ids) > 1
-    ):
-        counts["guarded"] += 1
-        return
 
     for article_id in missing_ids:
         cur = conn.execute(

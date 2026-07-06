@@ -259,6 +259,73 @@ def test_patch_highlight_sets_and_clears_note_file_and_row(authenticated_client,
         conn.close()
 
 
+def test_patch_highlight_whitespace_only_note_clears(authenticated_client, configured_library):
+    """T5 closeout item 2(a): whitespace-only note_markdown must clear the
+    note the same way "" does -- unifies with PUT .../note's empty-body 400
+    threshold (both treat whitespace-only as "nothing"), rather than storing
+    it verbatim as if it were real content."""
+    config = configured_library
+    article_id, _ = _seed_article(config)
+    _write_markdown(config, "article-1")
+    uid = _create_highlight(authenticated_client, article_id)
+    authenticated_client.patch(f"/api/highlights/{uid}", json={"note_markdown": "my note"})
+
+    r = authenticated_client.patch(f"/api/highlights/{uid}", json={"note_markdown": "   \n\t "})
+    assert r.status_code == 200
+    assert r.json()["data"]["note_markdown"] is None
+
+    lines = _jsonl_lines(config, "article-1")
+    assert lines[0]["note_markdown"] is None
+
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute("SELECT id FROM highlights WHERE uid = ?", (uid,)).fetchone()
+        note_row = conn.execute(
+            "SELECT * FROM notes WHERE highlight_id = ?", (row["id"],)
+        ).fetchone()
+        assert note_row is None
+    finally:
+        conn.close()
+
+
+def test_patch_highlight_empty_body_is_noop(authenticated_client, configured_library):
+    """T5 closeout item 2(b): PATCH {} (both fields omitted) is a true no-op
+    -- it must not rewrite the sidecar file or bump updated_at, just return
+    the highlight unchanged."""
+    config = configured_library
+    article_id, _ = _seed_article(config)
+    _write_markdown(config, "article-1")
+    uid = _create_highlight(authenticated_client, article_id, color="green")
+    authenticated_client.patch(f"/api/highlights/{uid}", json={"note_markdown": "n1"})
+
+    path = annotations_dir(config) / "article-1.jsonl"
+    before_bytes = path.read_bytes()
+    conn = get_connection(config.db_path)
+    try:
+        before_updated_at = conn.execute(
+            "SELECT updated_at FROM highlights WHERE uid = ?", (uid,)
+        ).fetchone()["updated_at"]
+    finally:
+        conn.close()
+
+    r = authenticated_client.patch(f"/api/highlights/{uid}", json={})
+    assert r.status_code == 200
+    assert r.json()["data"]["color"] == "green"
+    assert r.json()["data"]["note_markdown"] == "n1"
+
+    # Sidecar file bytes identical -- no rewrite happened.
+    assert path.read_bytes() == before_bytes
+
+    conn = get_connection(config.db_path)
+    try:
+        after_updated_at = conn.execute(
+            "SELECT updated_at FROM highlights WHERE uid = ?", (uid,)
+        ).fetchone()["updated_at"]
+    finally:
+        conn.close()
+    assert after_updated_at == before_updated_at
+
+
 def test_patch_highlight_omitted_fields_unchanged(authenticated_client, configured_library):
     config = configured_library
     article_id, _ = _seed_article(config)

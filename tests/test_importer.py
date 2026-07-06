@@ -383,6 +383,7 @@ def test_overwrite_without_author_key_leaves_junction_untouched(initialized_libr
         conn.close()
     finally:
         bundle.unlink()
+        stripped.unlink()
 
 
 # --- Highlights + notes sidecar merge (Phase 2 M2.1 Task 4) ------------------

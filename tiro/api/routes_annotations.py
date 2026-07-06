@@ -307,21 +307,37 @@ class HighlightPatchRequest(BaseModel):
 @router.patch("/highlights/{uid}")
 async def patch_highlight(uid: str, body: HighlightPatchRequest, request: Request):
     """Update a highlight's color and/or its anchored note. `note_markdown`
-    omitted (`None`) leaves the note untouched; `""` clears it (deletes the
-    note); any other string upserts it verbatim (no sanitize/transform --
-    the client renders through DOMPurify). 404 on an unknown uid."""
+    omitted (`None`) leaves the note untouched; `""` OR whitespace-only
+    clears it (deletes the note, same as PUT .../note's empty-body 400
+    threshold -- whitespace-only is treated as "nothing," not content); any
+    other string upserts it verbatim (no sanitize/transform -- the client
+    renders through DOMPurify). 404 on an unknown uid. A true no-op PATCH
+    (both fields omitted, `{}`) short-circuits before any file/row write or
+    `updated_at` bump -- it returns the highlight unchanged rather than
+    rewriting the sidecar for nothing."""
     config = request.app.state.config
     color = None if body.color is None else _validate_color(body.color)
 
     conn = get_connection(config.db_path)
     try:
         row, article = _get_highlight_or_404(conn, uid)
+
+        if body.color is None and body.note_markdown is None:
+            return {
+                "success": True,
+                "data": _highlight_row_to_dict(row, _note_for_highlight(conn, row["id"])),
+            }
+
         stem = sidecar_stem(article)
         now = _now_iso()
         new_color = color if color is not None else row["color"]
 
         current_note = _note_for_highlight(conn, row["id"])
-        new_note = current_note if body.note_markdown is None else (body.note_markdown or None)
+        new_note = (
+            current_note
+            if body.note_markdown is None
+            else (body.note_markdown if body.note_markdown.strip() else None)
+        )
 
         # 1. FILE FIRST: locate the line by uid and rewrite it in place. If
         # the line is missing from the file (drift from outside this

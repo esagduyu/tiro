@@ -11,7 +11,13 @@ server's writes can produce false positives.
 import logging
 from pathlib import Path
 
-from tiro.annotations import annotations_dir, notes_dir, reconcile_annotations, sidecar_stem
+from tiro.annotations import (
+    annotations_dir,
+    annotations_mass_delete_guard,
+    notes_dir,
+    reconcile_annotations,
+    sidecar_stem,
+)
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.vectorstore import get_collection, retry_pending_vectors
@@ -119,17 +125,22 @@ def scan(config: TiroConfig) -> dict:
     # Annotations (highlights/notes, Phase 2 M2.1) index drift: same cheap
     # presence-based comparison as wiki_index_drift above (stems on disk vs.
     # stems with rows), not a full reconcile -- reconcile_annotations() does
-    # the real content-level matching and row repair, on --fix only. Guarded
-    # separately from drift: a whole sidecar directory missing while rows
-    # still reference it is a directory mishap, not "the user deleted every
-    # highlight" -- see reconcile_annotations()'s docstring for the guard
-    # rationale. structurally_consistent (below) folds the guard in so a
-    # guard event stays visible in the exit code even without --fix; plain
-    # drift is housekeeping only, same as wiki_index_drift.
+    # the real content-level matching and row repair, on --fix only. Guard
+    # classification uses the SAME `annotations_mass_delete_guard` predicate
+    # reconcile_annotations() itself uses (tiro/annotations.py), so scan()'s
+    # cheap pre-check can never disagree with what --fix would actually
+    # refuse to do: both "the sidecar directory is missing entirely" and
+    # "the directory exists but is empty relative to every stem with rows"
+    # count as guarded here, not just the dir-missing case. structurally_
+    # consistent (below) folds the guard in so a guard event stays visible
+    # in the exit code even without --fix; plain drift is housekeeping only,
+    # same as wiki_index_drift.
     ann_dir = annotations_dir(config)
     nt_dir = notes_dir(config)
-    ann_file_stems = {p.stem for p in ann_dir.glob("*.jsonl")} if ann_dir.exists() else set()
-    note_file_stems = {p.stem for p in nt_dir.glob("*.md")} if nt_dir.exists() else set()
+    ann_dir_exists = ann_dir.exists()
+    nt_dir_exists = nt_dir.exists()
+    ann_file_stems = {p.stem for p in ann_dir.glob("*.jsonl")} if ann_dir_exists else set()
+    note_file_stems = {p.stem for p in nt_dir.glob("*.md")} if nt_dir_exists else set()
     stem_by_article_id = {row["id"]: sidecar_stem(row) for row in rows}
     highlight_stems_with_rows = {
         stem_by_article_id[aid] for aid in highlight_article_ids if aid in stem_by_article_id
@@ -139,15 +150,13 @@ def scan(config: TiroConfig) -> dict:
     }
 
     annotations_index_drift = 0
-    annotations_guarded = False
-    if ann_dir.exists():
+    if ann_dir_exists:
         annotations_index_drift += len(ann_file_stems ^ highlight_stems_with_rows)
-    elif highlight_article_ids:
-        annotations_guarded = True
-    if nt_dir.exists():
+    if nt_dir_exists:
         annotations_index_drift += len(note_file_stems ^ note_stems_with_rows)
-    elif note_article_ids:
-        annotations_guarded = True
+    annotations_guarded = annotations_mass_delete_guard(
+        ann_dir_exists, highlight_stems_with_rows, ann_file_stems
+    ) or annotations_mass_delete_guard(nt_dir_exists, note_stems_with_rows, note_file_stems)
 
     report = {
         "total_articles": len(rows),
