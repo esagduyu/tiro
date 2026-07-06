@@ -266,6 +266,42 @@ function countsAsUnread(a) {
     return !!(a && !a.is_read && !isCurrentlySnoozed(a));
 }
 
+/* ---- Per-entity action sequence tokens (Finding 2, M3.2 final review) ----
+
+   Follows the highlights.js `fetchToken` idiom, but keyed PER ENTITY (an
+   article id or a source id) rather than one page-global counter -- an
+   action on a DIFFERENT article/source must never be blocked or
+   invalidated by this. Every undo-adjacent triage action (rate, archive,
+   snooze, wake, VIP toggle) bumps its entity's token BEFORE its first
+   await; after EVERY subsequent await in that action -- both the success
+   continuation and the failure/rollback branch -- the action re-checks its
+   captured token against the entity's CURRENT token and skips all further
+   state writes (cache mutation, DOM update, unread-count adjustment,
+   offerUndo) if a newer action on the same entity started meanwhile. This
+   is what stops a held/delayed response from a stale first action (e.g. a
+   rapid rate-1-then-2 where 1's response is held and lands AFTER 2's
+   completes) from clobbering the cache/UI/undo-slot a newer, already-
+   resolved action already established. */
+const actionTokens = new Map(); // entity key -> monotonic counter
+
+function articleTokenKey(articleId) {
+    return `article:${Number(articleId)}`;
+}
+
+function sourceTokenKey(sourceId) {
+    return `source:${Number(sourceId)}`;
+}
+
+function bumpActionToken(key) {
+    const next = (actionTokens.get(key) || 0) + 1;
+    actionTokens.set(key, next);
+    return next;
+}
+
+function isStaleActionToken(key, token) {
+    return actionTokens.get(key) !== token;
+}
+
 function renderArticle(a, showScore) {
     const classes = ["article-card"];
     if (a.is_read) classes.push("is-read");
@@ -395,6 +431,17 @@ function attachListeners() {
                 });
                 const json = await res.json();
                 if (json.success) {
+                    // Keep cachedArticles in sync (Finding 4, M3.2 final
+                    // review): this mouse-click handler never touched the
+                    // cache, so a subsequent keyboard undo capture
+                    // (rateSelected's `priorRating`) trusted a stale value
+                    // that no longer matched the server. A miss here (the
+                    // card isn't in the currently-cached page — e.g. a live
+                    // search result, Finding 1) is a harmless no-op.
+                    const article = cachedArticles.find(
+                        (a) => Number(a.id) === Number(articleId)
+                    );
+                    if (article) article.rating = rating;
                     // Update active state within this card
                     const card = btn.closest(".article-card");
                     card.querySelectorAll(".rate-btn").forEach((b) =>
@@ -446,6 +493,15 @@ function attachListeners() {
             // Finding 1, left as `wasUnread` since it was already correct.
             const article = cachedArticles.find((a) => Number(a.id) === Number(articleId));
             const wasUnread = !!(article && !article.is_read);
+
+            // Sequence token (Finding 2, M3.2 final review) -- same shape as
+            // performSnooze/performArchive/rateSelected: a newer action on
+            // this article (e.g. a rapid re-snooze or wake-now double click)
+            // must invalidate this continuation.
+            const key = articleTokenKey(articleId);
+            const token = bumpActionToken(key);
+
+            let ok = false;
             try {
                 const res = await fetch(`/api/articles/${articleId}/snooze`, {
                     method: "PATCH",
@@ -453,15 +509,19 @@ function attachListeners() {
                     body: JSON.stringify({ until: null }),
                 });
                 const json = await res.json();
-                if (json.success) {
-                    if (wasUnread) adjustUnreadCount(1);
-                    showToast("Article woken up", "success");
-                    await loadInbox();
-                } else {
-                    showToast("Failed to wake article", "error");
-                }
+                ok = !!json.success;
             } catch (err) {
                 console.error("Wake now failed:", err);
+                ok = false;
+            }
+
+            if (isStaleActionToken(key, token)) return; // superseded by a newer action
+
+            if (ok) {
+                if (wasUnread) adjustUnreadCount(1);
+                showToast("Article woken up", "success");
+                await loadInbox();
+            } else {
                 showToast("Failed to wake article", "error");
             }
         });
@@ -601,49 +661,80 @@ async function performSnooze(articleId, preset) {
     const priorWasUnread = !!(prior && !prior.is_read);
     const leavesUnreadCount = priorWasUnread && !priorStillFuture;
 
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // await so a newer action on this same article invalidates this one's
+    // eventual continuation. See the token helpers' header comment.
+    const key = articleTokenKey(articleId);
+    const token = bumpActionToken(key);
+
+    let json = null;
+    let ok = false;
     try {
         const res = await fetch(`/api/articles/${articleId}/snooze`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ preset }),
         });
-        const json = await res.json();
-        if (!json.success) {
-            showToast("Failed to snooze article", "error");
-            return;
-        }
-
-        if (leavesUnreadCount) adjustUnreadCount(-1);
-
-        // The undo toast replaces T1's plain success toast — same message,
-        // now with the Undo affordance (single toast slot either way).
-        offerUndo(
-            `Snoozed until ${formatDate((json.data.snoozed_until || "").replace(" ", "T"))}`,
-            async () => {
-                await fetch(`/api/articles/${articleId}/snooze`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ until: priorStillFuture ? priorUntil : null }),
-                });
-                if (leavesUnreadCount) adjustUnreadCount(1);
-                await loadInbox();
-            },
-        );
-
-        if (showSnoozed) {
-            // Toggle is on — re-fetch so the card re-renders in place with
-            // the wake-time chip rather than disappearing.
-            await loadInbox();
-        } else {
-            // Default view: the card simply leaves the list.
-            cachedArticles = cachedArticles.filter((a) => Number(a.id) !== Number(articleId));
-            renderArticleList(cachedArticles);
-            updateToolbar(cachedArticles);
-        }
+        json = await res.json();
+        ok = !!json.success;
     } catch (err) {
         console.error("Snooze failed:", err);
-        showToast("Failed to snooze article", "error");
+        ok = false;
     }
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
+        showToast("Failed to snooze article", "error");
+        return;
+    }
+
+    if (leavesUnreadCount) adjustUnreadCount(-1);
+
+    if (searchActive) {
+        // Finding 1 (M3.2 final review): a live search's results are NOT
+        // cachedArticles (runSearch() renders straight from the API
+        // response without populating it) -- filtering/re-rendering
+        // cachedArticles here would replace the visible search results with
+        // a stale inbox snapshot mid-search. Remove just this card in
+        // place; the rest of the search results stay exactly as rendered.
+        document.querySelector(`.article-card[data-id="${Number(articleId)}"]`)?.remove();
+    } else if (showSnoozed) {
+        // Toggle is on — re-fetch so the card re-renders in place with
+        // the wake-time chip rather than disappearing.
+        await loadInbox();
+    } else {
+        // Default view: the card simply leaves the list.
+        cachedArticles = cachedArticles.filter((a) => Number(a.id) !== Number(articleId));
+        renderArticleList(cachedArticles);
+        updateToolbar(cachedArticles);
+    }
+
+    const label = `Snoozed until ${formatDate((json.data.snoozed_until || "").replace(" ", "T"))}`;
+
+    if (!prior) {
+        // Fabricated-prior guard (Finding 1): `prior` missing means this
+        // card was never in cachedArticles (a search hit outside the cached
+        // page) -- there is no real prior state to restore, so offering
+        // undo would silently un-snooze or pick the wrong restore target.
+        // The (already-committed, correct) snooze stands; just no Undo
+        // button.
+        showToast(label, "success");
+        return;
+    }
+
+    // The undo toast replaces T1's plain success toast — same message,
+    // now with the Undo affordance (single toast slot either way).
+    offerUndo(label, async () => {
+        await fetch(`/api/articles/${articleId}/snooze`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ until: priorStillFuture ? priorUntil : null }),
+        });
+        if (isStaleActionToken(key, token)) return;
+        if (leavesUnreadCount) adjustUnreadCount(1);
+        await loadInbox();
+    });
 }
 
 function toggleSnoozed() {
@@ -885,39 +976,81 @@ async function performArchive(articleId) {
     // silently pick up the wrong answer.
     const wasCountedUnread = countsAsUnread(article);
 
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // optimistic mutation so a newer action on this same article
+    // invalidates this one's eventual continuation. See the token helpers'
+    // header comment.
+    const key = articleTokenKey(id);
+    const token = bumpActionToken(key);
+
     // Same reorder as rateSelected's fix: mutate the cached read state
     // optimistically before the await so a rapid second action on this
     // article reads this action's post-state as its "prior", not the stale
     // pre-action one. Rolled back below on PATCH failure.
     if (article) article.is_read = true;
 
+    let ok = false;
     try {
         const res = await fetch(`/api/articles/${id}/read`, { method: "PATCH" });
         const json = await res.json();
-        if (!json.success) {
-            if (article) article.is_read = wasRead;
-            showToast("Failed to archive article", "error");
-            return;
-        }
+        ok = !!json.success;
     } catch (err) {
         console.error("Archive failed:", err);
+        ok = false;
+    }
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
         if (article) article.is_read = wasRead;
         showToast("Failed to archive article", "error");
         return;
     }
 
-    // Triage semantics: the card leaves the current view immediately (same
-    // posture as performSnooze's default-view path). Archive IS mark-read —
-    // there is no separate archived state — so a later full reload may
-    // legitimately show the article again as a read row.
-    cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
     // Live pill update (M3.2 Task 4): archiving only changes the unread
     // count when the article was actually counted as unread beforehand --
     // an already-read article, OR a snoozed-unread one (already excluded
     // from the count server-side -- Finding 1 fix), is a no-op here.
+    // MUST run BEFORE updateToolbar() below (M3.2 final-review regression
+    // caught in testing): adjustUnreadCount() only updates the shared
+    // counter + the sidebar badge, it does NOT itself re-render this page's
+    // #triage-pill -- that happens inside updateToolbar()'s
+    // refreshTriageUI() call, which reads whatever the counter says AT THAT
+    // MOMENT. Decrementing after updateToolbar() would render the pill with
+    // the stale (pre-decrement) count and never repaint it again.
     if (wasCountedUnread) adjustUnreadCount(-1);
-    renderArticleList(cachedArticles);
-    updateToolbar(cachedArticles);
+
+    if (searchActive) {
+        // Finding 1 (M3.2 final review): a live search's results are NOT
+        // cachedArticles (runSearch() renders straight from the API
+        // response without populating it) -- filtering/re-rendering
+        // cachedArticles here would replace the visible search results with
+        // a stale inbox snapshot mid-search. Remove just this card in
+        // place; the rest of the search results stay exactly as rendered.
+        document.querySelector(`.article-card[data-id="${id}"]`)?.remove();
+    } else {
+        // Triage semantics: the card leaves the current view immediately
+        // (same posture as performSnooze's default-view path). Archive IS
+        // mark-read — there is no separate archived state — so a later
+        // full reload may legitimately show the article again as a read
+        // row.
+        cachedArticles = cachedArticles.filter((a) => Number(a.id) !== id);
+        renderArticleList(cachedArticles);
+        updateToolbar(cachedArticles);
+    }
+
+    if (!article) {
+        // Fabricated-prior guard (Finding 1): no `article` means this card
+        // was never in cachedArticles (a search hit outside the cached
+        // page) -- `wasRead`/`wasCountedUnread` above are computed from an
+        // undefined article and are NOT this article's true prior state.
+        // Offering undo on a fabricated prior would silently un-read an
+        // already-read article, or mis-adjust a count that was never
+        // really decremented. The (already-committed, correct) archive
+        // stands; just no Undo button.
+        showToast("Archived", "success");
+        return;
+    }
 
     offerUndo("Archived", async () => {
         // Restore the pre-archive state server-side, not just visually:
@@ -932,6 +1065,7 @@ async function performArchive(articleId) {
                 body: JSON.stringify({ is_read: false }),
             });
         }
+        if (isStaleActionToken(key, token)) return;
         // Mirrors wasCountedUnread captured above at archive time, NOT a
         // fresh countsAsUnread() recompute here and NOT nested under the
         // `!wasRead` PATCH guard above (Finding 1): those are two different
@@ -1978,10 +2112,19 @@ async function toggleSelectedVip(cards) {
     if (!star) return;
     const sourceId = star.dataset.sourceId;
 
+    // Sequence token (Finding 2, M3.2 final review), keyed by SOURCE (this
+    // toggle mutates a source, not the article) -- same shape as
+    // rateSelected/performArchive/performSnooze. See the token helpers'
+    // header comment.
+    const key = sourceTokenKey(sourceId);
+    const token = bumpActionToken(key);
+
     const nowVip = await patchVipToggle(sourceId);
+    if (isStaleActionToken(key, token)) return; // a newer action on this source now owns state
     if (nowVip === null) return;
     offerUndo(nowVip ? "Source marked VIP" : "Source VIP removed", async () => {
         await patchVipToggle(sourceId); // toggle back
+        if (isStaleActionToken(key, token)) return;
         await loadInbox();
     });
     await loadInbox();
@@ -2008,6 +2151,17 @@ async function rateSelected(cards, rating) {
     // (restored via the rate API's `{"rating": null}` clear).
     const priorRating = article && article.rating !== undefined ? article.rating : null;
 
+    // Sequence token (Finding 2, M3.2 final review) -- bumped BEFORE the
+    // optimistic mutation so a newer rating action on this same article
+    // invalidates this one's eventual continuation, both the success
+    // continuation below AND the failure/rollback branch. This is what
+    // stops a held/delayed response from a stale first rate action from
+    // clobbering the cache/UI/undo-slot after a second, faster rate action
+    // on the same card has already resolved. See the token helpers' header
+    // comment.
+    const key = articleTokenKey(id);
+    const token = bumpActionToken(key);
+
     // Mutate the cache optimistically IMMEDIATELY (before the await) so a
     // second rapid rating keypress on the same card — fired before this
     // PATCH round-trip resolves — captures THIS action's rating as its own
@@ -2015,7 +2169,11 @@ async function rateSelected(cards, rating) {
     // corruption bug came from). Rolled back below on PATCH failure.
     if (article) article.rating = rating;
 
-    if (!(await patchRating(id, rating))) {
+    const ok = await patchRating(id, rating);
+
+    if (isStaleActionToken(key, token)) return; // a newer action on this article now owns state
+
+    if (!ok) {
         if (article) article.rating = priorRating;
         showToast("Failed to rate article", "error");
         return;
@@ -2023,8 +2181,24 @@ async function rateSelected(cards, rating) {
     updateCardRatingUI(card, rating);
 
     const labels = { "-1": "Rated: dislike", 1: "Rated: like", 2: "Rated: love" };
-    offerUndo(labels[String(rating)] || "Rated", async () => {
+    const label = labels[String(rating)] || "Rated";
+
+    if (!article) {
+        // Fabricated-prior guard (Finding 1, M3.2 final review): no
+        // `article` means this card was never in cachedArticles -- a
+        // search hit outside the cached page, since runSearch() renders
+        // straight from the API response without populating
+        // cachedArticles. `priorRating` above therefore defaulted to null
+        // rather than this article's real prior rating; offering undo on
+        // that fabricated prior would silently clear a real rating. The
+        // (already-committed, correct) rating stands; just no Undo button.
+        showToast(label, "success");
+        return;
+    }
+
+    offerUndo(label, async () => {
         if (!(await patchRating(id, priorRating))) return;
+        if (isStaleActionToken(key, token)) return;
         if (article) article.rating = priorRating;
         // The card may have been re-rendered since — look it up live.
         const liveCard = document.querySelector(`.article-card[data-id="${id}"]`);

@@ -124,6 +124,76 @@ def test_styles_css_has_undo_toast():
     assert "pointer-events: auto" in content
 
 
+# --- Structural pins: M3.2 final review fixes (Findings 1, 2, 4, 7) ----------
+#
+# Full behavioral coverage for the race (Finding 2) lives in
+# playwright-tests/swipe-triage.spec.js; these are fast source-level pins
+# for the shape of each fix (grep-the-source, same style as the pins above).
+
+
+def test_inbox_js_has_per_entity_action_tokens():
+    # Finding 2: the per-article/per-source sequence-token guard.
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "function bumpActionToken" in content
+    assert "function isStaleActionToken" in content
+    assert "function articleTokenKey" in content
+    assert "function sourceTokenKey" in content
+    # Wired into every undo-adjacent action named in the finding.
+    for fn in ("rateSelected", "performArchive", "performSnooze", "toggleSelectedVip"):
+        # Rough proximity check: the function body (up to the next
+        # top-level function) contains a staleness check.
+        start = content.index(f"function {fn}(")
+        end = content.index("\nfunction ", start + 1)
+        assert "isStaleActionToken" in content[start:end], fn
+
+
+def test_inbox_js_skips_undo_on_cache_miss():
+    # Finding 1: a card driven purely by search results (not in
+    # cachedArticles) must not get a fabricated-prior undo offer.
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "Fabricated-prior guard" in content
+    # Both performArchive and rateSelected must skip offerUndo on a miss.
+    for fn in ("performArchive", "rateSelected"):
+        start = content.index(f"function {fn}(")
+        end = content.index("\nfunction ", start + 1)
+        body = content[start:end]
+        assert "if (!article)" in body
+        assert "showToast(" in body
+
+
+def test_inbox_js_search_active_removes_card_in_place():
+    # Finding 1: performArchive/performSnooze must not clobber live search
+    # results by re-rendering a stale cachedArticles snapshot mid-search.
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    assert "searchActive" in content
+    for fn in ("performArchive", "performSnooze"):
+        start = content.index(f"function {fn}(")
+        end = content.index("\nfunction ", start + 1)
+        body = content[start:end]
+        assert "if (searchActive)" in body
+        assert ".remove()" in body
+
+
+def test_inbox_js_mouse_rate_click_updates_cache():
+    # Finding 4: the mouse rate-button click handler must keep
+    # cachedArticles in sync so a later keyboard undo capture is accurate.
+    content = (STATIC_DIR / "js" / "inbox.js").read_text()
+    start = content.index('document.querySelectorAll(".rate-btn")')
+    end = content.index("\n    // Card overflow menu", start)
+    body = content[start:end]
+    assert "article.rating = rating" in body
+
+
+def test_core_js_show_toast_excludes_undo_toast():
+    # Finding 7: showToast() must not silently remove a live #undo-toast
+    # (it manages its own lifecycle independently).
+    content = (STATIC_DIR / "js" / "core.js").read_text()
+    start = content.index("export function showToast")
+    end = content.index("\n}", start)
+    body = content[start:end]
+    assert ":not(#undo-toast)" in body
+
+
 # --- API: PATCH read {"is_read": false} (undo-archive) ------------------------
 
 
@@ -212,6 +282,42 @@ def test_rate_invalid_value_still_400(authenticated_client):
     aid = _ingest_one(authenticated_client)
     r = authenticated_client.patch(f"/api/articles/{aid}/rate", json={"rating": 5})
     assert r.status_code == 400
+
+
+# --- Finding 3 (M3.2 final review): RateRequest.rating required-but-nullable --
+#
+# The field previously defaulted to `None`, so an empty body `{}` (e.g. a
+# client bug — a missing key) was silently indistinguishable from an
+# explicit `{"rating": null}` clear: both hit the `body.rating is None`
+# branch and cleared a real rating. `Field(...)` makes the KEY required
+# (missing -> 422) while the `int | None` type still accepts an explicit
+# null to clear.
+
+
+def test_rate_empty_body_is_422_not_a_silent_clear(authenticated_client, configured_library):
+    aid = _ingest_one(authenticated_client)
+    authenticated_client.patch(f"/api/articles/{aid}/rate", json={"rating": 2})
+
+    r = authenticated_client.patch(f"/api/articles/{aid}/rate", json={})
+    assert r.status_code == 422
+
+    # The real rating must be untouched by the rejected request.
+    assert _article_row(configured_library, aid)["rating"] == 2
+
+
+def test_rate_missing_body_entirely_is_422(authenticated_client):
+    aid = _ingest_one(authenticated_client)
+    r = authenticated_client.patch(f"/api/articles/{aid}/rate")
+    assert r.status_code == 422
+
+
+def test_rate_explicit_null_still_clears(authenticated_client, configured_library):
+    # The one case Finding 3 must NOT break: an explicit null still clears.
+    aid = _ingest_one(authenticated_client)
+    authenticated_client.patch(f"/api/articles/{aid}/rate", json={"rating": 1})
+    r = authenticated_client.patch(f"/api/articles/{aid}/rate", json={"rating": None})
+    assert r.status_code == 200
+    assert _article_row(configured_library, aid)["rating"] is None
 
 
 def test_rate_null_unknown_article_404(authenticated_client):

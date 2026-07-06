@@ -258,6 +258,37 @@ def test_mcp_search_still_finds_snoozed_article(initialized_library, monkeypatch
     assert "Snoozed For MCP" in result
 
 
+def test_semantic_search_payload_carries_snoozed_until(authenticated_client, configured_library):
+    # Finding 5 (M3.2 final review): tiro/search/semantic.py's SELECT
+    # (backing GET /api/search) omitted snoozed_until, breaking the repo
+    # convention that the column appears in every article-returning query
+    # (list, detail, AND search) -- a snoozed article surfaced by search
+    # rendered without its "Snoozed until..." chip client-side.
+    #
+    # Ingested via the real API (not the raw-SQL _seed_article helper above)
+    # so the article is actually embedded in ChromaDB and reachable through
+    # search_articles()'s real query path.
+    from pathlib import Path
+
+    from tiro.search.semantic import search_articles
+
+    eml = (Path(__file__).parent / "fixtures" / "newsletter.eml").read_bytes()
+    r = authenticated_client.post(
+        "/api/ingest/email", files={"file": ("newsletter.eml", eml, "message/rfc822")}
+    )
+    assert r.status_code == 200, r.text
+    aid = r.json()["data"]["id"]
+
+    until = _future_iso(2)
+    sr = authenticated_client.patch(f"/api/articles/{aid}/snooze", json={"until": until})
+    assert sr.status_code == 200
+
+    results = search_articles("newsletter", configured_library)
+    match = next((row for row in results if row["id"] == aid), None)
+    assert match is not None, f"article {aid} not found in search results: {results}"
+    assert match["snoozed_until"] is not None
+
+
 # --- Payload surfacing: snoozed_until must reach the frontend (M3.2 Task 1) --
 
 

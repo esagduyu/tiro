@@ -242,6 +242,68 @@ test.describe('M3.2 swipe triage (mobile emulation)', () => {
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
+
+  // Finding 1 (M3.2 final review): runSearch() renders search results
+  // straight from the API response WITHOUT populating cachedArticles --
+  // swiping/rating a search-result card is therefore always a cachedArticles
+  // lookup MISS. Before the fix, performArchive/rateSelected still offered
+  // undo using FABRICATED prior state (computed from `undefined`), so
+  // undoing a normal archive of an already-processed search hit could
+  // silently un-read/un-rate it incorrectly. The fix: do the (real,
+  // server-committed) action, but skip the undo affordance entirely on a
+  // miss -- plain toast, no Undo button.
+  //
+  // cachedArticles=[] is forced deterministically via a filter guaranteed
+  // to match nothing (loadInbox()'s zero-results branch explicitly resets
+  // it -- see that function's own header comment) rather than relying on
+  // page-size/sort timing to produce a "miss". The swipe target is
+  // whichever card search ranks FIRST (topmost, guaranteed in-viewport),
+  // not necessarily this test's own freshly-saved article -- every card
+  // rendered by runSearch() is a cachedArticles miss regardless of which
+  // specific article it is, and repeated runs against a shared scratch
+  // library accumulate many identical-content "Example Domain" articles
+  // (search's default top-10 similarity ranking can otherwise leave a
+  // freshly-saved one out entirely).
+  test('search result outside cachedArticles archives without a fabricated undo offer', async ({ page }) => {
+    const consoleErrors = collectConsoleErrors(page);
+    await loginOrSetup(page);
+
+    // Guarantees at least one real "example" match exists even against a
+    // pristine library.
+    await saveArticleViaApi(page, `${Date.now()}-finding1`);
+
+    await page.goto(`/inbox?tag=${encodeURIComponent(`no-such-tag-${Date.now()}`)}`);
+    await expect(page.locator('#article-list')).toBeVisible();
+
+    // Search directly -- guaranteed to render straight from the API
+    // response WITHOUT populating cachedArticles (forced empty above).
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/search?q=')),
+      page.fill('#search-input', 'example'),
+    ]);
+    const card = page.locator('.article-card').first();
+    await expect(card).toBeVisible();
+    const id = Number(await card.getAttribute('data-id'));
+
+    const [readResp] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/articles/${id}/read`) && res.request().method() === 'PATCH'
+      ),
+      dragCard(page, card, 0.6),
+    ]);
+    expect(readResp.status()).toBe(200);
+
+    // Card leaves the search results in place; NO fabricated undo offer.
+    await expect(page.locator(`.article-card[data-id="${id}"]`)).toHaveCount(0);
+    await expect(page.locator('#undo-toast')).toHaveCount(0);
+    await expect(page.locator('.settings-toast')).toContainText('Archived');
+
+    // Server really archived it (mark-read) -- the action itself must
+    // still go through even without the undo affordance.
+    expect((await getArticle(page, id)).is_read).toBe(1);
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
 });
 
 test.describe('M3.2 keyboard rate undo (desktop)', () => {
@@ -371,10 +433,90 @@ test.describe('M3.2 keyboard rate undo (desktop)', () => {
     expect((await getArticle(page, id)).rating).toBe(-1);
     await expect(page.locator('#undo-toast')).toHaveCount(0);
 
-    // Drain the held first request so it doesn't leak past the test.
-    await page.waitForTimeout(1600);
+    // Finding 2 (M3.2 final review): drain the held first (dislike) request
+    // -- its response finally lands here, well AFTER action 2 completed and
+    // AFTER undo already ran. Before the per-article sequence-token guard,
+    // this stale continuation would unconditionally run
+    // updateCardRatingUI(-1) + offerUndo("Rated: dislike", ...), silently
+    // re-arming a GHOST undo toast with the wrong label and the wrong
+    // restore target (null, the pre-race original) -- even though the
+    // visible/server state is already correctly settled at -1 from the
+    // explicit undo above. The token guard must make this a no-op: no new
+    // toast, rating stays exactly where undo left it.
+    await page.waitForTimeout(1800);
+    await expect(page.locator('#undo-toast')).toHaveCount(0);
+    await expect(page.locator('.settings-toast')).toHaveCount(0);
+    expect((await getArticle(page, id)).rating).toBe(-1);
 
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
+
+  // Finding 2 (M3.2 final review), rollback variant: same race, but the
+  // FIRST (held) action ends up FAILING (500) rather than succeeding, and
+  // its failure response lands after the second action already succeeded.
+  // Before the token guard, the stale failure branch would roll the cache
+  // back to the pre-race value (null) and surface a spurious "Failed to
+  // rate article" toast, even though the second action's rating is the
+  // correct, already-committed current state.
+  test('rapid keyboard 1 (fails, held) then 2 (succeeds) -> stale failure rollback is skipped', async ({ page }) => {
+    const consoleErrors = collectConsoleErrors(page);
+    await loginOrSetup(page);
+
+    const id = await saveArticleViaApi(page, `${Date.now()}-rapid-rate-rollback`);
+    await page.goto('/inbox');
+    const card = page.locator(`.article-card[data-id="${id}"]`);
+    await expect(card).toBeVisible();
+
+    let rateCallCount = 0;
+    await page.route('**/api/articles/*/rate', async (route) => {
+      rateCallCount += 1;
+      if (rateCallCount === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: false }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.keyboard.press('j');
+    const selected = page.locator('.article-card.kb-selected');
+    await expect(selected).toHaveAttribute('data-id', String(id));
+    expect((await getArticle(page, id)).rating).toBe(null);
+
+    // Fire dislike (held, will fail) then IMMEDIATELY like (fast, succeeds).
+    await page.keyboard.press('1');
+    await page.keyboard.press('2');
+
+    const secondResp = await page.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/articles/${id}/rate`) &&
+        res.request().method() === 'PATCH' &&
+        JSON.parse(res.request().postData()).rating === 1
+    );
+    expect(secondResp.status()).toBe(200);
+    expect((await getArticle(page, id)).rating).toBe(1);
+    await expect(page.locator('#undo-toast')).toContainText('Rated: like');
+    await expect(selected.locator('.rate-btn.like')).toHaveClass(/active/);
+
+    // Wait past the first request's 500ms hold -- its failure branch must
+    // be skipped entirely (stale token): no rollback of the cache/UI to
+    // null, no "Failed to rate article" toast, the like rating (and its
+    // undo slot) untouched.
+    await page.waitForTimeout(900);
+    expect((await getArticle(page, id)).rating).toBe(1);
+    await expect(selected.locator('.rate-btn.like')).toHaveClass(/active/);
+    await expect(page.locator('#undo-toast')).toContainText('Rated: like');
+    await expect(page.locator('.settings-toast:not(#undo-toast)')).toHaveCount(0);
+
+    // Chromium logs the fulfilled 500 itself as a console error -- expected
+    // side effect of route.fulfill(), not an application bug (same
+    // filtering rationale as the existing rollback test above).
+    const unexpectedErrors = consoleErrors.filter((e) => !e.includes('500 (Internal Server Error)'));
+    expect(unexpectedErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
 
   // M3.2 Task 3 review fix (wave 1), rollback half: the optimistic cache

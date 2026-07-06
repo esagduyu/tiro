@@ -6,7 +6,7 @@ from pathlib import Path
 
 import frontmatter
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tiro.database import get_connection
 from tiro.intelligence.analysis import analyze_article, get_cached_analysis
@@ -194,7 +194,13 @@ async def list_articles(
 
 
 class RateRequest(BaseModel):
-    rating: int | None = None
+    # Required-but-nullable (Finding 3, M3.2 final review): a default of
+    # `None` made an empty body `{}` silently equivalent to `{"rating":
+    # null}` (clear the rating) -- a client bug (missing field) and an
+    # explicit clear were indistinguishable. `Field(...)` makes the key
+    # itself required (missing `rating` -> 422), while the field's `int |
+    # None` type still accepts an explicit `{"rating": null}` to clear.
+    rating: int | None = Field(...)
 
 
 @router.patch("/{article_id}/rate")
