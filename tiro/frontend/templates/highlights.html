@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Tiro ⁊ Highlights{% endblock %}
+{% block nav_highlights %}active{% endblock %}
+
+{% block content %}
+<section class="highlights-view">
+    <div class="highlights-view-header">
+        <h2>Highlights</h2>
+        <p class="highlights-view-sub">Every highlight across your library, grouped by article, newest first.</p>
+    </div>
+
+    <div class="highlights-filters">
+        <div id="highlights-color-filters" class="highlights-filter-colors">
+            <button type="button" class="hl-filter-chip" data-color="yellow">
+                <span class="highlight-color-dot" data-color="yellow"></span>Yellow
+            </button>
+            <button type="button" class="hl-filter-chip" data-color="green">
+                <span class="highlight-color-dot" data-color="green"></span>Green
+            </button>
+            <button type="button" class="hl-filter-chip" data-color="blue">
+                <span class="highlight-color-dot" data-color="blue"></span>Blue
+            </button>
+            <button type="button" class="hl-filter-chip" data-color="pink">
+                <span class="highlight-color-dot" data-color="pink"></span>Pink
+            </button>
+        </div>
+        <div class="highlights-filter-row">
+            <select id="highlights-source-select" class="highlights-source-select">
+                <option value="">All sources</option>
+            </select>
+            <label class="highlights-date-label">From <input type="date" id="highlights-date-from"></label>
+            <label class="highlights-date-label">To <input type="date" id="highlights-date-to"></label>
+            <button type="button" id="highlights-filter-clear" class="filter-show-more" style="display: none;">Clear filters</button>
+        </div>
+    </div>
+
+    <div id="highlights-status" class="settings-status">
+        <div class="settings-loading">
+            <div class="digest-spinner"></div>
+            <p>Loading highlights...</p>
+        </div>
+    </div>
+
+    <div id="highlights-groups" class="highlights-groups"></div>
+
+    <div id="highlights-empty" class="empty-state" style="display: none;">
+        <h2>No highlights yet</h2>
+        <p>Select text in the reader and choose a color to create your first highlight.</p>
+    </div>
+
+    <div id="highlights-load-more-wrap" class="highlights-load-more-wrap" style="display: none;">
+        <button type="button" id="highlights-load-more" class="sources-row-btn">Load more</button>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/highlights.js?v={{ static_v }}"></script>
+{% endblock %}

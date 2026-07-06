@@ -176,6 +176,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 ### Reading
 
 - **Clean reader** — Distraction-free article view with full markdown rendering
+- **Highlights & notes** — Select text to highlight it in one of 4 colors (painted via the CSS Custom Highlight API, no DOM mutation), optionally attach a note to a highlight, or keep a separate whole-article note. Browse every highlight across your library — filterable by color, source, and date — at `/highlights`.
 - **Listen to articles** — OpenAI TTS reads articles aloud with streaming playback (starts in ~2s), cached as MP3. Falls back to browser speech synthesis when no OpenAI key is configured.
 - **Semantic search** — Find articles by meaning, not just keywords
 - **Related articles** — Auto-computed on save with AI-generated connection notes
@@ -395,6 +396,7 @@ Full bundle format (metadata.json keys, markdown frontmatter, OPML semantics, id
 | `c` | Classify / reclassify inbox |
 | `g` | Go to stats |
 | `v` | Go to knowledge graph |
+| `h` | Go to highlights |
 | `?` | Show shortcuts overlay |
 
 ### Reader
@@ -411,6 +413,7 @@ Full bundle format (metadata.json keys, markdown frontmatter, OPML semantics, id
 | `d` | Go to digest |
 | `g` | Go to stats |
 | `v` | Go to knowledge graph |
+| `h` | Go to highlights |
 | `?` | Show shortcuts overlay |
 
 ### Stats

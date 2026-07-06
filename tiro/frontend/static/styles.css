@@ -1604,6 +1604,77 @@ main {
     font-weight: 600;
 }
 
+/* --- Selection annotation toolbar (M2.2) ---
+   Positioned via inline left/top (in viewport px, `position: fixed`) set by
+   reader.js's showAnnotationToolbar() — .open only toggles visibility.
+   Color dot backgrounds are fixed hex values, deliberately NOT theme
+   variables: they represent literal highlighter-pen colors (same yellow/
+   green/blue/pink regardless of light/dark theme), matching the fixed
+   `COLORS` set tiro/api/routes_annotations.py validates against. Contrast
+   for the PAINTED highlight fill itself (against reader body text) is
+   handled per-theme in themes/papyrus.css and themes/roman-night.css's
+   ::highlight() rules, not here. */
+
+.annotate-toolbar {
+    display: none;
+    position: fixed;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--tiro-bg);
+    border: 1px solid var(--tiro-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    padding: 0.4rem 0.5rem;
+    z-index: 120;
+}
+
+.annotate-toolbar.open {
+    display: flex;
+}
+
+.annotate-color-btn {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid var(--tiro-border);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.annotate-color-btn:hover {
+    transform: scale(1.15);
+}
+
+.annotate-color-btn[data-color="yellow"] { background: #E8C34A; }
+.annotate-color-btn[data-color="green"]  { background: #7FAE5D; }
+.annotate-color-btn[data-color="blue"]   { background: #6FA0CE; }
+.annotate-color-btn[data-color="pink"]   { background: #D98CB2; }
+
+.annotate-toolbar-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--tiro-border);
+    margin: 0 0.1rem;
+    flex-shrink: 0;
+}
+
+.annotate-toolbar-btn {
+    border: none;
+    background: none;
+    color: var(--tiro-fg-secondary);
+    font-size: 0.85rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.annotate-toolbar-btn:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
+}
+
 /* --- View tabs (All Articles / Daily Digest) --- */
 
 .view-tabs {
@@ -2392,6 +2463,281 @@ main {
 .analysis-refresh-btn:hover {
     background: var(--tiro-bg-hover);
     color: var(--tiro-fg-secondary);
+}
+
+/* --- Highlights & Notes panel (M2.2 Task 3) ---
+   .highlights-panel reuses .analysis-panel's slide-in/backdrop/close-button
+   mechanics (same class applied in reader.html) for open/close consistency;
+   everything below is content specific to this panel only. */
+
+.note-drawer {
+    display: none;
+    margin-bottom: 1.25rem;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid var(--tiro-border);
+}
+
+.note-drawer.open {
+    display: block;
+}
+
+.note-drawer-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--tiro-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.5rem;
+}
+
+.note-textarea {
+    width: 100%;
+    min-height: 80px;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--tiro-fg);
+    background: var(--tiro-bg-surface);
+    border: 1px solid var(--tiro-border);
+    border-radius: 6px;
+    padding: 0.6rem 0.7rem;
+}
+
+.note-preview {
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: var(--tiro-fg-secondary);
+    margin-top: 0.5rem;
+}
+
+.note-preview:empty {
+    display: none;
+}
+
+.note-preview p {
+    margin-bottom: 0.6rem;
+}
+
+.note-drawer-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+}
+
+.note-save-btn,
+.note-clear-btn,
+.highlight-note-save-btn,
+.highlight-note-preview-toggle-btn,
+.highlight-note-cancel-btn {
+    padding: 0.35rem 0.85rem;
+    border-radius: 5px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border: 1px solid var(--tiro-border);
+    background: none;
+    color: var(--tiro-fg-secondary);
+}
+
+.note-save-btn,
+.highlight-note-save-btn {
+    border-color: var(--tiro-accent);
+    background: var(--tiro-accent);
+    color: white;
+}
+
+.note-save-btn:hover,
+.highlight-note-save-btn:hover {
+    background: var(--tiro-accent-hover);
+}
+
+.note-clear-btn:hover,
+.highlight-note-preview-toggle-btn:hover,
+.highlight-note-cancel-btn:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
+}
+
+.highlights-empty {
+    font-size: 0.85rem;
+    color: var(--tiro-muted);
+    padding: 1.5rem 0;
+    text-align: center;
+}
+
+.highlights-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.highlight-row {
+    border: 1px solid var(--tiro-border);
+    border-radius: 6px;
+    padding: 0.6rem 0.7rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.highlight-row:hover {
+    background: var(--tiro-bg-hover);
+}
+
+.highlight-row-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.highlight-color-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 0.3rem;
+}
+
+.highlight-color-dot[data-color="yellow"],
+.highlight-color-btn[data-color="yellow"] { background: #E8C34A; }
+.highlight-color-dot[data-color="green"],
+.highlight-color-btn[data-color="green"]  { background: #7FAE5D; }
+.highlight-color-dot[data-color="blue"],
+.highlight-color-btn[data-color="blue"]   { background: #6FA0CE; }
+.highlight-color-dot[data-color="pink"],
+.highlight-color-btn[data-color="pink"]   { background: #D98CB2; }
+
+.highlight-quote {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--tiro-fg);
+    flex: 1;
+}
+
+.highlight-quote-full {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--tiro-fg-secondary);
+    font-style: italic;
+}
+
+.highlight-note-indicator {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    margin-left: 0.35rem;
+}
+
+.highlight-anchor-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 10px;
+    margin-bottom: 0.4rem;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-gold-hover);
+}
+
+.highlight-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+}
+
+.highlight-color-picker {
+    display: flex;
+    gap: 0.3rem;
+    margin-right: 0.3rem;
+}
+
+.highlight-color-btn {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--tiro-border);
+    cursor: pointer;
+    padding: 0;
+}
+
+.highlight-color-btn:hover {
+    transform: scale(1.15);
+}
+
+.highlight-note-btn,
+.highlight-delete-btn {
+    border: none;
+    background: none;
+    color: var(--tiro-muted);
+    font-size: 0.75rem;
+    cursor: pointer;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+}
+
+.highlight-note-btn:hover,
+.highlight-delete-btn:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
+}
+
+.highlight-note-editor {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--tiro-border);
+}
+
+.highlight-note-textarea {
+    width: 100%;
+    min-height: 60px;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--tiro-fg);
+    background: var(--tiro-bg-surface);
+    border: 1px solid var(--tiro-border);
+    border-radius: 5px;
+    padding: 0.5rem 0.6rem;
+}
+
+.highlight-note-preview {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--tiro-fg-secondary);
+}
+
+.highlight-note-preview p {
+    margin-bottom: 0.5rem;
+}
+
+.highlight-note-actions {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.4rem;
+}
+
+.highlights-warning-section {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--tiro-border);
+}
+
+.highlights-warning-header {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--tiro-gold-hover);
+    margin-bottom: 0.3rem;
+}
+
+.highlights-warning-hint {
+    font-size: 0.75rem;
+    color: var(--tiro-muted);
+    line-height: 1.4;
+    margin-bottom: 0.6rem;
+}
+
+.highlights-warning-section .highlights-list {
+    margin-top: 0;
 }
 
 /* --- Keyboard-selected article --- */
@@ -3606,4 +3952,165 @@ main {
     margin-top: 0.15rem;
     font-size: 0.72rem;
     opacity: 0.7;
+}
+
+/* --- Highlights review view (/highlights) (M2.2 Task 4) ---
+   Rows/color-dots reuse the existing .highlight-row/.highlight-color-dot/
+   .highlight-quote classes (M2.2 Task 3, above) — only page-level chrome
+   (filter bar, article grouping, load-more) is new here. */
+
+.highlights-view {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.highlights-view-header h2 {
+    margin: 0 0 0.35rem;
+}
+
+.highlights-view-sub {
+    margin: 0 0 1.25rem;
+    color: var(--tiro-muted);
+    font-size: 0.85rem;
+}
+
+.highlights-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid var(--tiro-border);
+}
+
+.highlights-filter-colors {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.hl-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 14px;
+    background: none;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-family: inherit;
+    color: var(--tiro-fg-secondary);
+    transition: all 0.15s;
+}
+
+.hl-filter-chip:hover {
+    background: var(--tiro-bg-hover);
+}
+
+.hl-filter-chip.active {
+    background: var(--tiro-bg-surface);
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+    font-weight: 500;
+}
+
+.highlights-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.highlights-source-select {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 5px;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-fg);
+    font-size: 0.8rem;
+    font-family: inherit;
+}
+
+.highlights-date-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--tiro-muted);
+}
+
+.highlights-date-label input[type="date"] {
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 5px;
+    background: var(--tiro-bg-surface);
+    color: var(--tiro-fg);
+    font-size: 0.78rem;
+    font-family: inherit;
+}
+
+.highlights-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
+}
+
+.highlights-group-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.highlights-group-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--tiro-fg);
+}
+
+.highlights-group-title a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.highlights-group-title a:hover {
+    text-decoration: underline;
+}
+
+.highlights-group-source {
+    font-size: 0.78rem;
+    color: var(--tiro-muted);
+}
+
+.hl-list-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.hl-list-meta {
+    font-size: 0.72rem;
+    color: var(--tiro-muted);
+    margin-left: 1.35rem;
+}
+
+.hl-list-note {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    margin-left: 1.35rem;
+    font-size: 0.78rem;
+    color: var(--tiro-fg-secondary);
+}
+
+.hl-list-note-icon {
+    flex-shrink: 0;
+}
+
+.highlights-load-more-wrap {
+    display: flex;
+    justify-content: center;
+    margin-top: 1.5rem;
 }

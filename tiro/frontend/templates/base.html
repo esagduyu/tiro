@@ -49,6 +49,10 @@
                 <span class="sidebar-icon">&#128220;</span>
                 <span class="sidebar-label">Wiki</span>
             </a>
+            <a href="/highlights" class="sidebar-item {% block nav_highlights %}{% endblock %}">
+                <span class="sidebar-icon">&#128397;</span>
+                <span class="sidebar-label">Highlights</span>
+            </a>
             <a href="/sources" class="sidebar-item {% block nav_sources %}{% endblock %}">
                 <span class="sidebar-icon">&#128218;</span>
                 <span class="sidebar-label">Sources</span>
@@ -159,20 +163,23 @@
          articles). The fix: this import map rewrites the bare specifier
          to the SAME versioned URL the entry tag below requests, so both
          paths resolve to one identical URL and the module loads exactly
-         once. Deliberately minimal — only sidebar.js and core.js are
-         mapped (the two actually reached via relative `import`); the
-         per-page leaf entry modules (inbox.js/digest.js/reader.js/
-         sources.js/wiki.js) are loaded ONLY via `<script src>` tags that
-         already carry `?v={{ static_v }}` directly and are never
-         `import`ed by anything else, so a map entry for them would be
-         inert (import maps rewrite `import` specifiers, not `src`
-         attributes) — see .superpowers/sdd/task-5-report.md for the full
-         reasoning. Must appear before any `<script type="module">` tag. -->
+         once. Covers every module actually reached via relative `import`:
+         core.js and sidebar.js (imported by every page's entry module), and
+         annotate.js (imported only by reader.js — reader.js's own pure
+         markdown<->plain-text projection core, added in M2.2). The per-page
+         leaf entry modules (inbox.js/digest.js/reader.js/sources.js/
+         wiki.js) are loaded ONLY via `<script src>` tags that already carry
+         `?v={{ static_v }}` directly and are never `import`ed by anything
+         else, so a map entry for them would be inert (import maps rewrite
+         `import` specifiers, not `src` attributes) — see
+         .superpowers/sdd/task-5-report.md for the full reasoning. Must
+         appear before any `<script type="module">` tag. -->
     <script type="importmap">
     {
         "imports": {
             "/static/js/core.js": "/static/js/core.js?v={{ static_v }}",
-            "/static/js/sidebar.js": "/static/js/sidebar.js?v={{ static_v }}"
+            "/static/js/sidebar.js": "/static/js/sidebar.js?v={{ static_v }}",
+            "/static/js/annotate.js": "/static/js/annotate.js?v={{ static_v }}"
         }
     }
     </script>

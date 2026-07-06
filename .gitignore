@@ -22,6 +22,7 @@ docs/
 # Playwright
 playwright-tests/*
 !playwright-tests/phase0.spec.js
+!playwright-tests/annotations.spec.js
 !playwright-tests/package.json
 !playwright-tests/README.md
 .playwright-mcp/
