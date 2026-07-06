@@ -401,6 +401,17 @@ def test_post_remote_config_rejects_url_with_no_netloc(authenticated_client):
     assert r.status_code == 400
 
 
+def test_post_remote_config_rejects_hostless_authority(authenticated_client):
+    """"https://:8000" has a non-empty netloc (":8000") so `not parsed.netloc`
+    alone doesn't catch it -- but urlparse's `.hostname` is None (nothing
+    precedes the port), so it must still 400 rather than persist as a
+    remote_url nothing can resolve to."""
+    r = authenticated_client.post(
+        "/api/remote/config", json={"remote_url": "https://:8000", "allow_hostname": False}
+    )
+    assert r.status_code == 400
+
+
 def test_post_remote_config_persists_remote_url_without_touching_allowlist(
     authenticated_client, configured_library
 ):

@@ -246,5 +246,7 @@ def test_static_version_bumped_for_saved_views_ui():
     # Bumped 61 -> 62 in M2.3 Task 2 (reader telemetry tracker landed in
     # reader.js under the old "61" pin), then 62 -> 63 in M3.0 Task 4 (the
     # LAN-over-HTTP warning banner landed in sidebar.js/base.html/styles.css
-    # under the old "62" pin).
-    assert STATIC_VERSION == "63"
+    # under the old "62" pin), then 63 -> 64 in M3.1 Task 5 (PWA closeout:
+    # manifest/SW/offline-queue/A2HS/remote-wizard work landed across
+    # M3.1 Tasks 1-4 under the old "63" pin).
+    assert STATIC_VERSION == "64"

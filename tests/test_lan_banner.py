@@ -18,7 +18,7 @@ Covers:
 
 STATIC_VERSION's 62->63 bump is exercised by the existing pins in
 test_views.py (test_static_version_bumped_for_saved_views_ui) and
-test_wiki_views.py (test_static_version_is_63) — not duplicated here.
+test_wiki_views.py (test_static_version_is_64) — not duplicated here.
 """
 
 import argparse

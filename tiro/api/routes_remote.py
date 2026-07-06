@@ -98,7 +98,12 @@ class RemoteConfigRequest(BaseModel):
 @router.post("/config")
 async def post_remote_config(request: Request, body: RemoteConfigRequest):
     parsed = urlparse(body.remote_url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    # `not parsed.netloc` alone lets a hostless authority like "https://:8000"
+    # through -- netloc is the non-empty string ":8000", but urlparse's own
+    # `.hostname` property is None for it (nothing before the port/`@`).
+    # Require BOTH so a scheme-only-plus-port URL 400s instead of persisting
+    # as a "remote_url" nothing can actually reach.
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
         raise HTTPException(status_code=400, detail="remote_url must be a valid http(s) URL")
 
     config = request.app.state.config

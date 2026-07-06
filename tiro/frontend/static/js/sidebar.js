@@ -342,10 +342,13 @@ async function drainSaveQueue() {
 
             let res;
             try {
+                // NOTE: only `url` is sent -- IngestURLRequest (routes_ingest.py)
+                // has no `is_vip` field, so `next.is_vip` (tracked in the queue
+                // entry itself, see save-queue.js) was dead weight on the wire.
                 res = await fetch('/api/ingest/url', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: next.url, is_vip: !!next.is_vip }),
+                    body: JSON.stringify({ url: next.url }),
                 });
             } catch (e) {
                 // Still offline (or the network flapped again) -- leave
@@ -371,9 +374,13 @@ async function drainSaveQueue() {
                 showToast(`Saved queued article: ${json?.data?.title || next.url}`, 'success');
                 updateUnreadBadge();
                 notifyContentSaved();
-            } else if (res.status === 409) {
+            } else if (res.status === 409 && (json === null || json?.error === 'already_saved')) {
                 // already_saved -- silent, nothing to tell the user that
-                // matters at this point.
+                // matters at this point. Checks the structured body's
+                // `error` field (routes_ingest.py's only 409 shape) rather
+                // than trusting the status code alone, with a status-only
+                // fallback for the (should-never-happen) case where the
+                // response body didn't parse as JSON at all.
             } else {
                 showToast(`Failed to save queued article: ${next.url}`, 'error');
             }
