@@ -156,5 +156,15 @@
       }
     });
   </script>
+  <!-- Service worker registration (M3.1 Task 2): login.html is standalone
+       and doesn't load sidebar.js (see the PWA-tags comment above), but a
+       phone can land here with no session yet -- installability and
+       offline support should start from the very first page, so this
+       imports the exact same sw-register.js module sidebar.js uses on
+       every other page rather than duplicating the registration logic. -->
+  <script type="module">
+    import { registerServiceWorker } from "/static/js/sw-register.js?v={{ static_v }}";
+    registerServiceWorker();
+  </script>
 </body>
 </html>

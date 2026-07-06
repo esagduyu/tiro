@@ -1,15 +1,16 @@
-"""M3.1 Task 1: PWA manifest + icons.
+"""M3.1 Task 1 + Task 2: PWA manifest/icons, service worker, offline page.
 
 Covers the unauthenticated GET /manifest.webmanifest route in tiro/app.py,
 the generated icon assets in tiro/frontend/static/icons/, and the manifest-
-related tags in base.html. The route-walk allowlist entry for this path
-lives in tests/test_auth.py (test_route_walk_everything_gated) alongside
-its own explanatory comment, not here.
+related tags in base.html (Task 1); GET /sw.js and GET /offline plus the
+offline.html template (Task 2). The route-walk allowlist entries for these
+paths live in tests/test_auth.py (test_route_walk_everything_gated)
+alongside their own explanatory comments, not here.
 """
 
 import json
 
-from tiro.app import FRONTEND_DIR
+from tiro.app import FRONTEND_DIR, STATIC_VERSION
 
 
 def test_manifest_fetchable_unauthenticated(auth_client):
@@ -80,3 +81,83 @@ def test_base_html_has_manifest_link_and_icon_tags():
     assert 'name="theme-color"' in base_html
     assert 'rel="apple-touch-icon"' in base_html
     assert "/static/icons/tiro-192.png" in base_html
+
+
+# ---------------------------------------------------------------------------
+# M3.1 Task 2: service worker + offline fallback
+# ---------------------------------------------------------------------------
+
+
+def test_sw_js_fetchable_unauthenticated_with_correct_content_type(auth_client):
+    r = auth_client.get("/sw.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+
+
+def test_sw_js_embeds_current_static_version_and_no_placeholder_leaks(auth_client):
+    """The served response must have the literal __STATIC_VERSION__
+    placeholder substituted for the real, current STATIC_VERSION constant --
+    never hardcode the version number here, since T5 will bump it and this
+    test must not need touching."""
+    r = auth_client.get("/sw.js")
+    body = r.text
+    assert "__STATIC_VERSION__" not in body
+    # Cache names are built at runtime from a `VERSION` const via template
+    # literals (`tiro-${VERSION}-static`), not literal "tiro-63-static"
+    # text in the source -- assert the substituted VERSION constant itself.
+    assert f'const VERSION = "{STATIC_VERSION}"' in body
+    assert "tiro-${VERSION}-static" in body
+    assert "tiro-${VERSION}-articles" in body
+    assert f"/static/js/core.js?v={STATIC_VERSION}" in body
+
+
+def test_sw_js_sets_service_worker_allowed_and_no_cache_headers(auth_client):
+    r = auth_client.get("/sw.js")
+    assert r.headers.get("service-worker-allowed") == "/"
+    assert r.headers.get("cache-control") == "no-cache"
+
+
+def test_sw_js_source_file_is_valid_at_rest_with_placeholder(auth_client):
+    """The on-disk file (also harmlessly reachable via the open /static
+    mount, same as manifest.webmanifest in Task 1) still carries the literal
+    placeholder -- only the /sw.js route substitutes it."""
+    source = (FRONTEND_DIR / "static" / "sw.js").read_text()
+    assert "__STATIC_VERSION__" in source
+    r = auth_client.get("/static/sw.js")
+    assert r.status_code == 200
+    assert "__STATIC_VERSION__" in r.text
+
+
+def test_offline_page_fetchable_unauthenticated(auth_client):
+    r = auth_client.get("/offline")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+
+
+def test_offline_html_is_standalone_and_pulls_core_and_vendor():
+    offline_html = (FRONTEND_DIR / "templates" / "offline.html").read_text()
+    # Standalone: doesn't extend base.html (no {% extends %} block).
+    assert "{% extends" not in offline_html
+    assert "/static/js/core.js" in offline_html
+    assert "/static/vendor/marked.min.js" in offline_html
+    assert "/static/vendor/purify.min.js" in offline_html
+    assert "renderMarkdown" in offline_html
+
+
+def test_sw_routing_module_exists_and_is_imported_by_sw_js():
+    routing_path = FRONTEND_DIR / "static" / "js" / "sw-routing.js"
+    assert routing_path.is_file()
+    assert "export function swRouteFor" in routing_path.read_text()
+    sw_source = (FRONTEND_DIR / "static" / "sw.js").read_text()
+    assert "/static/js/sw-routing.js" in sw_source
+    assert "swRouteFor" in sw_source
+
+
+def test_sw_register_module_exists_and_is_wired_into_sidebar_and_login():
+    register_path = FRONTEND_DIR / "static" / "js" / "sw-register.js"
+    assert register_path.is_file()
+    assert "export function registerServiceWorker" in register_path.read_text()
+    sidebar_js = (FRONTEND_DIR / "static" / "js" / "sidebar.js").read_text()
+    assert "registerServiceWorker" in sidebar_js
+    login_html = (FRONTEND_DIR / "templates" / "login.html").read_text()
+    assert "registerServiceWorker" in login_html

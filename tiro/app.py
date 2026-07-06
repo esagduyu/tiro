@@ -579,6 +579,86 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
             media_type="application/manifest+json",
         )
 
+    @app.get("/sw.js")
+    async def service_worker():
+        """Service worker script (M3.1 Task 2): deliberately UNAUTHENTICATED,
+        same allowlist ceremony as /manifest.webmanifest above -- registration
+        (`navigator.serviceWorker.register('/sw.js')`) runs from sidebar.js
+        AND from login.html (a phone can land on /login with no session yet,
+        and installability/offline support should start there too), so this
+        route must be reachable pre-auth. No user data here either: the
+        script is 100% static logic (cache names, routing rules) with zero
+        per-user content baked in.
+
+        The file on disk (tiro/frontend/static/sw.js) is a real, lintable,
+        syntactically-valid .js file at rest, carrying the literal
+        placeholder `__STATIC_VERSION__` in its cache names and its import
+        of sw-routing.js -- it cannot read Jinja (browsers fetch .js files
+        as plain text, and the point of a service worker script is that it
+        IS the raw bytes the browser executes, not a template render). This
+        route is the single substitution point: read the file, swap the
+        placeholder for the real STATIC_VERSION constant (the exact same
+        single-source-of-truth every `?v={{ static_v }}` static asset link
+        already reads), and serve the result. Mirrors how `?v=` cache-busts
+        everything else -- just via a `.replace()` instead of Jinja
+        interpolation, since sw.js isn't rendered through the Jinja2Templates
+        instance at all.
+
+        `Service-Worker-Allowed: /` is defensive rather than strictly
+        required: a script served from the document root (`/sw.js`) already
+        gets the browser's maximum default scope (`/`), matching the
+        register() call's requested scope of `/` with no header needed. Sent
+        anyway so this route keeps working unchanged if the physical
+        serving path ever moves (e.g. under `/static/`) while the requested
+        scope stays `/`.
+
+        `Cache-Control: no-cache` (not no-store): browsers already force a
+        byte-comparison re-check of the top-level SW script periodically
+        regardless of headers, but `no-cache` (revalidate every time) keeps
+        this app from ever serving a stale cached copy of the *substituted*
+        response out of the ordinary HTTP cache in the window between
+        deploys, without disabling caching for conditional-GET purposes.
+        """
+        from fastapi.responses import Response
+
+        source = (FRONTEND_DIR / "static" / "sw.js").read_text()
+        body = source.replace("__STATIC_VERSION__", STATIC_VERSION)
+        response = Response(content=body, media_type="application/javascript")
+        response.headers["Service-Worker-Allowed"] = "/"
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @app.get("/offline", response_class=HTMLResponse)
+    async def offline_page(request: Request):
+        """Offline fallback page (M3.1 Task 2): deliberately UNAUTHENTICATED,
+        same allowlist ceremony as /manifest.webmanifest and /sw.js above.
+        The service worker's navigation fallback (see sw.js's
+        `navigate-offline-fallback` route) serves this page from its own
+        precache when a real network fetch fails -- at that moment the
+        browser has no server connection at all, so a page gated on
+        `require_page_auth` (which needs a live session-cookie check against
+        SQLite) could never be reached anyway. This page renders ONLY what
+        the browser's own Cache Storage already holds client-side (a list of
+        previously-viewed articles' cached JSON, read directly via the Cache
+        API in offline.html's own script) -- zero server-side user data ever
+        flows through this route, so there is no confidentiality question,
+        just the allowlist ceremony.
+
+        Deliberately a standalone template (does not extend base.html),
+        mirroring login.html's own "standalone is safer" precedent: base.html
+        pulls in sidebar.js (unread-badge/saved-views fetches that all 401
+        when offline-and-unauthenticated anyway, harmlessly swallowed by
+        their own try/catches, but pointless network chatter on a page whose
+        entire point is "the network already failed") and assumes an
+        authenticated theme context this route doesn't have. offline.html
+        instead carries its own minimal inline styles (same pattern as
+        login.html), so its precache footprint (see sw.js's PRECACHE_URLS)
+        stays tight: itself, core.js (for renderMarkdown), and the two
+        vendor scripts renderMarkdown depends on -- no theme CSS, no
+        base.html chrome assets.
+        """
+        return templates.TemplateResponse(request, "offline.html", {})
+
     @app.get("/healthz")
     async def healthz(request: Request):
         body = {"status": "ok", "version": app.version}

@@ -24,6 +24,7 @@
  */
 
 import { esc } from "./core.js";
+import { registerServiceWorker } from "./sw-register.js";
 
 /* ---- Theme management ---- */
 
@@ -585,4 +586,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // LAN-over-HTTP warning banner
     setupLanBanner();
+
+    // Service worker (M3.1 Task 2): feature-detected, silent, registered
+    // once per page load (see sw-register.js's own header comment).
+    registerServiceWorker();
 });
