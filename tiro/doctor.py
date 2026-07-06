@@ -11,6 +11,7 @@ server's writes can produce false positives.
 import logging
 from pathlib import Path
 
+from tiro.annotations import annotations_dir, notes_dir, reconcile_annotations, sidecar_stem
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.vectorstore import get_collection, retry_pending_vectors
@@ -44,6 +45,16 @@ def scan(config: TiroConfig) -> dict:
         ).fetchone()["n"]
         wiki_page_slugs = {
             row["slug"] for row in conn.execute("SELECT slug FROM wiki_pages").fetchall()
+        }
+        highlight_article_ids = {
+            r["article_id"]
+            for r in conn.execute("SELECT DISTINCT article_id FROM highlights").fetchall()
+        }
+        note_article_ids = {
+            r["article_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT article_id FROM notes WHERE highlight_id IS NULL"
+            ).fetchall()
         }
     finally:
         conn.close()
@@ -105,6 +116,39 @@ def scan(config: TiroConfig) -> dict:
         }
     wiki_index_drift = len(wiki_files ^ wiki_page_slugs)
 
+    # Annotations (highlights/notes, Phase 2 M2.1) index drift: same cheap
+    # presence-based comparison as wiki_index_drift above (stems on disk vs.
+    # stems with rows), not a full reconcile -- reconcile_annotations() does
+    # the real content-level matching and row repair, on --fix only. Guarded
+    # separately from drift: a whole sidecar directory missing while rows
+    # still reference it is a directory mishap, not "the user deleted every
+    # highlight" -- see reconcile_annotations()'s docstring for the guard
+    # rationale. structurally_consistent (below) folds the guard in so a
+    # guard event stays visible in the exit code even without --fix; plain
+    # drift is housekeeping only, same as wiki_index_drift.
+    ann_dir = annotations_dir(config)
+    nt_dir = notes_dir(config)
+    ann_file_stems = {p.stem for p in ann_dir.glob("*.jsonl")} if ann_dir.exists() else set()
+    note_file_stems = {p.stem for p in nt_dir.glob("*.md")} if nt_dir.exists() else set()
+    stem_by_article_id = {row["id"]: sidecar_stem(row) for row in rows}
+    highlight_stems_with_rows = {
+        stem_by_article_id[aid] for aid in highlight_article_ids if aid in stem_by_article_id
+    }
+    note_stems_with_rows = {
+        stem_by_article_id[aid] for aid in note_article_ids if aid in stem_by_article_id
+    }
+
+    annotations_index_drift = 0
+    annotations_guarded = False
+    if ann_dir.exists():
+        annotations_index_drift += len(ann_file_stems ^ highlight_stems_with_rows)
+    elif highlight_article_ids:
+        annotations_guarded = True
+    if nt_dir.exists():
+        annotations_index_drift += len(note_file_stems ^ note_stems_with_rows)
+    elif note_article_ids:
+        annotations_guarded = True
+
     report = {
         "total_articles": len(rows),
         "orphaned_markdown": orphaned_markdown,
@@ -120,17 +164,26 @@ def scan(config: TiroConfig) -> dict:
         "unreferenced_authors": unreferenced_authors,
         "expired_sessions": expired_sessions,
         "wiki_index_drift": wiki_index_drift,
+        "annotations_index_drift": annotations_index_drift,
+        "annotations_guarded": annotations_guarded,
     }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",
         "vector_missing", "vector_unmarked", "vector_failed",
         "audio_rows_missing_file", "audio_files_without_row",
     )
-    report["structurally_consistent"] = not any(report[k] for k in structural_keys)
+    # annotations_guarded folds into structural (not just "clean"): a guard
+    # event means rows are one directory-restore away from a mass deletion
+    # that files-win would otherwise apply -- it must stay visible in the
+    # exit code even without --fix, the same way a mass-delete-guard refusal
+    # for markdown keeps missing_markdown non-empty above.
+    report["structurally_consistent"] = (
+        not any(report[k] for k in structural_keys) and not annotations_guarded
+    )
     report["clean"] = report["structurally_consistent"] and \
         unreferenced_tags == 0 and unreferenced_entities == 0 and \
         unreferenced_authors == 0 and expired_sessions == 0 and \
-        wiki_index_drift == 0
+        wiki_index_drift == 0 and annotations_index_drift == 0
     return report
 
 
@@ -316,6 +369,36 @@ def fix(config: TiroConfig) -> dict:
             f"{wiki_result['unresolved_articles']} unresolved article ref(s), "
             f"{wiki_result['duplicate_uids']} duplicate uid(s))"
         )
+
+    # (g) annotations (highlights/notes, Phase 2 M2.1) index drift/guard ->
+    # reconcile_annotations() (files win). NEVER writes or deletes sidecar
+    # file CONTENT -- only moves true orphans into .orphaned/ and repairs
+    # the derived highlights/notes rows. A guard event (a whole sidecar
+    # directory missing while rows reference it) still runs the reconcile
+    # -- reconcile_annotations() itself is what holds the guard and reports
+    # it back via the 'guarded' count, same "refuse, don't delete" posture
+    # as the markdown mass-delete guard above.
+    if report["annotations_index_drift"] or report["annotations_guarded"]:
+        ann_result = reconcile_annotations(config)
+        actions.append(
+            "reconciled annotations: "
+            f"{ann_result['highlights_inserted']} highlight(s) inserted, "
+            f"{ann_result['highlights_updated']} updated, "
+            f"{ann_result['highlights_deleted']} deleted; "
+            f"{ann_result['notes_inserted']} note(s) inserted, "
+            f"{ann_result['notes_updated']} updated, "
+            f"{ann_result['notes_deleted']} deleted; "
+            f"{ann_result['orphaned_files']} orphaned sidecar(s) moved, "
+            f"{ann_result['malformed_lines']} malformed line(s) skipped"
+            + (
+                f"; {ann_result['guarded']} guard(s) held — a sidecar "
+                "directory is missing while rows still reference it, "
+                "restore it and re-run"
+                if ann_result["guarded"]
+                else ""
+            )
+        )
+        report["annotations_reconcile"] = ann_result
 
     report["actions"] = actions
     return report

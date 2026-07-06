@@ -563,3 +563,100 @@ def test_fix_reconciles_wiki_index_without_touching_surviving_files(initialized_
         ).fetchone()["n"] == 0
     finally:
         conn.close()
+
+
+# --- annotations (highlights/notes, Phase 2 M2.1) index drift ----------------
+
+
+def test_scan_detects_annotations_drift(initialized_library):
+    """A sidecar highlight file with no matching derived row is exactly the
+    mismatch annotations_index_drift is meant to surface -- housekeeping
+    only, same class as wiki_index_drift."""
+    from tiro.annotations import sidecar_stem, write_annotations
+    from tiro.doctor import scan
+
+    config = initialized_library
+    _aid, md_path = _make_article(config, "Has Annotations")
+    stem = sidecar_stem(md_path)
+    write_annotations(config, stem, [{"uid": "H1", "quote": "hi"}])
+
+    report = scan(config)
+    assert report["annotations_index_drift"] >= 1
+    assert report["annotations_guarded"] is False
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is False
+
+
+def test_fix_reconciles_annotations_drift(initialized_library):
+    """--fix runs reconcile_annotations() to heal the derived-row mismatch."""
+    from tiro.annotations import sidecar_stem, write_annotations
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    _aid, md_path = _make_article(config, "Has Annotations 2")
+    stem = sidecar_stem(md_path)
+    write_annotations(config, stem, [{"uid": "H1", "quote": "hi"}])
+
+    result = fix(config)
+    assert any("reconciled annotations" in a for a in result["actions"]), result["actions"]
+
+    report = scan(config)
+    assert report["annotations_index_drift"] == 0
+
+
+def test_scan_detects_annotations_guard(initialized_library):
+    """A highlight row with the annotations/ directory missing entirely is a
+    directory mishap, not "delete everything" -- structural (fails the
+    check) rather than quiet housekeeping."""
+    from tiro.doctor import scan
+    from tiro.migrations import new_ulid
+
+    config = initialized_library
+    aid, _md_path = _make_article(config, "Guarded Article")
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO highlights (uid, article_id, quote_text, color, created_at, updated_at)"
+            " VALUES (?, ?, 'q', 'yellow', '2026-01-01', '2026-01-01')",
+            (new_ulid(), aid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert not (config.library / "annotations").exists()
+
+    report = scan(config)
+    assert report["annotations_guarded"] is True
+    assert report["structurally_consistent"] is False
+
+
+def test_fix_respects_annotations_guard(initialized_library):
+    """--fix must NOT delete highlight rows just because the annotations/
+    directory happens to be missing -- it reports the guard instead."""
+    from tiro.doctor import fix
+    from tiro.migrations import new_ulid
+
+    config = initialized_library
+    aid, _md_path = _make_article(config, "Guarded Fix Article")
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO highlights (uid, article_id, quote_text, color, created_at, updated_at)"
+            " VALUES (?, ?, 'q', 'yellow', '2026-01-01', '2026-01-01')",
+            (new_ulid(), aid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = fix(config)
+    assert any("guard" in a.lower() for a in result["actions"]), result["actions"]
+
+    conn = get_connection(config.db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM highlights WHERE article_id = ?", (aid,)
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 1  # not deleted despite files-win -- guard held

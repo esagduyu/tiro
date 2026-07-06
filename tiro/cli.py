@@ -516,10 +516,17 @@ def cmd_doctor(args):
                     print(f"  - {item}")
         housekeeping_found = False
         for key in ("unreferenced_tags", "unreferenced_entities",
-                    "unreferenced_authors", "expired_sessions", "wiki_index_drift"):
+                    "unreferenced_authors", "expired_sessions", "wiki_index_drift",
+                    "annotations_index_drift"):
             if report[key]:
                 housekeeping_found = True
                 print(f"{key}: {report[key]}")
+        if report.get("annotations_guarded"):
+            print(
+                "annotations_guarded: a highlights/notes sidecar directory is missing "
+                "while index rows still reference it — not deleting rows automatically. "
+                "Restore the directory (annotations/ or notes/) and re-run."
+            )
         if report.get("reembed_failures"):
             print(f"reembed_failures: {report['reembed_failures']}")
         if housekeeping_found:
