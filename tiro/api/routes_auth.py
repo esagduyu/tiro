@@ -23,14 +23,7 @@ def _session_response(request: Request, payload: dict) -> JSONResponse:
     config = request.app.state.config
     token = auth.create_session(config.db_path)
     response = JSONResponse({"success": True, "data": payload})
-    response.set_cookie(
-        auth.SESSION_COOKIE,
-        token,
-        max_age=auth.SESSION_TTL_DAYS * 24 * 3600,
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-    )
+    auth.attach_session_cookie(response, request, token)
     return response
 
 

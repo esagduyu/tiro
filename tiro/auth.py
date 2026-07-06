@@ -11,7 +11,7 @@ import secrets
 from pathlib import Path
 
 import bcrypt
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "tiro_session"
 SESSION_TTL_DAYS = 30
+LOGIN_TOKEN_TTL_MINUTES = 15
 
 
 def _sha256(value: str) -> str:
@@ -83,6 +84,77 @@ def destroy_session(db_path: Path, token: str) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_sha256(token),))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def attach_session_cookie(response: Response, request: Request, token: str) -> None:
+    """Set the session cookie with the one set of flags every login path
+    (password POST /api/auth/login|setup, QR GET /login/qr) must agree on.
+    Factored out so QR login can never drift from the password path's
+    cookie security properties (httponly/samesite/secure)."""
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+
+
+def create_login_token(config: TiroConfig) -> str:
+    """Issue a one-time QR-login token (Phase 3 M3.0 Task 2).
+
+    `secrets.token_urlsafe(32)` is >=128 bits of entropy — brute force is
+    infeasible even against the (deliberately short) 15-minute TTL. Only the
+    SHA-256 hash is ever persisted (same pattern as sessions/api_tokens); the
+    raw token is returned exactly once, to be embedded in the QR code, and
+    is never recoverable from the database afterward.
+    """
+    token = secrets.token_urlsafe(32)
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO login_tokens (token_hash, created_at, expires_at) "
+            "VALUES (?, datetime('now'), datetime('now', ?))",
+            (_sha256(token), f"+{LOGIN_TOKEN_TTL_MINUTES} minutes"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def consume_login_token(config: TiroConfig, token: str) -> bool:
+    """Atomically redeem a one-time login token.
+
+    A single UPDATE ... WHERE used_at IS NULL AND expires_at > now, gated on
+    rowcount == 1, is the only safe way to implement single-use: a
+    SELECT-then-UPDATE has a TOCTOU window where two concurrent requests
+    (e.g. a screenshot of the QR code scanned twice at once) could both
+    observe an unused token and both succeed. The UPDATE's WHERE clause is
+    the single point of truth, evaluated atomically by SQLite for this
+    connection's statement.
+
+    Returns False uniformly for "no such token", "already used", and
+    "expired" — the caller (GET /login/qr) must not distinguish these in
+    its response, since doing so would let an attacker probe token
+    validity/expiry (a timing- or response-shape oracle) without needing
+    the token to actually work.
+    """
+    if not token:
+        return False
+    token_hash = _sha256(token)
+    conn = get_connection(config.db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE login_tokens SET used_at = datetime('now') "
+            "WHERE token_hash = ? AND used_at IS NULL AND expires_at > datetime('now')",
+            (token_hash,),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
     finally:
         conn.close()
 

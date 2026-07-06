@@ -786,3 +786,49 @@ def test_fix_respects_annotations_widened_guard(initialized_library):
     report = scan(config)
     assert report["annotations_guarded"] is True
     assert report["structurally_consistent"] is False
+
+
+def test_login_tokens_purge(initialized_library):
+    """M3.0 Task 2: expired AND used login_tokens are purged the same step
+    expired sessions are (housekeeping, not a structural inconsistency);
+    a live (unexpired, unused) token must survive the purge."""
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO login_tokens (token_hash, created_at, expires_at, used_at) "
+            "VALUES ('expired', datetime('now', '-1 hour'), datetime('now', '-45 minutes'), NULL)"
+        )
+        conn.execute(
+            "INSERT INTO login_tokens (token_hash, created_at, expires_at, used_at) "
+            "VALUES ('used', datetime('now', '-1 hour'), datetime('now', '+1 hour'), datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO login_tokens (token_hash, created_at, expires_at, used_at) "
+            "VALUES ('live', datetime('now'), datetime('now', '+15 minutes'), NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = scan(config)
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is False
+    assert report["expired_login_tokens"] == 2  # expired + used, not live
+
+    result = fix(config)
+    assert any("login token" in a for a in result["actions"]), result["actions"]
+
+    conn = get_connection(config.db_path)
+    try:
+        remaining = {
+            r["token_hash"] for r in conn.execute("SELECT token_hash FROM login_tokens").fetchall()
+        }
+    finally:
+        conn.close()
+    assert remaining == {"live"}
+
+    report = scan(config)
+    assert report["expired_login_tokens"] == 0

@@ -8,6 +8,21 @@ def test_empty_filters():
     assert where == "" and params == []
 
 
+def test_include_snoozed_defaults_permissive():
+    # Default (no exclusion) so callers that never mention snooze — the
+    # digest gather, decay, classifier, MCP search — see snoozed articles
+    # by default; only the inbox route explicitly opts out.
+    where, params = build_article_filters()
+    assert "snoozed_until" not in where
+    assert params == []
+
+
+def test_include_snoozed_false_excludes_future_snoozed():
+    where, params = build_article_filters(include_snoozed=False)
+    assert "a.snoozed_until IS NULL OR a.snoozed_until <= datetime('now')" in where
+    assert params == []
+
+
 def test_decay_and_read_filters():
     where, params = build_article_filters(
         include_decayed=False, decay_threshold=0.1, is_read=False

@@ -20,7 +20,13 @@
     })();
     </script>
 </head>
-<body>
+<body{% if insecure_lan_http %} class="has-lan-banner"{% endif %}>
+    {% if insecure_lan_http %}
+    <div id="lan-http-banner" class="lan-http-banner" role="status">
+        <span class="lan-http-banner-text">Serving unencrypted HTTP on your local network &mdash; use Tailscale Serve or <code>tiro run --cert/--key</code> for HTTPS.</span>
+        <button id="lan-http-banner-dismiss" class="lan-http-banner-dismiss" aria-label="Dismiss">&times;</button>
+    </div>
+    {% endif %}
     <!-- Left sidebar navigation -->
     <nav id="sidebar" class="sidebar">
         <div class="sidebar-brand">

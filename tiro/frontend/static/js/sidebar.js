@@ -435,6 +435,34 @@ function setupSaveModal() {
     }
 }
 
+/* ---- LAN-over-HTTP warning banner (M3.0 Task 4) ----
+   The banner element only exists in the DOM at all when the server decided
+   insecure_lan_http is true (base.html's Jinja conditional) -- so this is
+   entirely about (a) hiding it again on same-tab navigation once dismissed
+   this session, and (b) wiring the dismiss button. sessionStorage (not
+   localStorage): a dismissal shouldn't silently suppress the warning
+   forever across unrelated future sessions/tabs, just for the rest of
+   this one. */
+
+const LAN_BANNER_DISMISSED_KEY = "tiro-lan-banner-dismissed";
+
+function setupLanBanner() {
+    const banner = document.getElementById("lan-http-banner");
+    if (!banner) return;
+
+    if (sessionStorage.getItem(LAN_BANNER_DISMISSED_KEY) === "1") {
+        banner.style.display = "none";
+        document.body.classList.remove("has-lan-banner");
+        return;
+    }
+
+    document.getElementById("lan-http-banner-dismiss")?.addEventListener("click", () => {
+        sessionStorage.setItem(LAN_BANNER_DISMISSED_KEY, "1");
+        banner.style.display = "none";
+        document.body.classList.remove("has-lan-banner");
+    });
+}
+
 /* ---- Keyboard-shortcuts overlay (shared markup in base.html; content
    differs per page). Exported for inbox.js and reader.js, both of which
    `import` these directly — no window re-exposure needed or present. ---- */
@@ -554,4 +582,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Save modal
     setupSaveModal();
+
+    // LAN-over-HTTP warning banner
+    setupLanBanner();
 });

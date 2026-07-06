@@ -183,6 +183,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Knowledge graph** — Interactive d3.js force-directed graph showing entities and tags connected by article co-occurrence. Density slider, click-to-explore article panel.
 - **Content decay** — Unengaged articles naturally fade from digests over time
 - **Reading telemetry (opt-in, local-only)** — Off by default; when enabled from Settings, the reader records scroll depth, active reading time, and per-section dwell for each visit, sent once per page load and stored only in your local SQLite database. Nothing leaves your machine, and it's not in any export or backup — this is a future signal for wiki/digest ranking, not a consumer-facing feature yet.
+- **Snooze (API-only for now)** — `PATCH /api/articles/{id}/snooze` hides an article from the inbox until later, via a preset (tonight / tomorrow / weekend / next week) or a custom time; it reappears automatically once that time passes, with no effect on digests, classification, decay, export, or the MCP server — only the inbox listing hides a snoozed article. There's no inbox UI for it yet; swipe-triage gestures land in a later 0.5 milestone.
 
 ### Library Wiki (alpha)
 
@@ -196,7 +197,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Graph, Stats, Settings. Collapses to icons on narrower screens, hamburger menu on mobile.
 - **Filter panel** — Right-edge tab opens a slide-out panel with 11 filter facets: AI tier, rating, source, tag, read status, VIP, ingestion method, date range. Active filter pills. URL-synced state.
 - **Dark mode** — Toggle between Papyrus (warm cream) and Roman Night (warm charcoal) themes. Persists via localStorage.
-- **Theming** — CSS variable-based theme system with 20 `--tiro-*` variables. Roman-inspired palette: terra cotta accent, olive secondary, warm gold for links. Custom theme import support.
+- **Theming** — CSS variable-based theme system with 20 `--tiro-*` variables. Roman-inspired palette: terra cotta accent, olive secondary, warm gold for links. Custom theme import support. (One more variable to know about if you're writing a custom theme: the LAN-over-HTTP warning banner reuses `--tiro-tier-must-read` for its background — define it or the banner falls back to an unstyled background on your theme.)
 - **Pagination** — Configurable page size (25/50/100, or unlimited), server-side offset/limit pagination with keyboard-friendly navigation.
 
 ### Productivity
@@ -247,6 +248,7 @@ Storage Layer (all local)
 | `uv run tiro run` | Start server at localhost:8000 and open browser |
 | `uv run tiro run --lan` | Start server accessible on local network (binds to 0.0.0.0) |
 | `uv run tiro run --no-browser` | Start server without opening browser |
+| `uv run tiro run --cert cert.pem --key key.pem` | Serve over HTTPS (uvicorn TLS termination; both flags required together) |
 | `uv run tiro export -o backup.zip` | Export library as zip (supports `--tag`, `--source-id`, `--rating-min`, `--date-from` filters) |
 | `uv run tiro import-emails ./newsletters/` | Bulk import .eml files from a directory |
 | `uv run tiro backup [--output path] [--include-audio]` | Write a full library snapshot (tar.zst) |
@@ -394,6 +396,28 @@ To use Tiro and Obsidian together today, point `library_path` in `config.yaml` a
 
 ---
 
+## Remote access (mobile & LAN)
+
+Phase 3's backend (M3.0) landed the plumbing for reading Tiro away from your desktop; the mobile UI (PWA, swipe-triage) is a later milestone, but you can already sign in from your phone and reach Tiro by name today.
+
+**QR login.** Once you're signed in on your desktop, open **Settings → Mobile Access → Set up mobile login** (or go straight to `/setup/qr`). It shows a QR code your phone's camera can scan to sign in instantly — no typing your password on a phone keyboard. The code is single-use and expires after 15 minutes; hit "Generate new code" for a fresh one if it goes stale. Under the hood it's a one-time, cryptographically random token that's hashed at rest and can only ever be redeemed once — it can't be replayed, and it's useless as an API credential.
+
+**Find Tiro by name (mDNS/Bonjour).** With `--lan` (or `host: 0.0.0.0`), typing a LAN IP works, but IPs change. Set in `config.yaml`:
+
+```yaml
+mdns_enabled: true
+mdns_hostname: "tiro"   # advertises as tiro.local
+```
+
+Then `http://tiro.local:8000` resolves on any device on the same network that supports mDNS (macOS, iOS, and most Linux distros out of the box; Windows and some Android devices may need a Bonjour/mDNS helper). Off by default — it's one more thing broadcasting on your network, so it's opt-in.
+
+**HTTPS.** Plain `--lan` serves HTTP — fine on a network you trust, but every page shows a dismissable warning banner as a reminder, and some browser features (camera access for QR scanning, in particular) may behave differently over plain HTTP. Two ways to get HTTPS:
+
+- **Recommended: [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)** — if you already use Tailscale to reach your machine remotely, `tailscale serve` gives you a real, browser-trusted HTTPS URL with zero cert management on your part. This is the easiest path and the one we'd point most people at.
+- **Local LAN with a real cert: [mkcert](https://github.com/FiloSottile/mkcert) + `--cert`/`--key`.** Generate a locally-trusted certificate for your LAN hostname or IP (`mkcert tiro.local 192.168.1.50`), then run `uv run tiro run --cert tiro.local+1.pem --key tiro.local+1-key.pem` (or the equivalent `run.py --cert ... --key ...` flags). Both flags are required together — Tiro refuses to start with only one.
+
+---
+
 ## Keyboard Shortcuts
 
 ### Inbox
@@ -493,7 +517,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS helpers (`tiro/frontend/static/js/core.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. A small end-to-end browser spec also lives at `playwright-tests/phase0.spec.js` (Playwright), covering the first-run setup flow, login, saving an article, and deleting it — see `playwright-tests/README.md` for how to run it.
+`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS helpers (`tiro/frontend/static/js/core.js`, `annotate.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. A handful of end-to-end browser specs also live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), and `telemetry.spec.js` (reading-session tracking) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
@@ -509,7 +533,7 @@ The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-con
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
 - **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.4.0 is either this or Phase 3.)
-- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine.
+- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend milestone (snooze, QR login, mDNS discovery, TLS run flags) shipped; the PWA and swipe-triage UI are still ahead.
 - **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
 - **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion once Phase 3 ships.
 - **Phase 6 — Agent runtime (0.8):** the ad-hoc AI calls become a library of inspectable local agents with replayable traces and cost accounting, provider adapters (Anthropic, OpenAI, local models via Ollama) making model-agnosticism shipped fact rather than aspiration, and a plugin API for community agents, connectors, and themes.

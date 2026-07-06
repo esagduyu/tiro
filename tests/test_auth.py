@@ -330,6 +330,12 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         "/api/auth/login", "/api/auth/setup", "/api/auth/status",
         "/api/auth/logout",  # idempotent logout, open by design
         "/healthz", "/login", "/",
+        # M3.0 Task 2: QR login redemption is deliberately unauthenticated —
+        # it's how a phone that has NO session yet gets one, via a one-time
+        # token in the URL instead of ambient cookie auth. Security lives in
+        # auth.consume_login_token (atomic single-use, short TTL, generic
+        # failure) rather than in a gate here; see tests/test_qr_login.py.
+        "/login/qr",
     }
     ALLOWED_PREFIXES = ("/static", "/library/themes")
     failures = []

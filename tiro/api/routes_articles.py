@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from tiro.database import get_connection
 from tiro.intelligence.analysis import analyze_article, get_cached_analysis
 from tiro.queries import ARTICLE_COLUMNS, ARTICLE_FROM, SORT_SQL, build_article_filters
+from tiro.snooze import PRESETS as SNOOZE_PRESETS
+from tiro.snooze import compute_preset, validate_until
 from tiro.stats import update_stat
 
 logger = logging.getLogger(__name__)
@@ -86,12 +88,21 @@ async def list_articles(
     date_from: str | None = None,
     date_to: str | None = None,
     include_decayed: bool = True,
+    include_snoozed: bool = False,
     count_only: bool = False,
 ):
     """List articles with filtering, sorting, and pagination.
 
     per_page=0 (default) returns all results (backwards compatible).
     count_only=true returns just the count matching filters.
+
+    include_snoozed=False by default: this is the one inbox-scoped call
+    site that hides snoozed articles (tiro/queries.py's `include_snoozed`
+    builder param defaults to True/permissive everywhere else — digest,
+    decay, classification, MCP search, export, and stats all still see
+    snoozed articles, since snoozing hides from the inbox, not the
+    library). Pass include_snoozed=true to reveal them here too (mirrors
+    include_decayed's "Show archived" pattern).
     """
     config = request.app.state.config
     conn = get_connection(config.db_path)
@@ -99,6 +110,7 @@ async def list_articles(
         where_sql, params = build_article_filters(
             include_decayed=include_decayed,
             decay_threshold=config.decay_threshold,
+            include_snoozed=include_snoozed,
             is_read=is_read,
             is_vip=is_vip,
             ai_tier=ai_tier,
@@ -256,6 +268,78 @@ async def mark_read(article_id: int, request: Request):
                 "is_read": row["is_read"],
                 "opened_count": row["opened_count"],
             },
+        }
+    finally:
+        conn.close()
+
+
+class SnoozeRequest(BaseModel):
+    until: str | None = None
+    preset: str | None = None
+
+
+@router.patch("/{article_id}/snooze")
+async def snooze_article(article_id: int, body: SnoozeRequest, request: Request):
+    """Snooze an article out of the default inbox view until a future time
+    (the backbone of M3.2's swipe-triage) — snoozing never deletes or
+    archives anything, and NOTHING but GET /api/articles' default listing
+    hides a snoozed article (see tiro/queries.py's `include_snoozed`
+    builder param): digest generation, classification, decay recalculation,
+    MCP search, export, and stats all still see it.
+
+    Body is exactly one of:
+      - {"until": "<ISO timestamp>"} — explicit target; must be strictly in
+        the future. Malformed or past → 400.
+      - {"preset": "tonight"|"tomorrow"|"weekend"|"next_week"} — server
+        computes the target from *server-local* wall-clock time (single-
+        user local app, deliberately not UTC/client time — see
+        tiro/snooze.py's compute_preset() docstring for the exact table):
+            tonight    -> today 19:00, or now+6h if 19:00 already passed
+            tomorrow   -> tomorrow 09:00
+            weekend    -> next Saturday 09:00
+            next_week  -> next Monday 09:00
+      - {"until": null} (preset omitted, or body omitted entirely) —
+        unsnooze: clears snoozed_until.
+
+    Providing both `until` and `preset` is a 400. Unknown article -> 404.
+    Response includes the computed/stored `snoozed_until` (null if
+    unsnoozed).
+    """
+    if body.preset is not None and body.until is not None:
+        raise HTTPException(
+            status_code=400, detail="Provide either 'until' or 'preset', not both"
+        )
+
+    if body.preset is not None:
+        if body.preset not in SNOOZE_PRESETS:
+            raise HTTPException(status_code=400, detail=f"Unknown preset: {body.preset!r}")
+        snoozed_until = compute_preset(body.preset)
+    elif body.until is not None:
+        try:
+            snoozed_until = validate_until(body.until)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    else:
+        snoozed_until = None  # unsnooze
+
+    config = request.app.state.config
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Article not found")
+
+        conn.execute(
+            "UPDATE articles SET snoozed_until = ? WHERE id = ?",
+            (snoozed_until, article_id),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "data": {"id": article_id, "snoozed_until": snoozed_until},
         }
     finally:
         conn.close()

@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "62"
+STATIC_VERSION = "63"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -45,12 +45,51 @@ def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
     return f"/static/themes/{fallback}.css?v={STATIC_VERSION}"
 
 
-def _theme_context(config: TiroConfig) -> dict:
-    """Server-resolved theme hrefs injected into every page template."""
+def _theme_context(request: Request) -> dict:
+    """Server-resolved context injected into every page template render:
+    theme hrefs plus (M3.0 Task 4) the `insecure_lan_http` flag driving
+    base.html's dismissable warning banner. Takes the request (not just
+    config) so it can also read `app.state.insecure_lan_http`, which is
+    computed once in create_app from the effective bind host + whether TLS
+    is active — extend this single function for any future per-request
+    page-context flag rather than threading a new kwarg through every route
+    handler individually."""
+    config = request.app.state.config
     return {
         "theme_light_href": _theme_href(config, config.theme_light, "papyrus"),
         "theme_dark_href": _theme_href(config, config.theme_dark, "roman-night"),
+        "insecure_lan_http": getattr(request.app.state, "insecure_lan_http", False),
     }
+
+
+def _qr_svg(data: str) -> str:
+    """Render `data` as an inline SVG string (no XML declaration/namespace,
+    no width/height so CSS controls sizing) — embedded directly into the
+    /setup/qr template body, no external asset or data: URI needed. Fixed
+    black-on-white module colors regardless of the active theme: QR
+    scanners rely on maximum contrast, and this SVG is only ever shown
+    inside a light card in the template (see qr_setup.html)."""
+    import io
+
+    import segno
+
+    qr = segno.make(data, error="m")
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", xmldecl=False, svgns=False, omitsize=True, border=2, scale=6)
+    return buf.getvalue().decode()
+
+
+def _login_qr_target(request: Request, token: str) -> str:
+    """URL a phone should hit to redeem a QR login token. Deliberately uses
+    the raw `Host` request header (not `request.url.netloc`) and the
+    request's own scheme (honors LAN http / any future https) — by design,
+    this embeds whatever host the USER'S browser reached the server through
+    (LAN IP, Tailscale hostname, ...), matching how Phase 3 LAN access
+    works. The Host-header validation middleware (see `_validate_host`
+    below) has already rejected unrecognized hosts by the time this runs,
+    so no additional validation is needed here."""
+    host = request.headers.get("host", "")
+    return f"{request.url.scheme}://{host}/login/qr?token={token}"
 
 
 _DIR_SIZE_CACHE_TTL = 30  # seconds
@@ -286,14 +325,79 @@ async def lifespan(app: FastAPI):
         scheduler.start("vector_retry", _vector_retry_loop(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
+    # mDNS/Bonjour advertisement (Phase 3 M3.0): opt-in, and only meaningful
+    # when the server is actually reachable from other devices on the LAN
+    # -- a loopback-only bind gets nothing out of advertising itself, so
+    # skip with a debug log rather than starting zeroconf for no reason.
+    # Not an asyncio loop like the Scheduler's tasks above, so it's not
+    # registered there; a direct call wrapped in try/except is the simplest
+    # correct shape (mirrors the wiki/annotations reconcile calls above --
+    # best-effort, must never block startup).
+    #
+    # MUST run via asyncio.to_thread, not a direct call: register_mdns()
+    # constructs a real Zeroconf() and calls its blocking register_service(),
+    # which internally does a thread-safe round-trip back onto whatever
+    # asyncio loop Zeroconf attached itself to. Called directly from this
+    # coroutine, that loop IS this lifespan's loop, on this same thread --
+    # register_service() would block waiting for a callback that can only
+    # run once THIS coroutine yields control, which it can't while blocked.
+    # That's a self-deadlock (zeroconf's own EventLoopBlocked guard fires
+    # after ~10s, and with the collision retry in mdns.py that's ~21s of a
+    # server that isn't serving anything, after which registration still
+    # fails). `tiro/mdns.py` additionally forces `use_asyncio=False` on its
+    # Zeroconf() construction as a second, independent layer of defense --
+    # see its docstring -- but running off the loop thread via to_thread is
+    # required regardless, since a worker thread has no running loop for
+    # zeroconf to autodetect and attach to in the first place.
+    if config.mdns_enabled and app.state.lan_mode:
+        try:
+            from tiro.mdns import get_registered_hostname, register_mdns
+
+            registered = await asyncio.to_thread(register_mdns, config, config.host, config.port)
+            # get_registered_hostname() is a plain in-memory read (no
+            # zeroconf I/O), so no to_thread needed here -- only
+            # register_mdns/unregister_mdns touch zeroconf's blocking calls.
+            # Stashing the ACTUAL registered name (which may carry the `-2`
+            # collision suffix) on app.state, rather than assuming
+            # config.mdns_hostname won, is what the Host-header allowlist
+            # (`_validate_host` above) reads (finding 1, M3.0 final review).
+            if registered:
+                app.state.mdns_name = get_registered_hostname()
+        except Exception as e:
+            logger.warning("mDNS registration failed (non-fatal): %s", e)
+    elif config.mdns_enabled:
+        logger.debug("mDNS enabled but bind host %r is loopback; skipping advertisement", config.host)
+
     logger.info("Tiro is ready — library at %s", config.library)
     yield
 
     await scheduler.shutdown()
 
+    # Unconditional and best-effort: unregister_mdns() is a no-op when
+    # registration was never attempted or failed, so no need to track
+    # whether the register call above actually succeeded. Runs via
+    # asyncio.to_thread for the same self-deadlock reason as register_mdns
+    # above -- unregister_service() has the same blocking round-trip shape.
+    try:
+        from tiro.mdns import unregister_mdns
 
-def create_app(config: TiroConfig | None = None) -> FastAPI:
-    """Create and configure the FastAPI application."""
+        await asyncio.to_thread(unregister_mdns)
+    except Exception as e:
+        logger.warning("mDNS unregister failed (non-fatal): %s", e)
+    app.state.mdns_name = None
+
+
+def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    `tls_enabled` (M3.0 Task 4): uvicorn — not create_app — owns the actual
+    TLS handshake (it's given ssl_certfile/ssl_keyfile directly), so
+    create_app has no way to observe whether TLS is active on its own. Both
+    entry points that know (tiro/cli.py's cmd_run and run.py's main(), which
+    decide this from --cert/--key) pass it in explicitly. Defaults to False
+    so every existing caller (tests, MCP-adjacent code, anything constructing
+    create_app() bare) keeps behaving as plain HTTP.
+    """
     if config is None:
         config = load_config()
 
@@ -308,6 +412,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     )
 
     app.state.config = config
+    app.state.tls_enabled = tls_enabled
 
     # LAN mode: populate app.state.lan_ips whenever the EFFECTIVE bind host
     # is non-loopback — a config-file `host: "0.0.0.0"` (no --lan flag) is
@@ -319,6 +424,23 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     app.state.lan_mode = config.host not in ("127.0.0.1", "localhost")
     app.state.lan_ips = set(_detect_lan_ips()) if app.state.lan_mode else set()
     app.state.lan_ip = sorted(app.state.lan_ips)[0] if app.state.lan_ips else None
+
+    # mDNS-advertised hostname (finding 1, M3.0 final review): None until the
+    # lifespan actually registers with zeroconf and learns which candidate
+    # name won (the configured name, or its `-2` collision-retry sibling).
+    # Set here (not left unset) so the `_validate_host` closure below can
+    # read it unconditionally via getattr, same defensive pattern as
+    # `lan_ips`. Registration happens in `lifespan`, AFTER this closure is
+    # built, so the closure must read `app.state.mdns_name` fresh on every
+    # request rather than capturing a value now -- mirrors how `lan_ips` is
+    # re-read via `getattr(app.state, ...)` below, not closed over.
+    app.state.mdns_name = None
+
+    # insecure_lan_http (M3.0 Task 4): drives base.html's dismissable warning
+    # banner via `_theme_context`. True only when the effective bind host is
+    # non-loopback AND no TLS is active — LAN-over-HTTPS (--cert/--key) and
+    # plain loopback HTTP are both fine and get no banner.
+    app.state.insecure_lan_http = app.state.lan_mode and not tls_enabled
 
     # CORS — restrict to the app's own origin (credentials require an exact match)
     app.add_middleware(
@@ -360,8 +482,27 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
         # app-creation time (`_detect_lan_ips`, above), not just the first
         # one found.
         lan_ips = getattr(app.state, "lan_ips", None) or set()
-        if host not in allowed_hosts and not any(
-            host == f"{ip}:{config.port}" for ip in lan_ips
+        # mDNS-advertised hostname (finding 1, M3.0 final review): read
+        # dynamically, same as lan_ips above -- registration happens in the
+        # lifespan AFTER this closure is built, so a value captured now
+        # would always be None. Exact-match only against the name zeroconf
+        # ACTUALLY registered (which may carry the `-2` collision suffix,
+        # never the raw `config.mdns_hostname`) -- this must not become a
+        # wildcard "any *.local passes" rule, or it would gut the DNS-
+        # rebinding defense this middleware exists for (an attacker-chosen
+        # Host is never the name this server itself registered on the LAN).
+        # Host headers are case-insensitive (RFC 9110 §4.2.3); mDNS names
+        # arrive lowercase in practice but normalize both sides to be safe.
+        mdns_name = getattr(app.state, "mdns_name", None)
+        mdns_match = False
+        if mdns_name:
+            expected = f"{mdns_name.lower()}.local"
+            host_lower = host.lower()
+            mdns_match = host_lower == expected or host_lower == f"{expected}:{config.port}"
+        if (
+            host not in allowed_hosts
+            and not any(host == f"{ip}:{config.port}" for ip in lan_ips)
+            and not mdns_match
         ):
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -452,7 +593,35 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
-        return templates.TemplateResponse(request, "login.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "login.html", _theme_context(request))
+
+    @app.get("/login/qr")
+    async def login_via_qr(request: Request, token: str = ""):
+        """Redeem a one-time QR-login token minted by /setup/qr. Deliberately
+        NOT gated behind require_page_auth (this IS how an unauthenticated
+        phone gets its first session) and deliberately does NOT call
+        auth._check_csrf — like /login above, this is a top-level browser
+        navigation (the phone's camera/QR app opening a link), which
+        legitimately carries Sec-Fetch-Site: cross-site; CSRF checks exist to
+        stop *mutating* cross-site requests riding an existing session, not
+        to stop a bare link click that presents its own bearer of proof (the
+        token) instead of ambient cookie auth.
+
+        Every failure path (missing token, garbage token, expired, already
+        used) redirects to the same generic /login with no distinguishing
+        detail — consume_login_token's docstring covers why (no oracle)."""
+        from fastapi.responses import RedirectResponse
+
+        config = request.app.state.config
+        if not auth.consume_login_token(config, token):
+            response = RedirectResponse(url="/login", status_code=302)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        session_token = auth.create_session(config.db_path)
+        response = RedirectResponse(url="/inbox", status_code=302)
+        auth.attach_session_cookie(response, request, session_token)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(auth.NotAuthenticated)
     async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
@@ -466,11 +635,11 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/inbox", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def inbox_page(request: Request):
-        return templates.TemplateResponse(request, "inbox.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "inbox.html", _theme_context(request))
 
     @app.get("/digest", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def digest_page(request: Request):
-        return templates.TemplateResponse(request, "digest.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "digest.html", _theme_context(request))
 
     @app.get("/articles/{article_id}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def reader(request: Request, article_id: int):
@@ -480,38 +649,77 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
             {
                 "article_id": article_id,
                 "reading_telemetry_enabled": request.app.state.config.reading_telemetry_enabled,
-                **_theme_context(request.app.state.config),
+                **_theme_context(request),
             },
         )
 
     @app.get("/stats", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def stats_page(request: Request):
-        return templates.TemplateResponse(request, "stats.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "stats.html", _theme_context(request))
 
     @app.get("/settings", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def settings_page(request: Request):
-        return templates.TemplateResponse(request, "settings.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "settings.html", _theme_context(request))
 
     @app.get("/graph", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def graph_page(request: Request):
-        return templates.TemplateResponse(request, "graph.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "graph.html", _theme_context(request))
 
     @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def sources_page(request: Request):
-        return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "sources.html", _theme_context(request))
+
+    async def _qr_setup_response(request: Request) -> HTMLResponse:
+        config = request.app.state.config
+        token = auth.create_login_token(config)
+        qr_url = _login_qr_target(request, token)
+        response = templates.TemplateResponse(
+            request,
+            "qr_setup.html",
+            {
+                "qr_svg": _qr_svg(qr_url),
+                "qr_url": qr_url,
+                "qr_ttl_minutes": auth.LOGIN_TOKEN_TTL_MINUTES,
+                **_theme_context(request),
+            },
+        )
+        # A fresh single-use login token is embedded in this page's markup on
+        # every render (GET or POST) — a cached copy served back to the
+        # browser (bfcache, a shared proxy, browser history) would leak a
+        # token whose QR image a bystander could still scan. no-store is
+        # unconditional, not just no-cache, for exactly that reason.
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def qr_setup_page(request: Request):
+        """Every render mints a fresh login token (simplest correct option —
+        old ones just expire naturally via their own 15-minute TTL, no
+        cleanup needed here)."""
+        return await _qr_setup_response(request)
+
+    @app.post("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def qr_setup_regenerate(request: Request):
+        """'Generate new code' button: a same-origin form POST (CSRF-checked
+        like any other authenticated mutation) that re-renders the whole
+        page with a fresh token — a full reload is the simplest correct
+        shape here (no separate JSON+SVG-fragment endpoint to keep in
+        sync)."""
+        auth._check_csrf(request)
+        return await _qr_setup_response(request)
 
     @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_list_page(request: Request):
-        return templates.TemplateResponse(request, "wiki.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "wiki.html", _theme_context(request))
 
     @app.get("/wiki/{slug:path}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_page_view(request: Request, slug: str):
         return templates.TemplateResponse(
-            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request.app.state.config)}
+            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request)}
         )
 
     @app.get("/highlights", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def highlights_page(request: Request):
-        return templates.TemplateResponse(request, "highlights.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "highlights.html", _theme_context(request))
 
     return app

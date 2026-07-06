@@ -368,6 +368,36 @@ def _m010_reading_sessions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m011_snooze_and_login_tokens(conn: sqlite3.Connection) -> None:
+    """Snooze column + login_tokens table (Phase 3 M3.0 Task 1, first
+    migration of the milestone): `articles.snoozed_until` backs inbox
+    snooze/triage (tiro/snooze.py computes values, tiro/queries.py's
+    `include_snoozed` builder param scopes visibility); `login_tokens` is
+    QR-login's one-time-token table, added here since M3.0's plan bundles
+    it with this task's migration even though QR login itself lands in a
+    later task (T2) — see the M3.0 plan's Decisions of record.
+
+    New-table contract sixth practice (see module docstring / _m006..
+    _m010): the table is created with no backfill (a fresh 011 DB has no
+    login tokens yet), same as the column add (no existing article is
+    snoozed)."""
+    if not _has_column(conn, "articles", "snoozed_until"):
+        conn.execute("ALTER TABLE articles ADD COLUMN snoozed_until TEXT")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS login_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT UNIQUE NOT NULL,
+            created_at TEXT,
+            expires_at TEXT,
+            used_at TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -379,6 +409,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (8, "wiki derived-index tables", _m008_wiki_tables),
     (9, "highlights + notes tables", _m009_highlights_notes),
     (10, "reading_sessions telemetry table", _m010_reading_sessions),
+    (11, "snooze_and_login_tokens", _m011_snooze_and_login_tokens),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)
