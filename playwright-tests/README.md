@@ -20,6 +20,20 @@ annotations` and repainted). Also asserts zero console errors across the
 whole flow. Run it against a SCRATCH library — never the real one, since it
 ingests+leaves behind a real article.
 
+`telemetry.spec.js` (M2.3 Task 2) covers the reading-session telemetry
+tracker + settings toggle: with telemetry off (the default), it forces the
+tab to `visibilitychange -> hidden` (the trigger reader.js listens for) and
+asserts NO `/session` POST fires; it then enables telemetry via the actual
+`/settings` toggle button, reloads the reader (so the server-rendered
+`data-telemetry` attribute picks up the change), generates some scroll/
+activity, forces the tab hidden again, and asserts a `/session` POST fires
+with a 200 response (there's no GET for `reading_sessions`, so the response
+status from the real `sendBeacon`-triggered request is the "a row landed"
+evidence — see the spec's comments for why the request body itself isn't
+assertable here). Also asserts zero console errors. Leaves the shared
+`example.com` test article's telemetry preference set back to disabled at
+the end of its second test.
+
 ## Running it
 
 You need a Tiro server running somewhere reachable (a scratch library is

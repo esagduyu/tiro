@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "61"
+STATIC_VERSION = "62"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -475,7 +475,13 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     @app.get("/articles/{article_id}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def reader(request: Request, article_id: int):
         return templates.TemplateResponse(
-            request, "reader.html", {"article_id": article_id, **_theme_context(request.app.state.config)}
+            request,
+            "reader.html",
+            {
+                "article_id": article_id,
+                "reading_telemetry_enabled": request.app.state.config.reading_telemetry_enabled,
+                **_theme_context(request.app.state.config),
+            },
         )
 
     @app.get("/stats", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])

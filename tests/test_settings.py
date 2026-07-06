@@ -144,6 +144,19 @@ def test_telemetry_settings_requires_auth(auth_client):
     assert r.status_code == 401
 
 
+def test_settings_page_has_telemetry_card(authenticated_client):
+    """Pin for the M2.3 Task 2 "Reading Telemetry" settings card: status
+    display + toggle button wired to GET/POST /api/settings/telemetry, with
+    copy stating the local-only/opt-in posture."""
+    r = authenticated_client.get("/settings")
+    assert r.status_code == 200
+    assert "Reading Telemetry" in r.text
+    assert 'id="telemetry-status"' in r.text
+    assert 'id="btn-toggle-telemetry"' in r.text
+    assert "never leaves your machine" in r.text
+    assert "Off by default" in r.text
+
+
 def test_digest_schedule_persists_to_config_path(authenticated_client, configured_library):
     r = authenticated_client.post("/api/settings/digest-schedule", json={
         "enabled": False, "time": "08:30", "unread_only": True, "timezone_offset": -60,

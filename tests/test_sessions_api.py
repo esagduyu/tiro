@@ -308,3 +308,28 @@ def test_session_endpoint_requires_auth(auth_client, configured_library):
     article_id = _seed_article(configured_library)
     r = auth_client.post(f"/api/articles/{article_id}/session", json=VALID_BODY)
     assert r.status_code == 401
+
+
+# --- reader.html template threading (Task 2) ----------------------------------
+#
+# The reader-side tracker in reader.js is gated entirely on `#reader`'s
+# `data-telemetry` attribute (see reader.js's `setupTelemetry`) — the route
+# handler in tiro/app.py must thread `config.reading_telemetry_enabled`
+# through into that attribute the same way `_theme_context` threads theme
+# hrefs, on every request (not just at startup), so a live toggle via
+# `POST /api/settings/telemetry` takes effect on the next reader page load
+# without a server restart.
+
+
+def test_reader_page_data_telemetry_off_by_default(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = False
+    r = authenticated_client.get("/articles/1")
+    assert r.status_code == 200
+    assert 'data-telemetry="off"' in r.text
+
+
+def test_reader_page_data_telemetry_on_when_enabled(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    r = authenticated_client.get("/articles/1")
+    assert r.status_code == 200
+    assert 'data-telemetry="on"' in r.text
