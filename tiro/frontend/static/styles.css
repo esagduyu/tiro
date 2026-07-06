@@ -539,6 +539,20 @@ body.has-lan-banner .content {
     text-decoration: underline;
 }
 
+/* Offline save queue indicator (M3.1 Task 3) -- small, unobtrusive pill
+   inside the save modal, shown only while saves are waiting to retry. */
+.save-queue-indicator {
+    margin-bottom: 0.75rem;
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--tiro-muted);
+    background: var(--tiro-bg);
+    border: 1px solid var(--tiro-border);
+    display: inline-block;
+}
+
 .save-status {
     margin-top: 0.75rem;
     padding: 0.6rem 0.75rem;
@@ -3459,6 +3473,18 @@ main {
     font-size: 0.78rem;
 }
 
+/* Remote access wizard (M3.1 Task 4): "tailscale serve --bg N" command +
+   its copy button, shown inline within a .status-detail line. */
+.remote-serve-command {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+}
+.remote-serve-command .settings-configure-btn {
+    padding: 0.15rem 0.6rem;
+}
+
 .settings-actions {
     display: flex;
     gap: 0.5rem;
@@ -3722,6 +3748,56 @@ main {
 .settings-save-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* --- Add-to-Home-Screen hint (M3.1 Task 3) ---
+   A small toast-like banner, fixed near the bottom, shown once on mobile
+   viewports (see the max-width: 768px rule below and sidebar.js's
+   shouldShowA2HSHint()) until dismissed. Deliberately styled close to
+   .settings-toast (same fixed-bottom-center posture) but persistent --
+   this one doesn't auto-dismiss on a timer, only via its own button. */
+.a2hs-hint {
+    position: fixed;
+    bottom: 1.25rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    max-width: 90vw;
+    padding: 0.65rem 0.75rem 0.65rem 1rem;
+    border-radius: 8px;
+    background: var(--tiro-fg-secondary);
+    color: white;
+    font-size: 0.82rem;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    z-index: 250;
+}
+
+.a2hs-hint-text {
+    line-height: 1.3;
+}
+
+.a2hs-hint-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: white;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.15rem 0.4rem;
+    opacity: 0.85;
+}
+
+.a2hs-hint-dismiss:hover {
+    opacity: 1;
+}
+
+@media (max-width: 768px) {
+    .a2hs-hint {
+        bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+    }
 }
 
 /* --- Settings toast --- */

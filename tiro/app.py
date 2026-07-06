@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "63"
+STATIC_VERSION = "64"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -81,15 +81,38 @@ def _qr_svg(data: str) -> str:
 
 def _login_qr_target(request: Request, token: str) -> str:
     """URL a phone should hit to redeem a QR login token. Deliberately uses
-    the raw `Host` request header (not `request.url.netloc`) and the
-    request's own scheme (honors LAN http / any future https) — by design,
+    the raw `Host` request header (not `request.url.netloc`) — by design,
     this embeds whatever host the USER'S browser reached the server through
     (LAN IP, Tailscale hostname, ...), matching how Phase 3 LAN access
     works. The Host-header validation middleware (see `_validate_host`
     below) has already rejected unrecognized hosts by the time this runs,
-    so no additional validation is needed here."""
+    so no additional validation is needed on the host half here.
+
+    Scheme (M3.1 Task 4): defaults to `request.url.scheme`, i.e. whatever
+    scheme this ASGI request actually arrived as — unchanged behavior when
+    `trust_proxy_headers` is off (the default). When a reverse proxy (e.g.
+    Tailscale Serve) terminates TLS and forwards plain HTTP to this server,
+    `request.url.scheme` is "http" even though the phone's browser actually
+    reached it over https — an operator who has explicitly opted into
+    `trust_proxy_headers` gets the scheme corrected from the FIRST
+    comma-separated value of `X-Forwarded-Proto`, and only when that value
+    is literally "http" or "https" (garbage/empty is ignored, falling back
+    to the request's own scheme). `X-Forwarded-Host` is deliberately NEVER
+    consulted, trusted flag or not: Host validation (`_validate_host`)
+    stays anchored to the real `Host` header the ASGI server received,
+    which the allowlist covers explicitly (via `extra_allowed_hosts` for
+    proxy hostnames) — trusting a client-suppliable Forwarded-Host would
+    reopen exactly the DNS-rebinding hole that middleware exists to close.
+    """
+    config = request.app.state.config
+    scheme = request.url.scheme
+    if config.trust_proxy_headers:
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        first = forwarded_proto.split(",")[0].strip().lower()
+        if first in ("http", "https"):
+            scheme = first
     host = request.headers.get("host", "")
-    return f"{request.url.scheme}://{host}/login/qr?token={token}"
+    return f"{scheme}://{host}/login/qr?token={token}"
 
 
 _DIR_SIZE_CACHE_TTL = 30  # seconds
@@ -436,6 +459,23 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     # re-read via `getattr(app.state, ...)` below, not closed over.
     app.state.mdns_name = None
 
+    # Extra allowed Host-header entries (M3.1 Task 4): static config
+    # (extra_allowed_hosts in config.yaml/env) joins the allowlist at
+    # create_app time -- unlike mdns_name above, this isn't discovered
+    # asynchronously during the lifespan (zeroconf registration), so there's
+    # no reason to defer it the way mdns_name is deferred. It's still read
+    # DYNAMICALLY from app.state by `_validate_host` below (not closed over
+    # as a local set), because `POST /api/remote/config`
+    # (tiro/api/routes_remote.py) can append a newly-chosen hostname to this
+    # set at runtime -- the wizard's "also allow this hostname" checkbox --
+    # and that must take effect immediately, without a server restart. That
+    # live-update requirement is what pushes an otherwise-static value onto
+    # the same "read app.state fresh on every request" pattern lan_ips and
+    # mdns_name already use, rather than a plain closed-over local variable.
+    app.state.extra_allowed_hosts = {
+        h.strip().lower() for h in config.extra_allowed_hosts if h.strip()
+    }
+
     # insecure_lan_http (M3.0 Task 4): drives base.html's dismissable warning
     # banner via `_theme_context`. True only when the effective bind host is
     # non-loopback AND no TLS is active — LAN-over-HTTPS (--cert/--key) and
@@ -494,15 +534,35 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         # Host headers are case-insensitive (RFC 9110 §4.2.3); mDNS names
         # arrive lowercase in practice but normalize both sides to be safe.
         mdns_name = getattr(app.state, "mdns_name", None)
+        host_lower = host.lower()
         mdns_match = False
         if mdns_name:
             expected = f"{mdns_name.lower()}.local"
-            host_lower = host.lower()
             mdns_match = host_lower == expected or host_lower == f"{expected}:{config.port}"
+        # Extra allowed hosts (M3.1 Task 4): static config.yaml/env entries,
+        # possibly appended-to at runtime by POST /api/remote/config -- read
+        # dynamically from app.state (see the create_app-time comment
+        # above), never captured by this closure. Matched EXACTLY as given,
+        # case-insensitively: a bare entry (no ":port") additionally matches
+        # with this server's own port appended, mirroring how the static
+        # localhost/127.0.0.1/config.host entries in `allowed_hosts` above
+        # already carry both a bare and a `:port` form; an entry the user
+        # already gave WITH its own port (e.g. a reverse proxy on a
+        # non-standard port) is matched only in that exact form. No
+        # wildcards -- "*.example.com" is not supported, by design: a
+        # wildcard would let any subdomain bypass the DNS-rebinding defense
+        # this middleware exists for.
+        extra_hosts = getattr(app.state, "extra_allowed_hosts", None) or set()
+        extra_match = any(
+            host_lower == entry
+            or (":" not in entry and host_lower == f"{entry}:{config.port}")
+            for entry in extra_hosts
+        )
         if (
             host not in allowed_hosts
             and not any(host == f"{ip}:{config.port}" for ip in lan_ips)
             and not mdns_match
+            and not extra_match
         ):
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -526,6 +586,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_filters import router as filters_router
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_ingest import router as ingest_router
+    from tiro.api.routes_remote import router as remote_router
     from tiro.api.routes_search import router as search_router
     from tiro.api.routes_sessions import router as sessions_router
     from tiro.api.routes_settings import router as settings_router
@@ -542,7 +603,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
-        sessions_router,
+        sessions_router, remote_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -557,6 +618,107 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     app.mount("/library/themes", StaticFiles(directory=str(library_themes)), name="library_themes")
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
     templates.env.globals["static_v"] = STATIC_VERSION
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        """PWA manifest (M3.1 Task 1): deliberately UNAUTHENTICATED, same
+        ceremony as /login/qr below. A browser/OS evaluates installability
+        (and a phone's "Add to Home Screen" prompt fetches this) before the
+        user necessarily has a session -- an install prompt that 401s can't
+        install anything. Unlike /login/qr there's no secret or user data
+        here at all: this is a 100% static file (name/icons/colors only), so
+        there's no confidentiality question, just the allowlist ceremony
+        needed to keep the route-walk invariant (test_route_walk_everything_
+        gated) honest about which routes are intentionally open. Served via
+        an explicit route (not folded into the already-open /static mount)
+        so the content-type is exactly `application/manifest+json`, the path
+        matches what base.html's <link rel="manifest"> and the binding spec
+        both expect, and this docstring has a place to live.
+        """
+        return FileResponse(
+            FRONTEND_DIR / "static" / "manifest.webmanifest",
+            media_type="application/manifest+json",
+        )
+
+    @app.get("/sw.js")
+    async def service_worker():
+        """Service worker script (M3.1 Task 2): deliberately UNAUTHENTICATED,
+        same allowlist ceremony as /manifest.webmanifest above -- registration
+        (`navigator.serviceWorker.register('/sw.js')`) runs from sidebar.js
+        AND from login.html (a phone can land on /login with no session yet,
+        and installability/offline support should start there too), so this
+        route must be reachable pre-auth. No user data here either: the
+        script is 100% static logic (cache names, routing rules) with zero
+        per-user content baked in.
+
+        The file on disk (tiro/frontend/static/sw.js) is a real, lintable,
+        syntactically-valid .js file at rest, carrying the literal
+        placeholder `__STATIC_VERSION__` in its cache names and its import
+        of sw-routing.js -- it cannot read Jinja (browsers fetch .js files
+        as plain text, and the point of a service worker script is that it
+        IS the raw bytes the browser executes, not a template render). This
+        route is the single substitution point: read the file, swap the
+        placeholder for the real STATIC_VERSION constant (the exact same
+        single-source-of-truth every `?v={{ static_v }}` static asset link
+        already reads), and serve the result. Mirrors how `?v=` cache-busts
+        everything else -- just via a `.replace()` instead of Jinja
+        interpolation, since sw.js isn't rendered through the Jinja2Templates
+        instance at all.
+
+        `Service-Worker-Allowed: /` is defensive rather than strictly
+        required: a script served from the document root (`/sw.js`) already
+        gets the browser's maximum default scope (`/`), matching the
+        register() call's requested scope of `/` with no header needed. Sent
+        anyway so this route keeps working unchanged if the physical
+        serving path ever moves (e.g. under `/static/`) while the requested
+        scope stays `/`.
+
+        `Cache-Control: no-cache` (not no-store): browsers already force a
+        byte-comparison re-check of the top-level SW script periodically
+        regardless of headers, but `no-cache` (revalidate every time) keeps
+        this app from ever serving a stale cached copy of the *substituted*
+        response out of the ordinary HTTP cache in the window between
+        deploys, without disabling caching for conditional-GET purposes.
+        """
+        from fastapi.responses import Response
+
+        source = (FRONTEND_DIR / "static" / "sw.js").read_text()
+        body = source.replace("__STATIC_VERSION__", STATIC_VERSION)
+        response = Response(content=body, media_type="application/javascript")
+        response.headers["Service-Worker-Allowed"] = "/"
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @app.get("/offline", response_class=HTMLResponse)
+    async def offline_page(request: Request):
+        """Offline fallback page (M3.1 Task 2): deliberately UNAUTHENTICATED,
+        same allowlist ceremony as /manifest.webmanifest and /sw.js above.
+        The service worker's navigation fallback (see sw.js's
+        `navigate-offline-fallback` route) serves this page from its own
+        precache when a real network fetch fails -- at that moment the
+        browser has no server connection at all, so a page gated on
+        `require_page_auth` (which needs a live session-cookie check against
+        SQLite) could never be reached anyway. This page renders ONLY what
+        the browser's own Cache Storage already holds client-side (a list of
+        previously-viewed articles' cached JSON, read directly via the Cache
+        API in offline.html's own script) -- zero server-side user data ever
+        flows through this route, so there is no confidentiality question,
+        just the allowlist ceremony.
+
+        Deliberately a standalone template (does not extend base.html),
+        mirroring login.html's own "standalone is safer" precedent: base.html
+        pulls in sidebar.js (unread-badge/saved-views fetches that all 401
+        when offline-and-unauthenticated anyway, harmlessly swallowed by
+        their own try/catches, but pointless network chatter on a page whose
+        entire point is "the network already failed") and assumes an
+        authenticated theme context this route doesn't have. offline.html
+        instead carries its own minimal inline styles (same pattern as
+        login.html), so its precache footprint (see sw.js's PRECACHE_URLS)
+        stays tight: itself, core.js (for renderMarkdown), and the two
+        vendor scripts renderMarkdown depends on -- no theme CSS, no
+        base.html chrome assets.
+        """
+        return templates.TemplateResponse(request, "offline.html", {})
 
     @app.get("/healthz")
     async def healthz(request: Request):
@@ -707,6 +869,15 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         sync)."""
         auth._check_csrf(request)
         return await _qr_setup_response(request)
+
+    @app.get("/setup/remote", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def remote_setup_page(request: Request):
+        """Tailscale/reverse-proxy wizard page (M3.1 Task 4). All actual work
+        (detection, saving, testing) happens client-side against
+        tiro/api/routes_remote.py's endpoints — this route just renders the
+        static shell, same "thin page route, JS does the fetching" pattern
+        as /settings."""
+        return templates.TemplateResponse(request, "remote_setup.html", _theme_context(request))
 
     @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_list_page(request: Request):

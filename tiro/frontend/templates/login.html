@@ -4,6 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tiro ⁊ Sign in</title>
+  <!-- PWA tags mirrored from base.html (login.html is standalone): the login page
+       is the first-run surface a phone lands on, so installability starts here. -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#C45B3E">
+  <link rel="apple-touch-icon" href="/static/icons/tiro-192.png" sizes="192x192">
   <link id="theme-css" rel="stylesheet" href="{{ theme_light_href }}"
         data-light-href="{{ theme_light_href }}" data-dark-href="{{ theme_dark_href }}">
   <script>
@@ -150,6 +155,16 @@
         $("error").textContent = body.detail || "Something went wrong";
       }
     });
+  </script>
+  <!-- Service worker registration (M3.1 Task 2): login.html is standalone
+       and doesn't load sidebar.js (see the PWA-tags comment above), but a
+       phone can land here with no session yet -- installability and
+       offline support should start from the very first page, so this
+       imports the exact same sw-register.js module sidebar.js uses on
+       every other page rather than duplicating the registration logic. -->
+  <script type="module">
+    import { registerServiceWorker } from "/static/js/sw-register.js?v={{ static_v }}";
+    registerServiceWorker();
   </script>
 </body>
 </html>

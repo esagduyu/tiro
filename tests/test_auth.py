@@ -336,6 +336,31 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         # auth.consume_login_token (atomic single-use, short TTL, generic
         # failure) rather than in a gate here; see tests/test_qr_login.py.
         "/login/qr",
+        # M3.1 Task 1: PWA manifest is deliberately unauthenticated -- a
+        # browser/OS evaluating installability (or a phone's "Add to Home
+        # Screen" prompt) fetches this before the user necessarily has a
+        # session. Unlike /login/qr there's no secret to protect at all:
+        # the file is 100% static (name/icons/theme colors), zero user
+        # data, so there's no confidentiality question -- just this
+        # allowlist ceremony. See the route's docstring in tiro/app.py.
+        "/manifest.webmanifest",
+        # M3.1 Task 2: the service worker script itself must be fetchable
+        # with no session -- it's registered from BOTH sidebar.js (every
+        # authenticated page) and login.html (a phone can land there with
+        # no session yet, and offline/installability should start from the
+        # very first page). Zero user data: 100% static routing/cache
+        # logic with the STATIC_VERSION constant substituted in. See the
+        # route's docstring in tiro/app.py.
+        "/sw.js",
+        # M3.1 Task 2: the offline fallback page the service worker's
+        # navigation handler serves when a real network fetch fails --
+        # at that moment there IS no server connection, so a page gated on
+        # a live session-cookie check could never be reached anyway. It
+        # renders ONLY client-side Cache Storage contents the browser
+        # already holds (previously-viewed articles' cached JSON); zero
+        # server-side user data flows through this route. See the route's
+        # docstring in tiro/app.py.
+        "/offline",
     }
     ALLOWED_PREFIXES = ("/static", "/library/themes")
     failures = []

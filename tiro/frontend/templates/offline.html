@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tiro ⁊ Offline</title>
+  <!-- Standalone template (M3.1 Task 2), same "safer than extending
+       base.html" call as login.html: this page is served by the service
+       worker's navigation fallback at the exact moment the network has
+       already failed, so it must render with ZERO network requests beyond
+       what's already in the SW's precache (see sw.js PRECACHE_URLS) --
+       no theme stylesheet fetch, no sidebar.js chrome, no unread-badge/
+       saved-views API calls that would only 401-or-fail pointlessly here.
+       Inline styles only, matching login.html's fallback-color pattern
+       (`var(--tiro-fg, #2C2520)` etc. -- the var() reference is harmless
+       even with no theme stylesheet loaded; it simply always resolves to
+       its literal fallback). -->
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      display: flex; flex-direction: column; align-items: center;
+      min-height: 100vh; margin: 0; padding: 2rem 1.5rem;
+      background: var(--tiro-bg, #FAF6F0);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--tiro-fg, #2C2520);
+    }
+    .offline-card {
+      width: min(92vw, 640px);
+    }
+    .offline-badge {
+      display: inline-block; margin-bottom: 0.75rem;
+      padding: 0.2rem 0.6rem; border-radius: 999px;
+      background: var(--tiro-tier-must-read, #B5334D); color: #fff;
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0 0 0.5rem; font-size: 1.6rem; font-weight: 700;
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+    p.sub {
+      margin: 0 0 1.5rem; font-size: 0.92rem; line-height: 1.5;
+      color: var(--tiro-fg-secondary, #5C534A);
+    }
+    #article-list {
+      display: flex; flex-direction: column; gap: 0.5rem;
+    }
+    .offline-article-btn {
+      display: block; width: 100%; text-align: left;
+      padding: 0.75rem 1rem; border: 1px solid var(--tiro-border, #DDD5CA);
+      border-radius: 8px; background: var(--tiro-bg-surface, #F5EDE3);
+      color: var(--tiro-fg, #2C2520);
+      font-size: 0.95rem; font-family: inherit; cursor: pointer;
+    }
+    .offline-article-btn:hover {
+      border-color: var(--tiro-accent, #C45B3E);
+    }
+    .offline-empty {
+      color: var(--tiro-muted, #9C9389); font-size: 0.9rem; font-style: italic;
+    }
+    #offline-back {
+      display: inline-block; margin-bottom: 1rem; padding: 0.4rem 0.8rem;
+      border: 1px solid var(--tiro-border, #DDD5CA); border-radius: 6px;
+      background: var(--tiro-bg-surface, #F5EDE3); color: var(--tiro-fg, #2C2520);
+      font-size: 0.85rem; cursor: pointer;
+    }
+    .offline-article-body {
+      line-height: 1.65; font-size: 1rem;
+    }
+    .offline-article-body img { max-width: 100%; }
+    .offline-footer {
+      margin-top: 2.5rem; text-align: center; font-size: 0.75rem;
+      font-style: italic; color: var(--tiro-muted, #9C9389);
+    }
+  </style>
+</head>
+<body>
+  <div class="offline-card">
+    <span class="offline-badge">Offline</span>
+    <h1>You're offline</h1>
+    <p class="sub" id="offline-sub">
+      Tiro can't reach the server right now. Here's what's already saved
+      in this browser for offline reading.
+    </p>
+    <div id="article-list"></div>
+    <div id="article-view" style="display:none"></div>
+  </div>
+  <p class="offline-footer">&ldquo;...without you the oracle was dumb.&rdquo; &mdash; Cicero to Tiro, 53 BC</p>
+
+  <!-- Vendor scripts stay classic (non-module) `<script>` tags, same
+       "vendor-stays-classic" convention as base.html: renderMarkdown()
+       (core.js) requires window.marked/window.DOMPurify to already be on
+       window by the time the module below runs, and classic scripts
+       execute before deferred/module scripts. MUST carry the exact same
+       `?v={{ static_v }}` query string as sw.js's PRECACHE_URLS -- the
+       Cache API's default `cache.match()` matches on the FULL request URL
+       including the query string, so a request for the bare (unversioned)
+       path here would MISS the versioned entry the service worker
+       precached, fall through to a real `fetch()`, and fail outright while
+       offline (caught live in this task's own Playwright verification
+       pass: net::ERR_FAILED on all three assets, silently breaking
+       renderMarkdown -- see the task report). -->
+  <script src="/static/vendor/marked.min.js?v={{ static_v }}"></script>
+  <script src="/static/vendor/purify.min.js?v={{ static_v }}"></script>
+  <script type="module">
+    import { renderMarkdown, esc } from "/static/js/core.js?v={{ static_v }}";
+
+    const ARTICLE_URL_RE = /^\/api\/articles\/\d+$/;
+
+    async function findArticlesCache() {
+      const names = await caches.keys();
+      const name = names.find((n) => /^tiro-.*-articles$/.test(n));
+      return name ? caches.open(name) : null;
+    }
+
+    function showEmpty() {
+      const listEl = document.getElementById("article-list");
+      listEl.innerHTML = '<p class="offline-empty">No articles saved for offline reading yet. Open an article while online and it’ll show up here next time you’re offline.</p>';
+    }
+
+    async function loadCachedArticles() {
+      const listEl = document.getElementById("article-list");
+      let cache;
+      try {
+        cache = await findArticlesCache();
+      } catch (e) {
+        cache = null;
+      }
+      if (!cache) {
+        showEmpty();
+        return;
+      }
+
+      const requests = (await cache.keys()).filter((req) => {
+        try {
+          return ARTICLE_URL_RE.test(new URL(req.url).pathname);
+        } catch (e) {
+          return false;
+        }
+      });
+      if (!requests.length) {
+        showEmpty();
+        return;
+      }
+
+      const items = [];
+      for (const req of requests) {
+        const res = await cache.match(req);
+        if (!res) continue;
+        try {
+          const json = await res.clone().json();
+          const article = json.data || json;
+          items.push({
+            id: article.id,
+            title: article.title || "Untitled",
+            content: article.content || "",
+          });
+        } catch (e) {
+          // Not JSON (or malformed) -- skip rather than crash the list.
+        }
+      }
+
+      if (!items.length) {
+        showEmpty();
+        return;
+      }
+
+      listEl.innerHTML = "";
+      items.forEach((item) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "offline-article-btn";
+        btn.textContent = item.title; // textContent -- no HTML interpretation, no esc() needed
+        btn.addEventListener("click", () => showArticle(item));
+        listEl.appendChild(btn);
+      });
+    }
+
+    function showArticle(item) {
+      document.getElementById("article-list").style.display = "none";
+      document.getElementById("offline-sub").style.display = "none";
+      const view = document.getElementById("article-view");
+      view.style.display = "";
+      // item.title/content originate from cached server JSON -- same
+      // untrusted-string posture as any other API response, so this
+      // innerHTML sink escapes the title via esc() and runs the body
+      // through the shared renderMarkdown() (marked -> DOMPurify), never a
+      // second sanitizer of its own (per the project's XSS invariant: one
+      // render path, core.js's, always).
+      view.innerHTML =
+        '<button type="button" id="offline-back">&larr; Back</button>' +
+        "<h1>" + esc(item.title) + "</h1>" +
+        '<div class="offline-article-body">' + renderMarkdown(item.content) + "</div>";
+      document.getElementById("offline-back").addEventListener("click", () => {
+        view.style.display = "none";
+        view.innerHTML = "";
+        document.getElementById("article-list").style.display = "";
+        document.getElementById("offline-sub").style.display = "";
+      });
+    }
+
+    loadCachedArticles();
+  </script>
+</body>
+</html>

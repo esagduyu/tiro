@@ -199,6 +199,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Dark mode** — Toggle between Papyrus (warm cream) and Roman Night (warm charcoal) themes. Persists via localStorage.
 - **Theming** — CSS variable-based theme system with 20 `--tiro-*` variables. Roman-inspired palette: terra cotta accent, olive secondary, warm gold for links. Custom theme import support. (One more variable to know about if you're writing a custom theme: the LAN-over-HTTP warning banner reuses `--tiro-tier-must-read` for its background — define it or the banner falls back to an unstyled background on your theme.)
 - **Pagination** — Configurable page size (25/50/100, or unlimited), server-side offset/limit pagination with keyboard-friendly navigation.
+- **Installable PWA** — Web app manifest + service worker make Tiro installable on your phone's home screen, with offline reading of previously-viewed articles and an offline save queue for new URLs. See [Install on your phone](#install-on-your-phone).
 
 ### Productivity
 
@@ -398,9 +399,21 @@ To use Tiro and Obsidian together today, point `library_path` in `config.yaml` a
 
 ## Remote access (mobile & LAN)
 
-Phase 3's backend (M3.0) landed the plumbing for reading Tiro away from your desktop; the mobile UI (PWA, swipe-triage) is a later milestone, but you can already sign in from your phone and reach Tiro by name today.
+Phase 3 landed the plumbing for reading Tiro away from your desktop: private remote access (M3.0 — snooze, QR login, mDNS discovery, TLS run flags) and an installable, offline-capable mobile app (M3.1 — PWA manifest, service worker, offline save queue, a `/setup/remote` wizard). The swipe-triage inbox UI is still ahead (M3.2).
 
-**QR login.** Once you're signed in on your desktop, open **Settings → Mobile Access → Set up mobile login** (or go straight to `/setup/qr`). It shows a QR code your phone's camera can scan to sign in instantly — no typing your password on a phone keyboard. The code is single-use and expires after 15 minutes; hit "Generate new code" for a fresh one if it goes stale. Under the hood it's a one-time, cryptographically random token that's hashed at rest and can only ever be redeemed once — it can't be replayed, and it's useless as an API credential.
+### Install on your phone
+
+The full walkthrough, once your desktop server is running:
+
+1. **Start Tiro reachably.** `uv run tiro run --lan` binds to your LAN (prints your LAN IP on startup), or set `host: "0.0.0.0"` in `config.yaml` to make it permanent. Both require a password (Tiro refuses `--lan`/`0.0.0.0` without one).
+2. **Run the remote-access wizard.** On your desktop, sign in and open **Settings → Remote Access → Set up remote access** (or go straight to `/setup/remote`). It detects a local Tailscale install and, if found, shows your MagicDNS name plus a ready-to-copy `tailscale serve` command; either way, it lets you save a `remote_url` and optionally allowlist its hostname for the Host-header check, with a "Test connection" button to confirm it resolves before you rely on it. **[Tailscale](https://tailscale.com/) is the recommended path** — a real, browser-trusted HTTPS URL with zero cert management and no ports opened to the public internet. Plain `--lan` HTTP also works for same-network testing (see the HTTPS note below).
+3. **Open that URL on your phone.** Tiro's web app manifest and service worker make it installable — an ordinary web page load first, with browser install affordances (see next step).
+4. **Log in with the QR code, not your password keyboard.** Back on your desktop, open `/setup/qr` and scan the code with your phone's camera — it signs you in instantly via a single-use, 15-minute token (hashed at rest, unreplayable, useless as an API credential). Faster and safer than typing a password on a phone keyboard over a network you may not fully trust.
+5. **Add to Home Screen.** On a supported viewport, Tiro shows a dismissible one-time hint pointing you at your browser's native "Add to Home Screen" action (Safari: Share → Add to Home Screen; Chrome/Android: the browser's own install prompt). Tiro deliberately doesn't hook Chromium's `beforeinstallprompt` to trigger its own custom install button — that API doesn't exist on iOS Safari anyway, so the hint just points at each platform's real, native affordance. Once installed, Tiro opens standalone (no browser chrome) and registers its service worker automatically.
+
+**What you get offline.** Once the service worker has run at least once, previously-viewed articles (up to the last 50) stay readable with no connection — the app itself, and any cached article JSON, come straight from Cache Storage. Try to save a new URL while offline and it's queued locally (up to 20, oldest dropped first) instead of failing outright; the queue silently drains and files each save for real the moment you're back online (and immediately checks on `online` events and page load, not just on your next manual retry). A dedicated `/offline` page appears for any navigation that can't reach the server at all.
+
+**A known limitation right now:** none of the above has been verified on a physical phone yet in this session — it's covered by the automated test suite (unit tests, Playwright, a headless PWA audit) but real-device installability, the A2HS prompt's actual appearance, and true airplane-mode reading are still on the owner's manual checklist for the next hands-on pass.
 
 **Find Tiro by name (mDNS/Bonjour).** With `--lan` (or `host: 0.0.0.0`), typing a LAN IP works, but IPs change. Set in `config.yaml`:
 
@@ -411,7 +424,7 @@ mdns_hostname: "tiro"   # advertises as tiro.local
 
 Then `http://tiro.local:8000` resolves on any device on the same network that supports mDNS (macOS, iOS, and most Linux distros out of the box; Windows and some Android devices may need a Bonjour/mDNS helper). Off by default — it's one more thing broadcasting on your network, so it's opt-in.
 
-**HTTPS.** Plain `--lan` serves HTTP — fine on a network you trust, but every page shows a dismissable warning banner as a reminder, and some browser features (camera access for QR scanning, in particular) may behave differently over plain HTTP. Two ways to get HTTPS:
+**HTTPS.** Plain `--lan` serves HTTP — fine on a network you trust, but every page shows a dismissable warning banner as a reminder, and some browser features (camera access for QR scanning, install prompts, in particular) may behave differently over plain HTTP. Two ways to get HTTPS (both also reachable and saveable from the `/setup/remote` wizard above):
 
 - **Recommended: [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)** — if you already use Tailscale to reach your machine remotely, `tailscale serve` gives you a real, browser-trusted HTTPS URL with zero cert management on your part. This is the easiest path and the one we'd point most people at.
 - **Local LAN with a real cert: [mkcert](https://github.com/FiloSottile/mkcert) + `--cert`/`--key`.** Generate a locally-trusted certificate for your LAN hostname or IP (`mkcert tiro.local 192.168.1.50`), then run `uv run tiro run --cert tiro.local+1.pem --key tiro.local+1-key.pem` (or the equivalent `run.py --cert ... --key ...` flags). Both flags are required together — Tiro refuses to start with only one.
@@ -533,7 +546,7 @@ The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-con
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
 - **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.4.0 is either this or Phase 3.)
-- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend milestone (snooze, QR login, mDNS discovery, TLS run flags) shipped; the PWA and swipe-triage UI are still ahead.
+- **Phase 3 — Private remote access (0.5):** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend (snooze, QR login, mDNS discovery, TLS run flags) and the installable PWA (manifest, service worker, offline reading, offline save queue, `/setup/remote` wizard) have both shipped; the swipe-triage inbox UI is still ahead, and `0.5.0` tags once it lands.
 - **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
 - **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion once Phase 3 ships.
 - **Phase 6 — Agent runtime (0.8):** the ad-hoc AI calls become a library of inspectable local agents with replayable traces and cost accounting, provider adapters (Anthropic, OpenAI, local models via Ollama) making model-agnosticism shipped fact rather than aspiration, and a plugin API for community agents, connectors, and themes.

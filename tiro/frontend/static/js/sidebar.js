@@ -2,9 +2,11 @@
  *
  * Owns everything that runs on EVERY page: theme toggle, mobile sidebar
  * open/close, the unread badge, the sidebar "Views" section, the "Save to
- * Tiro" modal, logout, and the keyboard-shortcuts overlay (shared markup
- * lives in base.html; only its content differs per page). Loaded as
- * `<script type="module">` from base.html.
+ * Tiro" modal (now also the offline save queue and its retry/drain loop,
+ * M3.1 Task 3 — pure queue logic lives in save-queue.js), the Add-to-Home-
+ * Screen hint (M3.1 Task 3), logout, and the keyboard-shortcuts overlay
+ * (shared markup lives in base.html; only its content differs per page).
+ * Loaded as `<script type="module">` from base.html.
  *
  * Split from the historical app.js — see
  * docs/plans/2026-07-05-m2-0-frontend-modules-plan.md (Task 2) for the full
@@ -23,7 +25,15 @@
  * way back in Task 4.
  */
 
-import { esc } from "./core.js";
+import { esc, showToast } from "./core.js";
+import { registerServiceWorker } from "./sw-register.js";
+import {
+    enqueueSave,
+    dequeueForRetry,
+    serializeQueue,
+    deserializeQueue,
+    SAVE_QUEUE_STORAGE_KEY,
+} from "./save-queue.js";
 
 /* ---- Theme management ---- */
 
@@ -276,6 +286,110 @@ function setupSidebarViews() {
     });
 }
 
+/* ---- Offline save queue (M3.1 Task 3) ----
+   Pure array logic lives in save-queue.js (node-tested); this section owns
+   the only impure bits: the localStorage-backed in-memory copy, the DOM
+   indicator in the save modal, and the sequential fetch() drain loop.
+
+   In-memory `saveQueue` is the single source of truth for the current page
+   load; every mutation is immediately persisted back to localStorage via
+   persistQueue() so a reload (or another tab) picks up the same state. */
+
+let saveQueue = deserializeQueue(localStorage.getItem(SAVE_QUEUE_STORAGE_KEY));
+let draining = false;
+
+function persistQueue() {
+    localStorage.setItem(SAVE_QUEUE_STORAGE_KEY, serializeQueue(saveQueue));
+}
+
+function updateQueueIndicator() {
+    const el = document.getElementById('save-queue-indicator');
+    if (!el) return;
+    if (saveQueue.length > 0) {
+        el.textContent = saveQueue.length === 1 ? '1 queued' : `${saveQueue.length} queued`;
+        el.style.display = '';
+    } else {
+        el.textContent = '';
+        el.style.display = 'none';
+    }
+}
+
+function queueOfflineSave(url, is_vip) {
+    const { queue } = enqueueSave(saveQueue, { url, is_vip: !!is_vip, ts: Date.now() });
+    saveQueue = queue;
+    persistQueue();
+    updateQueueIndicator();
+}
+
+// Drains the queue front-to-back, one POST at a time (never in parallel --
+// a burst of parallel retries against a server that just came back up is
+// exactly the kind of thing an offline queue should avoid). Per the binding
+// spec:
+//   - success (2xx)      -> remove from queue, toast success with title/url
+//   - 409 already_saved  -> remove from queue silently (already in the library)
+//   - other 4xx/5xx       -> remove from queue, toast failure (a poison entry
+//                           that will never succeed must not be retried
+//                           forever)
+//   - network error again -> STOP draining and keep this entry (and
+//                           everything behind it) queued for the next
+//                           `online` event or page load
+async function drainSaveQueue() {
+    if (draining) return;
+    draining = true;
+    try {
+        while (saveQueue.length > 0) {
+            const { next, rest } = dequeueForRetry(saveQueue);
+
+            let res;
+            try {
+                // NOTE: only `url` is sent -- IngestURLRequest (routes_ingest.py)
+                // has no `is_vip` field, so `next.is_vip` (tracked in the queue
+                // entry itself, see save-queue.js) was dead weight on the wire.
+                res = await fetch('/api/ingest/url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: next.url }),
+                });
+            } catch (e) {
+                // Still offline (or the network flapped again) -- leave
+                // `saveQueue` as-is (this entry, and everything queued
+                // behind it, stays put) and stop for now.
+                break;
+            }
+
+            // A response came back -- whatever it says, this entry is done
+            // being retried (removed either way, per the spec above).
+            saveQueue = rest;
+            persistQueue();
+            updateQueueIndicator();
+
+            let json = null;
+            try {
+                json = await res.json();
+            } catch (e) {
+                json = null;
+            }
+
+            if (res.ok) {
+                showToast(`Saved queued article: ${json?.data?.title || next.url}`, 'success');
+                updateUnreadBadge();
+                notifyContentSaved();
+            } else if (res.status === 409 && (json === null || json?.error === 'already_saved')) {
+                // already_saved -- silent, nothing to tell the user that
+                // matters at this point. Checks the structured body's
+                // `error` field (routes_ingest.py's only 409 shape) rather
+                // than trusting the status code alone, with a status-only
+                // fallback for the (should-never-happen) case where the
+                // response body didn't parse as JSON at all.
+            } else {
+                showToast(`Failed to save queued article: ${next.url}`, 'error');
+            }
+        }
+    } finally {
+        draining = false;
+    }
+}
+
 /* ---- Save modal ---- */
 
 function openSaveModal() {
@@ -289,6 +403,7 @@ function openSaveModal() {
     if (status) status.style.display = 'none';
     const btn = document.getElementById('save-url-btn');
     if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    updateQueueIndicator();
     // Reset to URL tab
     switchSaveTab('url');
 }
@@ -339,12 +454,28 @@ async function submitURL() {
     btn.disabled = true;
     btn.textContent = 'Saving...';
     showSaveStatus('Fetching and processing...', 'loading');
+
+    // The fetch() call itself is isolated in its own try/catch so a NETWORK
+    // error (fetch rejection -- offline, DNS failure, connection refused;
+    // always a TypeError) can be told apart from a 4xx/5xx response, which
+    // resolves fetch() normally and is handled below exactly as before this
+    // task. Only a network error gets queued -- a real error response
+    // (already_saved, 500, etc.) still surfaces inline as it always has.
+    let res;
     try {
-        const res = await fetch('/api/ingest/url', {
+        res = await fetch('/api/ingest/url', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url }),
         });
+    } catch (e) {
+        queueOfflineSave(url, false);
+        showToast('Offline — queued; will retry when back online', 'info');
+        closeSaveModal();
+        return;
+    }
+
+    try {
         const json = await res.json();
         if (res.status === 409) {
             showSaveStatus('Already saved: ' + (json.data?.title || url), 'error');
@@ -461,6 +592,65 @@ function setupLanBanner() {
         banner.style.display = "none";
         document.body.classList.remove("has-lan-banner");
     });
+}
+
+/* ---- Add-to-Home-Screen hint (M3.1 Task 3) ----
+   A one-time, dismissable nudge -- NOT a beforeinstallprompt capture (that
+   event is Chromium-only, non-standard, and effectively unsupported on iOS
+   Safari, which is the exact audience most likely to be reading Tiro on a
+   phone without realizing it can be installed; a plain instructional toast
+   works identically everywhere and doesn't need feature detection beyond
+   matchMedia). Shown only on a mobile-ish viewport (matches the existing
+   768px breakpoint used throughout styles.css) and never when already
+   running installed/standalone (matchMedia('(display-mode: standalone)') --
+   a device that's already home-screened has nothing to be nudged about).
+   Dismissal is permanent (localStorage, not sessionStorage) since the whole
+   point is to show it ONCE, ever, unlike the per-session LAN banner above. */
+
+const A2HS_HINT_DISMISSED_KEY = "tiro-a2hs-hint-dismissed";
+const A2HS_HINT_DELAY_MS = 3000;
+
+function shouldShowA2HSHint() {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    if (localStorage.getItem(A2HS_HINT_DISMISSED_KEY) === "1") return false;
+    if (window.matchMedia("(display-mode: standalone)").matches) return false;
+    if (!window.matchMedia("(max-width: 768px)").matches) return false;
+    return true;
+}
+
+function showA2HSHint() {
+    if (document.getElementById("a2hs-hint")) return;
+
+    const el = document.createElement("div");
+    el.id = "a2hs-hint";
+    el.className = "a2hs-hint";
+
+    const text = document.createElement("span");
+    text.className = "a2hs-hint-text";
+    text.textContent = "Tip: add Tiro to your home screen for the full app experience";
+
+    const dismissBtn = document.createElement("button");
+    dismissBtn.id = "a2hs-hint-dismiss";
+    dismissBtn.className = "a2hs-hint-dismiss";
+    dismissBtn.setAttribute("aria-label", "Dismiss");
+    dismissBtn.textContent = "×";
+    dismissBtn.addEventListener("click", () => {
+        localStorage.setItem(A2HS_HINT_DISMISSED_KEY, "1");
+        el.remove();
+    });
+
+    el.appendChild(text);
+    el.appendChild(dismissBtn);
+    document.body.appendChild(el);
+}
+
+function setupA2HSHint() {
+    // Re-check at fire time, not just at schedule time -- e.g. a same-tab
+    // dismissal of a hint shown on a prior page load already set the
+    // localStorage key well before this timer fires on the next page.
+    setTimeout(() => {
+        if (shouldShowA2HSHint()) showA2HSHint();
+    }, A2HS_HINT_DELAY_MS);
 }
 
 /* ---- Keyboard-shortcuts overlay (shared markup in base.html; content
@@ -585,4 +775,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // LAN-over-HTTP warning banner
     setupLanBanner();
+
+    // Offline save queue (M3.1 Task 3): reflect whatever survived from a
+    // prior page load, then try to drain it right away -- covers the "user
+    // reloads/reopens the app while still offline-then-online" case, not
+    // just the live `online` event below (e.g. a tab that was closed
+    // offline and reopened after connectivity was already back).
+    updateQueueIndicator();
+    window.addEventListener('online', drainSaveQueue);
+    if (saveQueue.length > 0 && navigator.onLine) {
+        drainSaveQueue();
+    }
+
+    // Add-to-Home-Screen hint (M3.1 Task 3): mobile-viewport-only, one-time,
+    // delayed so it doesn't compete with the page's own initial load.
+    setupA2HSHint();
+
+    // Service worker (M3.1 Task 2): feature-detected, silent, registered
+    // once per page load (see sw-register.js's own header comment).
+    registerServiceWorker();
 });
