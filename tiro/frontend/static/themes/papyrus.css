@@ -25,3 +25,24 @@
   --tiro-source-email: #8B6B8A;
   --tiro-source-rss: #B8943E;
 }
+
+/* Reader highlight fills (M2.2) — CSS Custom Highlight API, registered as
+   `tiro-hl-<color>` by reader.js. Not `--tiro-*` variables: these are literal
+   highlighter-pen tints tuned per theme for contrast against THIS theme's
+   `--tiro-fg`/`--tiro-bg` (papyrus cream bg, near-black text), not swapped
+   values of one shared token. `::highlight()` only accepts a narrow property
+   set (color/background-color/text-decoration/text-shadow and friends) —
+   background-color alone is enough here since the underlying reader-body
+   text color already has strong contrast against these light fills. */
+::highlight(tiro-hl-yellow) {
+  background-color: rgba(232, 195, 74, 0.55);
+}
+::highlight(tiro-hl-green) {
+  background-color: rgba(127, 174, 93, 0.40);
+}
+::highlight(tiro-hl-blue) {
+  background-color: rgba(111, 160, 206, 0.40);
+}
+::highlight(tiro-hl-pink) {
+  background-color: rgba(217, 140, 178, 0.42);
+}

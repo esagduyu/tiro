@@ -59,6 +59,10 @@
             <audio id="audio-el"></audio>
         </div>
         <div id="reader-body" class="reader-body"></div>
+        <!-- Selection toolbar (M2.2): populated + positioned by reader.js on
+             mouseup/selectionchange within #reader-body. Empty + hidden
+             until JS shows it near an active selection. -->
+        <div id="annotate-toolbar" class="annotate-toolbar" aria-hidden="true"></div>
         <section id="related-articles" class="related-articles" style="display: none;">
             <h3 class="related-header">Related in your library</h3>
             <div id="related-list" class="related-list"></div>

@@ -14,6 +14,10 @@ import {
     plainToMarkdownRange,
     findQuoteInPlain,
     markdownQuoteToPlain,
+    findQuoteInPlainFallback,
+    safeNFC,
+    collapseWhitespaceWithMap,
+    buildNormalizedProjection,
 } from "../annotate.js";
 
 // ---------------------------------------------------------------------
@@ -512,4 +516,88 @@ test("findQuoteInPlain: proximity tiebreak picks the closest of several equally-
     const plain = "aaaaaa";
     const result = findQuoteInPlain(plain, "aaa", "", "", 0);
     assert.deepEqual(result, { start: 0, end: 3 });
+});
+
+// ---------------------------------------------------------------------
+// Normalization-bridge fallback (M2.2 Task 2): safeNFC,
+// collapseWhitespaceWithMap, buildNormalizedProjection,
+// findQuoteInPlainFallback
+// ---------------------------------------------------------------------
+
+test("safeNFC: length-preserving input is NFC-normalized", () => {
+    // "é" (e + combining acute, 2 code units) composes to "é"
+    // (é, 1 code unit) under NFC -- a LENGTH-CHANGING case, so safeNFC must
+    // return the input unchanged rather than the shorter composed form.
+    const decomposed = "é";
+    assert.equal(safeNFC(decomposed), decomposed);
+    // Plain ASCII is already NFC and length-preserving -- returned as-is
+    // (value-equal; NFC is a no-op here).
+    assert.equal(safeNFC("hello world"), "hello world");
+});
+
+test("collapseWhitespaceWithMap: collapses a run of spaces/tabs/newlines to one space", () => {
+    const { normalized, map } = collapseWhitespaceWithMap("a   b\t\tc\n\nd");
+    assert.equal(normalized, "a b c d");
+    // map.length must equal normalized.length, and every mapped index must
+    // point back at the FIRST char of its origin run in the source string.
+    assert.equal(map.length, normalized.length);
+    assert.deepEqual(map, [0, 1, 4, 5, 7, 8, 10]);
+});
+
+test("collapseWhitespaceWithMap: no whitespace is an identity transform", () => {
+    const { normalized, map } = collapseWhitespaceWithMap("nowhitespace");
+    assert.equal(normalized, "nowhitespace");
+    assert.deepEqual(map, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+});
+
+test("buildNormalizedProjection: mapEnd recovers the full origin span of a collapsed run", () => {
+    const { normalized, map, mapEnd } = buildNormalizedProjection("a    b");
+    assert.equal(normalized, "a b");
+    assert.deepEqual(map, [0, 1, 5]);
+    // The collapsed space (index 1 in normalized) came from a 4-char run
+    // "    " spanning original indices [1, 5) -- mapEnd[1] must be 5.
+    assert.deepEqual(mapEnd, [1, 5, 6]);
+});
+
+test("findQuoteInPlainFallback: resolves when whitespace runs differ between plain and the needle", () => {
+    // Simulates a DOM-vs-markdown-projection mismatch: the projection has a
+    // hard-wrapped double space where the DOM would have rendered a single
+    // space. findQuoteInPlain (no normalization) fails to find the
+    // single-spaced needle verbatim; the fallback must succeed.
+    const plain = "the quick  brown fox jumps";
+    assert.equal(findQuoteInPlain(plain, "quick brown", "the ", " fox"), null);
+    const result = findQuoteInPlainFallback(plain, "quick brown", "the ", " fox", 4);
+    assert.ok(result);
+    assert.equal(plain.slice(result.start, result.end), "quick  brown");
+});
+
+test("findQuoteInPlainFallback: returned offsets are in plain-space, not normalized-space", () => {
+    // Multiple leading collapsed-whitespace runs before the match shift
+    // normalized-space indices left of plain-space indices -- the fallback
+    // must translate back correctly, not return raw normalized offsets.
+    const plain = "line one\n\n\nline two   has   extra   spaces";
+    const needle = "has extra spaces";
+    assert.equal(findQuoteInPlain(plain, needle), null);
+    const result = findQuoteInPlainFallback(plain, needle, "", "", 30);
+    assert.ok(result);
+    assert.equal(plain.slice(result.start, result.end), "has   extra   spaces");
+});
+
+test("findQuoteInPlainFallback: null when the quote is absent even after normalization", () => {
+    const plain = "nothing matches here";
+    assert.equal(findQuoteInPlainFallback(plain, "absent phrase", "", "", 0), null);
+});
+
+test("findQuoteInPlainFallback: null on empty quote", () => {
+    assert.equal(findQuoteInPlainFallback("some text", "", "", "", 0), null);
+});
+
+test("findQuoteInPlainFallback: null on empty plain", () => {
+    assert.equal(findQuoteInPlainFallback("", "quote", "", "", 0), null);
+});
+
+test("findQuoteInPlainFallback: exact match (no normalization needed) still resolves", () => {
+    const plain = "a unique needle in this text";
+    const result = findQuoteInPlainFallback(plain, "needle", "", "", 0);
+    assert.deepEqual(result, { start: 9, end: 15 });
 });

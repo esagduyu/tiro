@@ -75,6 +75,17 @@
  *     characters that sit INSIDE the selected span (e.g. selecting across
  *     a `**` boundary pulls the asterisks into the markdown range) — this
  *     is correct per the task brief, not a bug.
+ *   - `findQuoteInPlainFallback` (M2.2 Task 2): a normalization-bridge
+ *     fallback for when `findQuoteInPlain` fails because the quote/prefix/
+ *     suffix came from a DIFFERENT approximation of "the same" text than
+ *     `plain` (rendered DOM textContent vs this module's markdown
+ *     projection) and the two disagree on whitespace-run collapsing or
+ *     Unicode composition. Retries the search against a normalized copy of
+ *     `plain` (NFC where length-preserving, plus whitespace-run collapsing
+ *     to a single space) and normalized needles, then maps the match back to
+ *     `plain`-space offsets. See `findQuoteInPlainFallback`'s own docstring
+ *     for the map/mapEnd translation details. Pre-authorized as a documented
+ *     deviation per T1's Self-Review Notes.
  */
 
 /**
@@ -197,6 +208,153 @@ export function markdownQuoteToPlain(projection, mdStart, mdEnd) {
     if (hi < lo) return null;
 
     return { start: lo, end: hi + 1 };
+}
+
+/**
+ * Normalization-bridge fallback (M2.2 Task 2). `findQuoteInPlain` fails when
+ * the caller's quote/prefix/suffix were pulled from a DIFFERENT text space
+ * than `plain` and the two spaces disagree on whitespace runs or Unicode
+ * composition — concretely: T2's DOM->plain and plain->DOM bridges both feed
+ * `findQuoteInPlain` a needle+haystack pair that come from two different
+ * approximations of "the same" text (rendered DOM textContent vs this
+ * module's markdown projection), and those approximations can disagree on
+ * collapsed whitespace (e.g. a hard line-wrap in markdown vs a single space
+ * in rendered text) or on precomposed-vs-decomposed accented characters.
+ * `findQuoteInPlainFallback` retries the search after applying the SAME
+ * normalization to both sides: NFC composition (length-preserving cases
+ * only — see `safeNFC`) plus collapsing every whitespace run to one space
+ * (see `collapseWhitespaceWithMap`). This is pre-authorized scope per T1's
+ * Self-Review Notes as a documented deviation, not silently invented scope.
+ *
+ * Design: `plain` is normalized into `normalized` with a per-normalized-char
+ * map back to `plain` offsets (`buildNormalizedProjection`); `quote`/
+ * `prefix`/`suffix` are normalized the same way but discard their maps
+ * (they're search needles, not the haystack, so only their resulting text
+ * matters). The match found in normalized-space is translated back to
+ * `plain`-space offsets via the projection's `map`/`mapEnd` pair, using the
+ * same "map[i] is this char's origin, mapEnd[i] is one past the origin span
+ * this char collapsed from" shape as `plainToMarkdownRange`'s map lookups
+ * above (a collapsed whitespace run's single normalized space can span many
+ * original chars, so a plain `map[end]` lookup isn't enough — `mapEnd`
+ * exists precisely to recover the exclusive end of that span).
+ *
+ * @param {string} plain
+ * @param {string} quote
+ * @param {string} [prefix]
+ * @param {string} [suffix]
+ * @param {number} [approxPos] - position in `plain`-space (NOT normalized
+ *   space); translated internally.
+ * @returns {{start: number, end: number} | null} - offsets in `plain`-space.
+ */
+export function findQuoteInPlainFallback(plain, quote, prefix, suffix, approxPos) {
+    const { normalized, map, mapEnd } = buildNormalizedProjection(plain);
+    if (map.length === 0) return null;
+
+    const nQuote = normalizeForFallback(quote);
+    if (!nQuote) return null;
+    const nPrefix = normalizeForFallback(prefix || "");
+    const nSuffix = normalizeForFallback(suffix || "");
+    const nApproxPos =
+        approxPos === null || approxPos === undefined
+            ? undefined
+            : nearestNormalizedIndex(map, approxPos);
+
+    const found = findQuoteInPlain(normalized, nQuote, nPrefix, nSuffix, nApproxPos);
+    if (!found) return null;
+
+    const start = map[found.start];
+    const end = found.end > 0 ? mapEnd[found.end - 1] : start;
+    return { start, end };
+}
+
+/**
+ * NFC-normalize `str` ONLY when doing so preserves its length (the common
+ * case for already-composed web article text, since readability/
+ * markdownify output is virtually never decomposed Unicode). Skipping the
+ * transform on a length-changing input keeps every downstream index a
+ * direct 1:1 stand-in for a `plain`-space offset — composing NFC with
+ * `collapseWhitespaceWithMap`'s run-based map would otherwise need a SECOND
+ * map layer to track NFC's own index shifts, which is unneeded complexity
+ * for a fallback whose whole purpose is whitespace-run disagreement, not
+ * Unicode composition differences.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+export function safeNFC(str) {
+    const nfc = str.normalize("NFC");
+    return nfc.length === str.length ? nfc : str;
+}
+
+/**
+ * Collapse every run of whitespace (`\s+`) in `str` to a single U+0020
+ * space, tracking a per-output-char map back to `str` indices.
+ *
+ * @param {string} str
+ * @returns {{normalized: string, map: number[]}} `map[i]` is the index in
+ *   `str` where output char `i` originated (the FIRST char of a collapsed
+ *   whitespace run, or the char itself for non-whitespace).
+ */
+export function collapseWhitespaceWithMap(str) {
+    const out = [];
+    const map = [];
+    let i = 0;
+    while (i < str.length) {
+        const ch = str[i];
+        if (WHITESPACE_RE.test(ch)) {
+            out.push(" ");
+            map.push(i);
+            while (i < str.length && WHITESPACE_RE.test(str[i])) i++;
+        } else {
+            out.push(ch);
+            map.push(i);
+            i++;
+        }
+    }
+    return { normalized: out.join(""), map };
+}
+
+/**
+ * Build the normalized haystack used by `findQuoteInPlainFallback`: `safeNFC`
+ * then `collapseWhitespaceWithMap`, plus a derived `mapEnd` giving, for each
+ * normalized char, one past the last `plain`-space index its origin span
+ * covers (`map[i + 1]` if it exists, else `plain.length`) — needed because a
+ * single collapsed-whitespace char can stand in for a multi-char run.
+ *
+ * @param {string} plain
+ * @returns {{normalized: string, map: number[], mapEnd: number[]}}
+ */
+export function buildNormalizedProjection(plain) {
+    const nfc = safeNFC(plain);
+    const { normalized, map } = collapseWhitespaceWithMap(nfc);
+    const mapEnd = map.map((_, i) => (i + 1 < map.length ? map[i + 1] : nfc.length));
+    return { normalized, map, mapEnd };
+}
+
+/** Normalize a search needle (quote/prefix/suffix) the same way the
+ * haystack is normalized — `safeNFC` + whitespace-run collapsing — but
+ * discards the map (needles are never indexed back into). */
+function normalizeForFallback(str) {
+    return collapseWhitespaceWithMap(safeNFC(str)).normalized;
+}
+
+/** Largest index `i` in strictly-increasing `map` with `map[i] <= value`, or
+ * 0 if none (used to translate a `plain`-space `approxPos` into the
+ * normalized-space index nearest it). */
+function nearestNormalizedIndex(map, value) {
+    let lo = 0;
+    let hi = map.length - 1;
+    let ans = 0;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (map[mid] <= value) {
+            ans = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return ans;
 }
 
 /**

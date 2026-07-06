@@ -19,10 +19,63 @@
  * handler checks for `#delete-overlay` by id directly, while confirmDialog
  * uses different ids (`core-confirm-*`). Migrating would mean rewiring that
  * guard too, which isn't part of a behavior-identical dedup task.
+ *
+ * --- Annotation UI (M2.2 Task 2) ---
+ *
+ * Wires `./annotate.js`'s pure markdown<->plain-text projection core into a
+ * real DOM selection -> highlight -> paint pipeline. Three text spaces are
+ * in play (see annotate.js's module docstring): MARKDOWN (the article's
+ * stored body, `a.content` from `GET /api/articles/{id}` — the SAME text
+ * `tiro/api/routes_annotations.py` anchors against, by design), the PLAIN
+ * PROJECTION (`projectMarkdown(a.content)`, computed once per article load
+ * and cached in `annotationProjection`), and RENDERED DOM text (the actual
+ * `#reader-body` textContent after `renderMarkdown` + DOMPurify).
+ *
+ * The DOM<->plain bridge is symmetric and reused in both directions:
+ *   - CREATE (selection -> anchor): a DOM Range's boundaries are converted
+ *     to flat-DOM-text offsets via `domOffsetFromBoundary` (the standard
+ *     "pre-range .toString().length" trick — see that function's comment
+ *     for why this beats a hand-rolled node-index walk for THIS direction),
+ *     then `findQuoteInPlain` (falling back to `findQuoteInPlainFallback`)
+ *     locates the selected text + ~32-char DOM context inside
+ *     `annotationProjection.plain`, and `plainToMarkdownRange` converts that
+ *     to markdown offsets for the POST body.
+ *   - PAINT (anchor -> selection): the inverse. `markdownQuoteToPlain` turns
+ *     a highlight's (possibly server-reconciled "shifted") markdown offsets
+ *     into a plain-space range, then the SAME `findQuoteInPlain`/
+ *     `findQuoteInPlainFallback` pair (symmetric use — quote/context sliced
+ *     from `plain`, haystack is the flat DOM text this time) locates it in
+ *     rendered DOM text, and `domRangeFromTextIndices` (using a
+ *     `buildTextIndex` node map, since painting needs a REAL Range with
+ *     real text-node boundaries, unlike the toString()-trick direction)
+ *     builds the Range added to a `Highlight` object.
+ *
+ * Painting uses the CSS Custom Highlight API (`CSS.highlights`) exclusively
+ * — no DOM mutation (no wrapping `<mark>` spans), so `buildTextIndex`'s node
+ * map, built once right after `renderMarkdown` sets `#reader-body`'s
+ * innerHTML, stays valid across every subsequent paint (including newly
+ * created highlights) for the lifetime of the page: the body's DOM never
+ * changes after initial render. Feature-detected: browsers without
+ * `CSS.highlights` skip painting entirely (logged once) — every other
+ * annotation feature (create/copy/note) still works.
  */
 
-import { esc, num, formatDate, renderMarkdown, showToast, timeAgo } from "./core.js";
+import {
+    esc,
+    num,
+    formatDate,
+    renderMarkdown,
+    showToast,
+    timeAgo,
+} from "./core.js";
 import { showShortcuts, hideShortcuts } from "./sidebar.js";
+import {
+    projectMarkdown,
+    plainToMarkdownRange,
+    markdownQuoteToPlain,
+    findQuoteInPlain,
+    findQuoteInPlainFallback,
+} from "./annotate.js";
 
 document.addEventListener("DOMContentLoaded", () => {
     const reader = document.getElementById("reader");
@@ -137,6 +190,10 @@ async function loadArticle(id) {
                 }
             });
         }
+
+        // Annotations (highlights + selection toolbar) — must run AFTER the
+        // body's innerHTML is set (buildTextIndex walks the rendered DOM).
+        setupAnnotations(a.id, a.content || "");
 
         // Rating buttons
         setupRating(a.id, a.rating);
@@ -940,4 +997,444 @@ function formatAudioTime(seconds) {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* --- Annotations: selection -> highlight -> paint (M2.2 Task 2) --- */
+
+const ANNOTATE_COLORS = ["yellow", "green", "blue", "pink"];
+const ANNOTATE_DEFAULT_COLOR = "yellow";
+const ANNOTATE_CONTEXT_CHARS = 32;
+const ANNOTATE_SELECTIONCHANGE_DEBOUNCE_MS = 150;
+
+// Per-article state, reset by setupAnnotations() on every loadArticle() run.
+let annotationProjection = null; // {plain, map} from projectMarkdown(a.content)
+let annotationTextIndex = null; // {text, nodes} — flat DOM text + node offsets
+let annotationHighlights = []; // local cache of highlight dicts from the GET
+let annotationHighlightObjects = null; // {color: Highlight} once CSS.highlights registered
+let annotationCssSupported = false;
+let annotationCssWarned = false;
+let annotationSelectionRange = null; // cloned Range backing the open toolbar
+let annotationSelectionText = "";
+let annotationSelectionDebounceTimer = null;
+let annotationArticleId = null;
+
+function setupAnnotations(articleId, articleContent) {
+    annotationArticleId = articleId;
+    const bodyEl = document.getElementById("reader-body");
+    annotationProjection = projectMarkdown(articleContent);
+    annotationTextIndex = buildTextIndex(bodyEl);
+    annotationHighlights = [];
+
+    annotationCssSupported = typeof CSS !== "undefined" && !!CSS.highlights;
+    if (annotationCssSupported) {
+        annotationHighlightObjects = {};
+        ANNOTATE_COLORS.forEach((color) => {
+            const h = new Highlight();
+            annotationHighlightObjects[color] = h;
+            CSS.highlights.set(`tiro-hl-${color}`, h);
+        });
+    } else if (!annotationCssWarned) {
+        // eslint-disable-next-line no-console
+        console.warn(
+            "CSS Custom Highlight API not supported in this browser — " +
+            "highlights will be created and stored normally but not painted."
+        );
+        annotationCssWarned = true;
+    }
+
+    setupAnnotationToolbar(bodyEl);
+    loadAnnotations(articleId);
+}
+
+async function loadAnnotations(articleId) {
+    try {
+        const res = await fetch(`/api/articles/${articleId}/annotations`);
+        const json = await res.json();
+        if (!json.success) return;
+        annotationHighlights = json.data.highlights || [];
+        annotationHighlights.forEach(paintHighlight);
+    } catch (err) {
+        console.error("Failed to load annotations:", err);
+    }
+}
+
+/**
+ * Paint one highlight dict (as returned by `GET /api/articles/{id}/
+ * annotations`, or synthesized client-side right after a successful create —
+ * see `createHighlightFromSelection`) via the CSS Custom Highlight API.
+ * Skipped entirely (no-op, not an error) when `CSS.highlights` isn't
+ * supported, when the anchor's live status is `hash_mismatch`/`missing`
+ * (never painted per the task brief — T3's panel is where those surface),
+ * or when either half of the DOM<->plain bridge can't locate the text
+ * (stale/edited content, formatting-crossing edge cases) — painting is
+ * best-effort, never a crash.
+ */
+function paintHighlight(hl) {
+    if (!annotationCssSupported) return;
+
+    const anchorStatus = hl.anchor_status;
+    const status = anchorStatus && anchorStatus.status;
+    if (status !== "exact" && status !== "shifted") return;
+
+    // Use the LIVE (possibly reconciled/"shifted") positions from
+    // anchor_status, not the stored text_position_start/end — for a
+    // "shifted" highlight these differ, and anchor_status's are current.
+    const mdStart = anchorStatus.position_start;
+    const mdEnd = anchorStatus.position_end;
+    if (typeof mdStart !== "number" || typeof mdEnd !== "number") return;
+
+    const plainRange = markdownQuoteToPlain(annotationProjection, mdStart, mdEnd);
+    if (!plainRange) return;
+
+    const domRange = locatePlainRangeInDomText(plainRange);
+    if (!domRange) return;
+
+    const range = domRangeFromTextIndices(annotationTextIndex, domRange.start, domRange.end);
+    if (!range) return;
+
+    const bucket = annotationHighlightObjects[hl.color] || annotationHighlightObjects[ANNOTATE_DEFAULT_COLOR];
+    try {
+        bucket.add(range);
+    } catch (err) {
+        // Range construction succeeded but Highlight.add() can still throw
+        // on a degenerate/collapsed range in some engines — never let a
+        // single bad highlight break the rest of the paint pass.
+        console.error("Failed to paint highlight:", err);
+    }
+}
+
+/** PLAIN-space range -> DOM-text-space range, using the same symmetric
+ * findQuoteInPlain/findQuoteInPlainFallback pair CREATE uses in the other
+ * direction (haystack/needle roles swapped: here the flat DOM text is the
+ * haystack and the plain projection supplies the quote/context). */
+function locatePlainRangeInDomText(plainRange) {
+    const { plain } = annotationProjection;
+    const domText = annotationTextIndex.text;
+
+    const quote = plain.slice(plainRange.start, plainRange.end);
+    const prefix = plain.slice(Math.max(0, plainRange.start - ANNOTATE_CONTEXT_CHARS), plainRange.start);
+    const suffix = plain.slice(plainRange.end, plainRange.end + ANNOTATE_CONTEXT_CHARS);
+    const approxDomPos = plain.length
+        ? Math.round((plainRange.start / plain.length) * domText.length)
+        : 0;
+
+    let found = findQuoteInPlain(domText, quote, prefix, suffix, approxDomPos);
+    if (!found) {
+        found = findQuoteInPlainFallback(domText, quote, prefix, suffix, approxDomPos);
+    }
+    return found;
+}
+
+/** Walk `rootEl`'s text nodes (TreeWalker, document order) into a flat
+ * string plus a per-node {start, end} offset table. Built ONCE per article
+ * load (see setupAnnotations) and reused for every paint — the reader body's
+ * DOM never mutates after initial render (painting uses CSS Custom
+ * Highlights, not wrapper spans), so the index never goes stale mid-page. */
+function buildTextIndex(rootEl) {
+    const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null);
+    let text = "";
+    const nodes = [];
+    let node = walker.nextNode();
+    while (node) {
+        const value = node.nodeValue || "";
+        nodes.push({ node, start: text.length, end: text.length + value.length });
+        text += value;
+        node = walker.nextNode();
+    }
+    return { text, nodes };
+}
+
+/** Binary search `textIndex.nodes` (sorted by `start`, document order) for
+ * the text node covering flat-text `index`, returning a {node, offset}
+ * boundary point suitable for `Range.setStart`/`setEnd`. */
+function domPointFromTextIndex(textIndex, index) {
+    const nodes = textIndex.nodes;
+    if (nodes.length === 0) return null;
+    let lo = 0;
+    let hi = nodes.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (nodes[mid].end < index) lo = mid + 1;
+        else hi = mid;
+    }
+    const n = nodes[lo];
+    const offset = Math.min(Math.max(index - n.start, 0), n.node.nodeValue.length);
+    return { node: n.node, offset };
+}
+
+/** Build a real DOM Range spanning flat-text offsets [start, end) using the
+ * node index — needed for CSS.highlights (unlike the reverse direction,
+ * which only needs a character COUNT, not real boundaries; see
+ * domOffsetFromBoundary). */
+function domRangeFromTextIndices(textIndex, start, end) {
+    const startPoint = domPointFromTextIndex(textIndex, start);
+    const endPoint = domPointFromTextIndex(textIndex, end);
+    if (!startPoint || !endPoint) return null;
+    try {
+        const range = document.createRange();
+        range.setStart(startPoint.node, startPoint.offset);
+        range.setEnd(endPoint.node, endPoint.offset);
+        return range;
+    } catch (err) {
+        return null;
+    }
+}
+
+/**
+ * Flat-DOM-text character offset of a Range boundary (container, offset)
+ * relative to `rootEl` — the standard "measure a pre-range's stringified
+ * length" technique. Chosen over a hand-rolled node-index lookup for THIS
+ * direction because a real user/programmatic Selection's boundary container
+ * is not always a Text node (`Range.selectNodeContents(p)` — used by this
+ * task's Playwright spec — sets `startContainer`/`endContainer` to the
+ * ELEMENT `p` with an offset counted in child nodes, not characters); walking
+ * `container`+`offset` back to a text-node-relative index would need the
+ * same "first/last text descendant" logic `Range.toString()` already
+ * implements internally, so reusing it here (rather than re-deriving it) is
+ * simpler and matches the browser's own definition of "flattened text
+ * length" exactly, including for element-node boundaries.
+ */
+function domOffsetFromBoundary(rootEl, container, offset) {
+    try {
+        const preRange = document.createRange();
+        preRange.selectNodeContents(rootEl);
+        preRange.setEnd(container, offset);
+        return preRange.toString().length;
+    } catch (err) {
+        return 0;
+    }
+}
+
+/** Build (once, lazily) the floating selection toolbar's DOM inside the
+ * static `#annotate-toolbar` container reader.html provides, and wire its
+ * mouseup/selectionchange show/hide + color/Note/Copy click handlers. Safe
+ * to call once per article load (setupAnnotations always runs after a fresh
+ * loadArticle()); re-populating innerHTML each time is harmless since no
+ * article-specific data is baked into the toolbar's static markup. */
+function setupAnnotationToolbar(bodyEl) {
+    const toolbar = document.getElementById("annotate-toolbar");
+    if (!toolbar) return; // template didn't ship the container — degrade silently
+
+    toolbar.innerHTML = `
+        ${ANNOTATE_COLORS.map(
+            (color) =>
+                `<button type="button" class="annotate-color-btn" data-color="${color}" title="Highlight ${color}"></button>`
+        ).join("")}
+        <span class="annotate-toolbar-sep"></span>
+        <button type="button" class="annotate-toolbar-btn" id="annotate-note-btn">Note</button>
+        <button type="button" class="annotate-toolbar-btn" id="annotate-copy-btn">Copy</button>
+    `;
+
+    const preventFocusLoss = (e) => e.preventDefault();
+
+    toolbar.querySelectorAll(".annotate-color-btn").forEach((btn) => {
+        btn.addEventListener("mousedown", preventFocusLoss);
+        btn.addEventListener("click", () => {
+            createHighlightFromSelection(btn.dataset.color);
+        });
+    });
+
+    const noteBtn = document.getElementById("annotate-note-btn");
+    noteBtn.addEventListener("mousedown", preventFocusLoss);
+    noteBtn.addEventListener("click", async () => {
+        const hl = await createHighlightFromSelection(ANNOTATE_DEFAULT_COLOR);
+        if (hl) {
+            // Seam for T3 (notes panel): the real note editor doesn't exist
+            // yet, so this is judged/documented scope for THIS task — create
+            // the highlight, announce it, and hand off via a CustomEvent
+            // carrying the new highlight's uid. T3 listens for this to open
+            // its editor pre-focused on the right highlight.
+            document.dispatchEvent(
+                new CustomEvent("tiro:highlight-created", { detail: { uid: hl.uid } })
+            );
+            showToast("Highlight added — notes editor arrives in a later task", "info");
+        }
+    });
+
+    const copyBtn = document.getElementById("annotate-copy-btn");
+    copyBtn.addEventListener("mousedown", preventFocusLoss);
+    copyBtn.addEventListener("click", () => {
+        copySelectionText();
+    });
+
+    // mouseup responds immediately (the Playwright spec dispatches this
+    // directly after building a programmatic selection); selectionchange is
+    // a debounced backstop for keyboard-driven selection changes (e.g.
+    // shift+arrow) that don't necessarily fire a mouseup on the body.
+    bodyEl.addEventListener("mouseup", () => {
+        updateToolbarFromSelection(toolbar, bodyEl);
+    });
+    document.addEventListener("selectionchange", () => {
+        clearTimeout(annotationSelectionDebounceTimer);
+        annotationSelectionDebounceTimer = setTimeout(() => {
+            updateToolbarFromSelection(toolbar, bodyEl);
+        }, ANNOTATE_SELECTIONCHANGE_DEBOUNCE_MS);
+    });
+
+    document.addEventListener("mousedown", (e) => {
+        if (toolbar.classList.contains("open") && !toolbar.contains(e.target)) {
+            hideAnnotationToolbar(toolbar);
+        }
+    });
+    window.addEventListener(
+        "scroll",
+        () => hideAnnotationToolbar(toolbar),
+        { capture: true, passive: true }
+    );
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && toolbar.classList.contains("open")) {
+            hideAnnotationToolbar(toolbar);
+        }
+    });
+}
+
+function updateToolbarFromSelection(toolbar, bodyEl) {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        hideAnnotationToolbar(toolbar);
+        return;
+    }
+    const range = sel.getRangeAt(0);
+    if (!bodyEl.contains(range.commonAncestorContainer)) {
+        hideAnnotationToolbar(toolbar);
+        return;
+    }
+    const text = sel.toString();
+    if (!text || !text.trim()) {
+        hideAnnotationToolbar(toolbar);
+        return;
+    }
+    annotationSelectionRange = range.cloneRange();
+    annotationSelectionText = text;
+    showAnnotationToolbar(toolbar, range);
+}
+
+function showAnnotationToolbar(toolbar, range) {
+    toolbar.classList.add("open");
+    const rects = range.getClientRects();
+    const rect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+
+    // Measure after making it visible so offsetWidth/Height are accurate.
+    const toolbarRect = toolbar.getBoundingClientRect();
+    let left = rect.right - toolbarRect.width;
+    let top = rect.bottom + 8;
+
+    left = Math.max(8, Math.min(left, window.innerWidth - toolbarRect.width - 8));
+    if (top + toolbarRect.height > window.innerHeight) {
+        top = rect.top - toolbarRect.height - 8;
+    }
+    top = Math.max(8, top);
+
+    toolbar.style.left = `${left}px`;
+    toolbar.style.top = `${top}px`;
+}
+
+function hideAnnotationToolbar(toolbar) {
+    toolbar.classList.remove("open");
+    annotationSelectionRange = null;
+    annotationSelectionText = "";
+}
+
+/**
+ * Map the current selection through buildTextIndex + projectMarkdown/
+ * plainToMarkdownRange and POST it. Returns the created highlight dict on
+ * success (with a synthesized `anchor_status` — see below), or `undefined`
+ * on failure/unanchorable (toast already shown; caller doesn't need to).
+ */
+async function createHighlightFromSelection(color) {
+    const toolbar = document.getElementById("annotate-toolbar");
+    const range = annotationSelectionRange;
+    const selText = annotationSelectionText;
+    if (!range || !selText) return undefined;
+
+    const bodyEl = document.getElementById("reader-body");
+    const domText = annotationTextIndex.text;
+    const domStart = domOffsetFromBoundary(bodyEl, range.startContainer, range.startOffset);
+    const domEnd = domOffsetFromBoundary(bodyEl, range.endContainer, range.endOffset);
+    const domPrefix = domText.slice(Math.max(0, domStart - ANNOTATE_CONTEXT_CHARS), domStart);
+    const domSuffix = domText.slice(domEnd, domEnd + ANNOTATE_CONTEXT_CHARS);
+    const approxPlainPos = domText.length
+        ? Math.round((domStart / domText.length) * annotationProjection.plain.length)
+        : 0;
+
+    let found = findQuoteInPlain(annotationProjection.plain, selText, domPrefix, domSuffix, approxPlainPos);
+    if (!found) {
+        found = findQuoteInPlainFallback(annotationProjection.plain, selText, domPrefix, domSuffix, approxPlainPos);
+    }
+    if (!found) {
+        showToast("Couldn't anchor this selection", "error");
+        if (toolbar) hideAnnotationToolbar(toolbar);
+        return undefined;
+    }
+
+    const mdRange = plainToMarkdownRange(annotationProjection, found.start, found.end);
+
+    try {
+        const res = await fetch(`/api/articles/${annotationArticleId}/highlights`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                position_start: mdRange.start,
+                position_end: mdRange.end,
+                color,
+            }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json || !json.success) {
+            showToast((json && json.detail) || "Failed to save highlight", "error");
+            return undefined;
+        }
+
+        const hl = json.data;
+        // The create endpoint's response is a bare highlight row (no
+        // anchor_status field — that's only computed by the GET/annotations
+        // reconciler against the CURRENT body). A highlight is trivially
+        // "exact" against the body it was JUST created from, so synthesize
+        // the same shape paintHighlight() expects rather than refetching.
+        hl.anchor_status = {
+            status: "exact",
+            position_start: hl.text_position_start,
+            position_end: hl.text_position_end,
+        };
+        annotationHighlights.push(hl);
+        paintHighlight(hl);
+
+        window.getSelection().removeAllRanges();
+        if (toolbar) hideAnnotationToolbar(toolbar);
+        return hl;
+    } catch (err) {
+        console.error("Highlight creation failed:", err);
+        showToast("Failed to save highlight", "error");
+        return undefined;
+    }
+}
+
+async function copySelectionText() {
+    const toolbar = document.getElementById("annotate-toolbar");
+    const text = annotationSelectionText;
+    if (!text) return;
+
+    try {
+        await navigator.clipboard.writeText(text);
+        showToast("Copied to clipboard", "success");
+    } catch (err) {
+        // Fallback for browsers/contexts without the async Clipboard API
+        // (e.g. non-secure context).
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+            showToast("Copied to clipboard", "success");
+        } catch (fallbackErr) {
+            console.error("Copy failed:", fallbackErr);
+            showToast("Copy failed", "error");
+        }
+    }
+    if (toolbar) hideAnnotationToolbar(toolbar);
 }

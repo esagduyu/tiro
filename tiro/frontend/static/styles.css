@@ -1604,6 +1604,77 @@ main {
     font-weight: 600;
 }
 
+/* --- Selection annotation toolbar (M2.2) ---
+   Positioned via inline left/top (in viewport px, `position: fixed`) set by
+   reader.js's showAnnotationToolbar() — .open only toggles visibility.
+   Color dot backgrounds are fixed hex values, deliberately NOT theme
+   variables: they represent literal highlighter-pen colors (same yellow/
+   green/blue/pink regardless of light/dark theme), matching the fixed
+   `COLORS` set tiro/api/routes_annotations.py validates against. Contrast
+   for the PAINTED highlight fill itself (against reader body text) is
+   handled per-theme in themes/papyrus.css and themes/roman-night.css's
+   ::highlight() rules, not here. */
+
+.annotate-toolbar {
+    display: none;
+    position: fixed;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--tiro-bg);
+    border: 1px solid var(--tiro-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    padding: 0.4rem 0.5rem;
+    z-index: 120;
+}
+
+.annotate-toolbar.open {
+    display: flex;
+}
+
+.annotate-color-btn {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid var(--tiro-border);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.annotate-color-btn:hover {
+    transform: scale(1.15);
+}
+
+.annotate-color-btn[data-color="yellow"] { background: #E8C34A; }
+.annotate-color-btn[data-color="green"]  { background: #7FAE5D; }
+.annotate-color-btn[data-color="blue"]   { background: #6FA0CE; }
+.annotate-color-btn[data-color="pink"]   { background: #D98CB2; }
+
+.annotate-toolbar-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--tiro-border);
+    margin: 0 0.1rem;
+    flex-shrink: 0;
+}
+
+.annotate-toolbar-btn {
+    border: none;
+    background: none;
+    color: var(--tiro-fg-secondary);
+    font-size: 0.85rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.annotate-toolbar-btn:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
+}
+
 /* --- View tabs (All Articles / Daily Digest) --- */
 
 .view-tabs {

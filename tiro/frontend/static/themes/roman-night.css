@@ -25,3 +25,22 @@
   --tiro-source-email: #A688A5;
   --tiro-source-rss: #CCA94E;
 }
+
+/* Reader highlight fills (M2.2) — see papyrus.css's matching block for the
+   full rationale (fixed literal tints, not `--tiro-*` tokens). Lower alpha
+   + darker-leaning tints than papyrus's here: against this theme's warm
+   charcoal bg (#1C1A17) and near-white body text (#E8E0D6), a fill as
+   bright/opaque as the light theme's would wash out text contrast, so these
+   lean more muted while staying clearly visible against the dark bg. */
+::highlight(tiro-hl-yellow) {
+  background-color: rgba(204, 169, 78, 0.38);
+}
+::highlight(tiro-hl-green) {
+  background-color: rgba(127, 148, 96, 0.38);
+}
+::highlight(tiro-hl-blue) {
+  background-color: rgba(107, 143, 187, 0.38);
+}
+::highlight(tiro-hl-pink) {
+  background-color: rgba(196, 107, 138, 0.35);
+}
