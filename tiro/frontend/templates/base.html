@@ -129,6 +129,11 @@
                     <button class="save-tab active" data-tab="url">URL</button>
                     <button class="save-tab" data-tab="email">.eml File</button>
                 </div>
+                <!-- Offline save queue indicator (M3.1 Task 3): shown only
+                     when saves are queued waiting for connectivity; text
+                     content is set from sidebar.js's updateQueueIndicator()
+                     (a plain "N queued" count, no user data). -->
+                <div id="save-queue-indicator" class="save-queue-indicator" style="display: none;"></div>
                 <div id="save-tab-url" class="save-tab-content">
                     <input type="text" id="save-url-input" class="save-url-input" placeholder="Paste a URL..." autocomplete="off">
                     <button id="save-url-btn" class="save-submit-btn">Save</button>
@@ -183,7 +188,9 @@
          sw-register.js (imported only by sidebar.js — service worker
          registration, added in M3.1 Task 2; also imported directly, with
          its own versioned entry tag, from login.html, which doesn't load
-         sidebar.js at all). The per-page
+         sidebar.js at all), and save-queue.js (imported only by sidebar.js
+         -- the offline save queue's pure logic core, added in M3.1 Task 3).
+         The per-page
          leaf entry modules (inbox.js/digest.js/reader.js/sources.js/
          wiki.js) are loaded ONLY via `<script src>` tags that already carry
          `?v={{ static_v }}` directly and are never `import`ed by anything
@@ -197,7 +204,8 @@
             "/static/js/core.js": "/static/js/core.js?v={{ static_v }}",
             "/static/js/sidebar.js": "/static/js/sidebar.js?v={{ static_v }}",
             "/static/js/annotate.js": "/static/js/annotate.js?v={{ static_v }}",
-            "/static/js/sw-register.js": "/static/js/sw-register.js?v={{ static_v }}"
+            "/static/js/sw-register.js": "/static/js/sw-register.js?v={{ static_v }}",
+            "/static/js/save-queue.js": "/static/js/save-queue.js?v={{ static_v }}"
         }
     }
     </script>

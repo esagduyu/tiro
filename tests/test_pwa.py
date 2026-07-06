@@ -182,3 +182,65 @@ def test_sw_register_module_exists_and_is_wired_into_sidebar_and_login():
     assert "registerServiceWorker" in sidebar_js
     login_html = (FRONTEND_DIR / "templates" / "login.html").read_text()
     assert "registerServiceWorker" in login_html
+
+
+# ---------------------------------------------------------------------------
+# M3.1 Task 3: offline save queue + Add-to-Home-Screen hint
+# ---------------------------------------------------------------------------
+
+
+def test_save_queue_module_exists_and_exports_pure_functions():
+    """The queue's array logic (dedupe/cap/FIFO/serialize) lives in its own
+    module so it's node-tested with no DOM/fetch -- see
+    js/tests/save-queue.test.mjs. Wiring itself (sidebar.js) is DOM/fetch-
+    bound and covered below by string pins + Playwright, same pattern as the
+    LAN banner (test_lan_banner.py) and saved views (test_views.py)."""
+    save_queue_js = (FRONTEND_DIR / "static" / "js" / "save-queue.js").read_text()
+    for symbol in (
+        "export function enqueueSave",
+        "export function dequeueForRetry",
+        "export function serializeQueue",
+        "export function deserializeQueue",
+        'export const SAVE_QUEUE_STORAGE_KEY = "tiro-save-queue"',
+    ):
+        assert symbol in save_queue_js, symbol
+
+
+def test_sidebar_js_wires_the_offline_save_queue():
+    """Regression pin: the save modal's submitURL() must enqueue on a
+    NETWORK error only (not surfaced as the existing success/409/4xx-5xx
+    branches), and the queue must be drained both on the browser's `online`
+    event and eagerly at page load if anything survived a prior session."""
+    sidebar_js = (FRONTEND_DIR / "static" / "js" / "sidebar.js").read_text()
+    assert 'from "./save-queue.js"' in sidebar_js
+    assert "queueOfflineSave" in sidebar_js
+    assert "drainSaveQueue" in sidebar_js
+    assert "window.addEventListener('online', drainSaveQueue)" in sidebar_js
+    assert "navigator.onLine" in sidebar_js
+    assert "save-queue-indicator" in sidebar_js
+
+
+def test_base_html_has_save_queue_indicator_element_and_import_map_entry():
+    base_html = (FRONTEND_DIR / "templates" / "base.html").read_text()
+    assert 'id="save-queue-indicator"' in base_html
+    assert '"/static/js/save-queue.js": "/static/js/save-queue.js?v={{ static_v }}"' in base_html
+
+
+def test_sidebar_js_wires_the_a2hs_hint():
+    """Regression pin: the hint must be viewport-gated (768px, matching the
+    existing mobile breakpoint), skipped in standalone display-mode, and
+    dismissed permanently via localStorage -- not a beforeinstallprompt
+    capture (explicitly out of scope per the binding spec)."""
+    sidebar_js = (FRONTEND_DIR / "static" / "js" / "sidebar.js").read_text()
+    assert 'tiro-a2hs-hint-dismissed' in sidebar_js
+    assert "display-mode: standalone" in sidebar_js
+    assert "max-width: 768px" in sidebar_js
+    assert "addEventListener('beforeinstallprompt'" not in sidebar_js
+    assert 'addEventListener("beforeinstallprompt"' not in sidebar_js
+    assert "setupA2HSHint" in sidebar_js
+
+
+def test_styles_css_has_save_queue_indicator_and_a2hs_hint_rules():
+    styles_css = (FRONTEND_DIR / "static" / "styles.css").read_text()
+    assert ".save-queue-indicator" in styles_css
+    assert ".a2hs-hint" in styles_css
