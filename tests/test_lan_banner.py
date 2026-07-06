@@ -265,6 +265,16 @@ def test_run_py_cert_without_key_is_argparse_error(monkeypatch):
     assert exc.value.code == 2
 
 
+def test_run_py_key_without_cert_is_argparse_error(monkeypatch):
+    """Symmetric to the cert-without-key case above — both-or-neither must
+    be enforced regardless of which of the pair is given alone."""
+    run = _import_run_module()
+    monkeypatch.setattr(sys, "argv", ["run.py", "--key", "/tmp/does-not-matter.pem"])
+    with pytest.raises(SystemExit) as exc:
+        run._parse_args()
+    assert exc.value.code == 2
+
+
 def test_run_py_nonexistent_cert_errors_before_uvicorn(monkeypatch, tmp_path):
     run = _import_run_module()
 

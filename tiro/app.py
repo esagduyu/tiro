@@ -574,10 +574,13 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
 
         config = request.app.state.config
         if not auth.consume_login_token(config, token):
-            return RedirectResponse(url="/login", status_code=302)
+            response = RedirectResponse(url="/login", status_code=302)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         session_token = auth.create_session(config.db_path)
         response = RedirectResponse(url="/inbox", status_code=302)
         auth.attach_session_cookie(response, request, session_token)
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.exception_handler(auth.NotAuthenticated)
@@ -630,7 +633,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         config = request.app.state.config
         token = auth.create_login_token(config)
         qr_url = _login_qr_target(request, token)
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             request,
             "qr_setup.html",
             {
@@ -640,6 +643,13 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
                 **_theme_context(request),
             },
         )
+        # A fresh single-use login token is embedded in this page's markup on
+        # every render (GET or POST) — a cached copy served back to the
+        # browser (bfcache, a shared proxy, browser history) would leak a
+        # token whose QR image a bystander could still scan. no-store is
+        # unconditional, not just no-cache, for exactly that reason.
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def qr_setup_page(request: Request):

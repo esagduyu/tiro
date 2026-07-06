@@ -240,3 +240,46 @@ def test_setup_qr_regenerate_requires_page_auth(auth_client):
     r = auth_client.post("/setup/qr")
     assert r.status_code == 302
     assert r.headers["location"] == "/login"
+
+
+# --- Security hardening: disjoint namespaces + no-store -----------------
+
+
+def test_login_token_as_session_cookie_is_rejected(auth_client, configured_library):
+    """SECURITY: a login token must not work if presented as the SESSION
+    cookie value either — login_tokens and sessions are wholly separate
+    tables/hash spaces. The Bearer-token variant of this is covered by
+    test_login_qr_token_not_usable_as_bearer_token above; this is the other
+    disjoint namespace (cookie-based auth), previously untested."""
+    token = auth.create_login_token(configured_library)
+    auth_client.cookies.set(auth.SESSION_COOKIE, token)
+    r = auth_client.get("/api/articles", follow_redirects=False)
+    assert r.status_code == 401
+
+    page_r = auth_client.get("/inbox", follow_redirects=False)
+    assert page_r.status_code == 302
+    assert page_r.headers["location"] == "/login"
+
+    # And the token wasn't silently consumed by either failed attempt — it
+    # still redeems normally via the real /login/qr path.
+    auth_client.cookies.delete(auth.SESSION_COOKIE)
+    redeem = auth_client.get(f"/login/qr?token={token}")
+    assert redeem.status_code == 302
+    assert redeem.headers["location"] == "/inbox"
+
+
+def test_login_qr_redirect_has_no_store(auth_client, configured_library):
+    token = auth.create_login_token(configured_library)
+    ok = auth_client.get(f"/login/qr?token={token}")
+    assert ok.headers["cache-control"] == "no-store"
+
+    fail = auth_client.get("/login/qr?token=garbage-not-real")
+    assert fail.headers["cache-control"] == "no-store"
+
+
+def test_setup_qr_page_has_no_store(authenticated_client):
+    get_r = authenticated_client.get("/setup/qr")
+    assert get_r.headers["cache-control"] == "no-store"
+
+    post_r = authenticated_client.post("/setup/qr")
+    assert post_r.headers["cache-control"] == "no-store"
