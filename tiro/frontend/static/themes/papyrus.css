@@ -46,3 +46,14 @@
 ::highlight(tiro-hl-pink) {
   background-color: rgba(217, 140, 178, 0.42);
 }
+/* Transient "flash" highlight (M2.2 Task 3): panel row click -> scrollIntoView
+   + a brief attention flash on the real painted range, using the SAME
+   CSS-Custom-Highlight mechanism as the 4 color buckets (never a wrapper
+   span). Registered/cleared lazily by reader.js's flashHighlightRange() via a
+   plain setTimeout — deliberately no CSS transition/animation, since
+   ::highlight() pseudo-element animation support is inconsistent across
+   engines; a stronger, more saturated tint than any stored color makes the
+   flash unambiguous regardless of the highlight's own color underneath. */
+::highlight(tiro-hl-flash) {
+  background-color: rgba(196, 91, 62, 0.55);
+}

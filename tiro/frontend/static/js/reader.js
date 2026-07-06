@@ -58,6 +58,31 @@
  * changes after initial render. Feature-detected: browsers without
  * `CSS.highlights` skip painting entirely (logged once) — every other
  * annotation feature (create/copy/note) still works.
+ *
+ * --- Highlights & Notes panel (M2.2 Task 3) ---
+ *
+ * `setupHighlightsPanel()` (called once from `loadArticle`, right after
+ * `setupAnnotations`) wires the `#highlights-panel` margin panel: a list of
+ * this article's highlights in document order (sorted by their LIVE
+ * `anchor_status.position_start`; `hash_mismatch`/`missing` highlights sort
+ * last and are additionally grouped under a separate "Couldn't re-anchor"
+ * warning section), per-uid actions (color swap, delete, note edit — all
+ * through `PATCH`/`DELETE /api/highlights/{uid}`), and an article-level note
+ * drawer at the panel's top (`PUT`/`DELETE /api/articles/{id}/note`). Opens
+ * with the SAME affordance as `#analysis-panel` (slide-in-from-right +
+ * backdrop overlay + Esc-to-close) for consistency, and the two panels are
+ * mutually exclusive (opening one closes the other) since both occupy the
+ * same fixed right-hand slot.
+ *
+ * `paintHighlight`'s successfully-built `Range` is additionally cached per
+ * uid in `annotationPaintedRanges` — the panel's delete/color-swap actions
+ * mutate that SAME Range object's bucket membership directly (no repaint
+ * pass needed, since editing color/note never changes a highlight's text
+ * position), and a panel-row click reuses it to `scrollIntoView` + flash the
+ * real painted range via a fifth, transient `tiro-hl-flash` Custom Highlight
+ * bucket (see `flashHighlightRange`). Clicking a highlight IN the article
+ * body (the reverse direction) is NOT implemented — see `flashHighlightRange`
+ * and task-3-report.md's "click-to-open decision" for the judgment call.
  */
 
 import {
@@ -67,6 +92,7 @@ import {
     renderMarkdown,
     showToast,
     timeAgo,
+    confirmDialog,
 } from "./core.js";
 import { showShortcuts, hideShortcuts } from "./sidebar.js";
 import {
@@ -194,6 +220,7 @@ async function loadArticle(id) {
         // Annotations (highlights + selection toolbar) — must run AFTER the
         // body's innerHTML is set (buildTextIndex walks the rendered DOM).
         setupAnnotations(a.id, a.content || "");
+        setupHighlightsPanel(a.id);
 
         // Rating buttons
         setupRating(a.id, a.rating);
@@ -337,6 +364,11 @@ function setupAnalysis(articleId) {
     const runBtn = document.getElementById("analysis-run-btn");
 
     function openPanel() {
+        // Mutually exclusive with the highlights panel (M2.2 Task 3) — both
+        // occupy the same fixed right-hand slot, so opening one closes the
+        // other rather than stacking two panels in the same spot.
+        document.getElementById("highlights-panel")?.classList.remove("open");
+        document.getElementById("highlights-overlay")?.classList.remove("open");
         panel.classList.add("open");
         overlay.classList.add("open");
     }
@@ -631,6 +663,16 @@ function setupReaderKeyboard(articleId) {
         const analysisPanel = document.getElementById("analysis-panel");
         if (analysisPanel && analysisPanel.classList.contains("open") && e.key === "Escape") {
             document.getElementById("analysis-close")?.click();
+            e.preventDefault();
+            return;
+        }
+
+        // If the highlights panel is open, Escape closes it too (M2.2 Task 3
+        // — same pattern as the analysis panel above; no new global keys are
+        // bound to open this panel this task, only mouse/click affordances).
+        const highlightsPanel = document.getElementById("highlights-panel");
+        if (highlightsPanel && highlightsPanel.classList.contains("open") && e.key === "Escape") {
+            document.getElementById("highlights-close")?.click();
             e.preventDefault();
             return;
         }
@@ -1017,6 +1059,8 @@ let annotationSelectionRange = null; // cloned Range backing the open toolbar
 let annotationSelectionText = "";
 let annotationSelectionDebounceTimer = null;
 let annotationArticleId = null;
+let annotateCreateInFlight = false; // guard: one POST per color/Note click, no concurrent creates
+let annotationPaintedRanges = new Map(); // uid -> {color, range} for the currently-painted Range per highlight (Task 3: delete/color-swap/flash reuse these directly)
 
 function setupAnnotations(articleId, articleContent) {
     annotationArticleId = articleId;
@@ -1024,6 +1068,7 @@ function setupAnnotations(articleId, articleContent) {
     annotationProjection = projectMarkdown(articleContent);
     annotationTextIndex = buildTextIndex(bodyEl);
     annotationHighlights = [];
+    annotationPaintedRanges = new Map();
 
     annotationCssSupported = typeof CSS !== "undefined" && !!CSS.highlights;
     if (annotationCssSupported) {
@@ -1053,6 +1098,11 @@ async function loadAnnotations(articleId) {
         if (!json.success) return;
         annotationHighlights = json.data.highlights || [];
         annotationHighlights.forEach(paintHighlight);
+        // Task 3: the same GET payload carries the article-level note — cache
+        // it and render the (by-then-already-wired) highlights panel rather
+        // than issuing a second fetch.
+        articleNoteState = json.data.note || null;
+        renderHighlightsPanel();
     } catch (err) {
         console.error("Failed to load annotations:", err);
     }
@@ -1092,9 +1142,15 @@ function paintHighlight(hl) {
     const range = domRangeFromTextIndices(annotationTextIndex, domRange.start, domRange.end);
     if (!range) return;
 
-    const bucket = annotationHighlightObjects[hl.color] || annotationHighlightObjects[ANNOTATE_DEFAULT_COLOR];
+    const paintColor = annotationHighlightObjects[hl.color] ? hl.color : ANNOTATE_DEFAULT_COLOR;
+    const bucket = annotationHighlightObjects[paintColor];
     try {
         bucket.add(range);
+        // Cache the real, successfully-painted Range per uid (Task 3): the
+        // panel's delete/color-swap actions mutate this SAME Range object's
+        // bucket membership directly instead of re-running the DOM<->plain
+        // bridge, and a panel-row click reuses it to scrollIntoView + flash.
+        if (hl.uid) annotationPaintedRanges.set(hl.uid, { color: paintColor, range });
     } catch (err) {
         // Range construction succeeded but Highlight.add() can still throw
         // on a degenerate/collapsed range in some engines — never let a
@@ -1201,6 +1257,15 @@ function domOffsetFromBoundary(rootEl, container, offset) {
         preRange.setEnd(container, offset);
         return preRange.toString().length;
     } catch (err) {
+        // Swallowed-exception risk is BOUNDED, not silent data corruption:
+        // a thrown `setEnd`/`toString` here only means this ONE boundary
+        // falls back to offset 0, which feeds `approxPlainPos` — a tiebreak
+        // hint for `findQuoteInPlain`'s proximity scoring, not the quote
+        // match itself. The quote text still has to be found verbatim in
+        // `annotationProjection.plain` (via prefix/suffix/exact-text
+        // scoring) for a highlight to be created at all; a bad approxPos at
+        // worst picks the wrong occurrence among several equally-scored
+        // duplicates, it never fabricates a match that isn't really there.
         return 0;
     }
 }
@@ -1311,6 +1376,10 @@ function updateToolbarFromSelection(toolbar, bodyEl) {
 
 function showAnnotationToolbar(toolbar, range) {
     toolbar.classList.add("open");
+    // Clickable content (color dots, Note, Copy) must not sit inside an
+    // aria-hidden subtree — toggle the attribute in lockstep with .open
+    // (the template ships aria-hidden="true" as the closed/default state).
+    toolbar.removeAttribute("aria-hidden");
     const rects = range.getClientRects();
     const rect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
 
@@ -1331,6 +1400,7 @@ function showAnnotationToolbar(toolbar, range) {
 
 function hideAnnotationToolbar(toolbar) {
     toolbar.classList.remove("open");
+    toolbar.setAttribute("aria-hidden", "true");
     annotationSelectionRange = null;
     annotationSelectionText = "";
 }
@@ -1342,6 +1412,19 @@ function hideAnnotationToolbar(toolbar) {
  * on failure/unanchorable (toast already shown; caller doesn't need to).
  */
 async function createHighlightFromSelection(color) {
+    // In-flight guard (digestGenerating/analysisInFlight style, per
+    // CLAUDE.md's convention): a rapid double-click on a color dot or the
+    // Note button must fire exactly one POST, not two concurrent creates.
+    if (annotateCreateInFlight) return undefined;
+    annotateCreateInFlight = true;
+    try {
+        return await createHighlightFromSelectionInner(color);
+    } finally {
+        annotateCreateInFlight = false;
+    }
+}
+
+async function createHighlightFromSelectionInner(color) {
     const toolbar = document.getElementById("annotate-toolbar");
     const range = annotationSelectionRange;
     const selText = annotationSelectionText;
@@ -1398,6 +1481,12 @@ async function createHighlightFromSelection(color) {
         };
         annotationHighlights.push(hl);
         paintHighlight(hl);
+        // Task 3: keep the highlights panel's list in sync immediately, even
+        // when the panel is closed or wasn't opened via the "Note" button
+        // seam below (a plain color-dot click never dispatches
+        // tiro:highlight-created) — otherwise the panel would show a stale
+        // list (missing this highlight) until the next full page reload.
+        renderHighlightsPanel();
 
         window.getSelection().removeAllRanges();
         if (toolbar) hideAnnotationToolbar(toolbar);
@@ -1437,4 +1526,563 @@ async function copySelectionText() {
         }
     }
     if (toolbar) hideAnnotationToolbar(toolbar);
+}
+
+/* --- Highlights & Notes panel (M2.2 Task 3) --- */
+
+const HIGHLIGHT_QUOTE_TRUNCATE = 140;
+
+let articleNoteState = null; // {uid, body_markdown, updated_at} | null, from the annotations GET
+let noteSaveInFlight = false; // guard: article-note Save button
+let noteClearInFlight = false; // guard: article-note Clear button
+let highlightActionInFlight = new Set(); // guard: per-uid PATCH/DELETE (color/note/delete)
+
+function setupHighlightsPanel(articleId) {
+    const btn = document.getElementById("highlights-btn");
+    const noteBtn = document.getElementById("article-note-btn");
+    const panel = document.getElementById("highlights-panel");
+    const overlay = document.getElementById("highlights-overlay");
+    const closeBtn = document.getElementById("highlights-close");
+    const drawer = document.getElementById("note-drawer");
+    const listEl = document.getElementById("highlights-list");
+    const warningListEl = document.getElementById("highlights-warning-list");
+    if (!btn || !panel || !overlay || !closeBtn) return; // template didn't ship the panel — degrade silently
+
+    function openPanel() {
+        // Mutually exclusive with the analysis panel — see that panel's
+        // openPanel() for the symmetric close-the-other-one call.
+        document.getElementById("analysis-panel")?.classList.remove("open");
+        document.getElementById("analysis-overlay")?.classList.remove("open");
+        panel.classList.add("open");
+        overlay.classList.add("open");
+    }
+    function closePanel() {
+        panel.classList.remove("open");
+        overlay.classList.remove("open");
+    }
+
+    btn.addEventListener("click", openPanel);
+    closeBtn.addEventListener("click", closePanel);
+    overlay.addEventListener("click", closePanel);
+
+    if (noteBtn && drawer) {
+        // Opens the panel (idempotently) with the note drawer expanded and
+        // focused. NOT a strict open/closed toggle on repeat clicks: manual
+        // testing showed the full-viewport backdrop overlay (same mechanism
+        // `#analysis-overlay` already uses, `position: fixed; inset: 0`)
+        // sits ABOVE the header buttons in stacking order once a panel is
+        // open, so a "second click on this same header button" while the
+        // panel is already open is never actually reachable through the UI
+        // in the first place (the overlay intercepts the click and closes
+        // the panel instead) — the same constraint the pre-existing analysis
+        // panel already lives with for ITS header button. An idempotent
+        // "always open + expand" is simpler and matches what's actually
+        // clickable; collapsing the drawer without closing the whole panel
+        // isn't reachable via this button and isn't offered elsewhere either
+        // (documented judgment call — see task-3-report.md).
+        noteBtn.addEventListener("click", () => {
+            openPanel();
+            drawer.classList.add("open");
+            document.getElementById("article-note-textarea")?.focus();
+        });
+    }
+
+    setupArticleNoteControls(articleId);
+    if (listEl) attachHighlightsListEvents(listEl);
+    if (warningListEl) attachHighlightsListEvents(warningListEl);
+
+    // T2's seam (js/reader.js's annotate-toolbar "Note" button): a highlight
+    // created from the floating selection toolbar dispatches this with the
+    // new highlight's uid. Open the panel and jump straight to that
+    // highlight's note editor, pre-focused.
+    document.addEventListener("tiro:highlight-created", (e) => {
+        openPanel();
+        renderHighlightsPanel();
+        focusHighlightNote(e.detail.uid);
+    });
+}
+
+/** Re-render both the article-note drawer and the highlight list/warning
+ * section from current in-memory state (`annotationHighlights` +
+ * `articleNoteState`). Safe to call liberally after any mutation — a full
+ * re-render is simpler and robust enough at this document's scale (one
+ * article's highlights, not a corpus); the one known cost is that any OTHER
+ * highlight's note editor that happened to be open gets collapsed back to
+ * closed, since editor open/closed state isn't tracked separately from the
+ * DOM (documented judgment call, not a bug — see task-3-report.md). */
+function renderHighlightsPanel() {
+    renderArticleNoteDrawer();
+
+    const listEl = document.getElementById("highlights-list");
+    const emptyEl = document.getElementById("highlights-empty");
+    const warningSection = document.getElementById("highlights-warning-section");
+    const warningListEl = document.getElementById("highlights-warning-list");
+    if (!listEl || !emptyEl || !warningSection || !warningListEl) return;
+
+    const sorted = sortedHighlightsForPanel();
+    const normal = sorted.filter((hl) => !isWarningHighlight(hl));
+    const warnings = sorted.filter(isWarningHighlight);
+
+    emptyEl.style.display = sorted.length === 0 ? "block" : "none";
+    listEl.innerHTML = normal.map((hl) => renderHighlightRow(hl, { full: false })).join("");
+
+    if (warnings.length) {
+        warningSection.style.display = "block";
+        warningListEl.innerHTML = warnings.map((hl) => renderHighlightRow(hl, { full: true })).join("");
+    } else {
+        warningSection.style.display = "none";
+        warningListEl.innerHTML = "";
+    }
+}
+
+/** Highlights in DOCUMENT ORDER: sorted by their LIVE `anchor_status.
+ * position_start` (exact/shifted only — that field is the reconciled,
+ * possibly-relocated position, same field paintHighlight() itself reads),
+ * with unanchored (hash_mismatch/missing) highlights sorted last. Ties
+ * (including "no position" ties among unanchored highlights) keep the
+ * server's own ordering (`ORDER BY text_position_start IS NULL,
+ * text_position_start, created_at` — see routes_annotations.py's
+ * get_annotations) via a stable index tiebreak, since Array.prototype.sort
+ * is stable per spec but this makes that reliance explicit. */
+function sortedHighlightsForPanel() {
+    return annotationHighlights
+        .map((hl, i) => ({ hl, i }))
+        .sort((a, b) => {
+            const diff = anchorSortKey(a.hl) - anchorSortKey(b.hl);
+            if (diff !== 0) return diff;
+            return a.i - b.i;
+        })
+        .map((w) => w.hl);
+}
+
+function anchorSortKey(hl) {
+    const status = hl.anchor_status && hl.anchor_status.status;
+    if (status === "exact" || status === "shifted") {
+        const pos = hl.anchor_status.position_start;
+        if (typeof pos === "number") return pos;
+    }
+    return Number.MAX_SAFE_INTEGER;
+}
+
+function isWarningHighlight(hl) {
+    const status = hl.anchor_status && hl.anchor_status.status;
+    return status === "hash_mismatch" || status === "missing";
+}
+
+function truncateQuote(text, max) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return text.slice(0, max - 1).trimEnd() + "…";
+}
+
+function warningBadgeLabel(hl) {
+    const status = hl.anchor_status && hl.anchor_status.status;
+    if (status === "missing") return "Text not found";
+    if (status === "hash_mismatch") return "Content changed";
+    return "Couldn't re-anchor";
+}
+
+/** One highlight row's HTML. `full: true` (the warning-section variant) shows
+ * the FULL quote text (not truncated) plus a status badge, per the brief —
+ * "with the quote text so the user can find it manually." Every server
+ * string goes through esc(); the note body itself is never interpolated
+ * here as raw HTML (only later, through renderMarkdown, in the preview
+ * toggle). "find similar text" affordance is explicitly out of scope (noted
+ * in task-3-report.md), matching the brief's own carve-out. */
+function renderHighlightRow(hl, { full }) {
+    const rawQuote = hl.quote_text || "";
+    const quoteText = full ? rawQuote : truncateQuote(rawQuote, HIGHLIGHT_QUOTE_TRUNCATE);
+    const quoteClass = full ? "highlight-quote-full" : "highlight-quote";
+    const hasNote = !!(hl.note_markdown && hl.note_markdown.trim());
+    const uid = esc(hl.uid);
+    const badge = full
+        ? `<span class="highlight-anchor-badge">${esc(warningBadgeLabel(hl))}</span>`
+        : "";
+    const noteIndicator = hasNote
+        ? '<span class="highlight-note-indicator" title="Has a note">&#128221;</span>'
+        : "";
+    const colorButtons = ANNOTATE_COLORS
+        .map(
+            (c) =>
+                `<button type="button" class="highlight-color-btn" data-color="${c}" data-uid="${uid}" title="${c}"></button>`
+        )
+        .join("");
+
+    return `
+        <div class="highlight-row" data-uid="${uid}">
+            ${badge}
+            <div class="highlight-row-main">
+                <span class="highlight-color-dot" data-color="${esc(hl.color)}"></span>
+                <span class="${quoteClass}">${esc(quoteText)}</span>
+                ${noteIndicator}
+            </div>
+            <div class="highlight-row-actions">
+                <div class="highlight-color-picker">${colorButtons}</div>
+                <button type="button" class="highlight-note-btn" data-uid="${uid}">${hasNote ? "Edit note" : "Add note"}</button>
+                <button type="button" class="highlight-delete-btn" data-uid="${uid}" title="Delete highlight" aria-label="Delete highlight">&#128465;</button>
+            </div>
+            <div class="highlight-note-editor" id="highlight-note-editor-${uid}" style="display: none;">
+                <textarea class="highlight-note-textarea" data-uid="${uid}">${esc(hl.note_markdown || "")}</textarea>
+                <div class="highlight-note-preview" style="display: none;"></div>
+                <div class="highlight-note-actions">
+                    <button type="button" class="highlight-note-save-btn" data-uid="${uid}">Save</button>
+                    <button type="button" class="highlight-note-preview-toggle-btn" data-uid="${uid}">Preview</button>
+                    <button type="button" class="highlight-note-cancel-btn" data-uid="${uid}">Cancel</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+/** Single delegated click handler per list container (`#highlights-list` /
+ * `#highlights-warning-list`), attached ONCE in setupHighlightsPanel — safe
+ * across every renderHighlightsPanel() innerHTML replacement since the
+ * listener lives on the (never-replaced) container element, not its
+ * children. Order matters: specific action buttons are matched before the
+ * generic "row click -> flash" fallback, and clicks anywhere inside an open
+ * note editor (textarea/preview, not just its buttons) are excluded from
+ * that fallback so placing a cursor to type a note doesn't also scroll/flash
+ * the article body. */
+function attachHighlightsListEvents(container) {
+    container.addEventListener("click", (e) => {
+        const colorBtn = e.target.closest(".highlight-color-btn");
+        if (colorBtn) {
+            updateHighlightColor(colorBtn.dataset.uid, colorBtn.dataset.color);
+            return;
+        }
+        const noteBtn = e.target.closest(".highlight-note-btn");
+        if (noteBtn) {
+            toggleHighlightNoteEditor(noteBtn.dataset.uid);
+            return;
+        }
+        const deleteBtn = e.target.closest(".highlight-delete-btn");
+        if (deleteBtn) {
+            deleteHighlightRow(deleteBtn.dataset.uid);
+            return;
+        }
+        const saveBtn = e.target.closest(".highlight-note-save-btn");
+        if (saveBtn) {
+            saveHighlightNoteFromEditor(saveBtn.dataset.uid);
+            return;
+        }
+        const previewBtn = e.target.closest(".highlight-note-preview-toggle-btn");
+        if (previewBtn) {
+            toggleHighlightNotePreview(previewBtn.dataset.uid);
+            return;
+        }
+        const cancelBtn = e.target.closest(".highlight-note-cancel-btn");
+        if (cancelBtn) {
+            closeHighlightNoteEditor(cancelBtn.dataset.uid);
+            return;
+        }
+        if (e.target.closest(".highlight-note-editor")) return;
+
+        const row = e.target.closest(".highlight-row");
+        if (row && row.dataset.uid) {
+            flashHighlightRange(row.dataset.uid);
+        }
+    });
+}
+
+function toggleHighlightNoteEditor(uid) {
+    const editor = document.getElementById(`highlight-note-editor-${uid}`);
+    if (!editor) return;
+    const isOpen = editor.style.display !== "none";
+    // Only one note editor open at a time, panel-wide — collapse any other.
+    document.querySelectorAll(".highlight-note-editor").forEach((el) => {
+        if (el !== editor) el.style.display = "none";
+    });
+    editor.style.display = isOpen ? "none" : "block";
+    if (!isOpen) {
+        editor.querySelector(".highlight-note-textarea")?.focus();
+    }
+}
+
+function closeHighlightNoteEditor(uid) {
+    const editor = document.getElementById(`highlight-note-editor-${uid}`);
+    if (editor) editor.style.display = "none";
+}
+
+/** Preview toggle: rendering goes ONLY through renderMarkdown (marked ->
+ * DOMPurify) per the brief's XSS rule — never a raw innerHTML of the
+ * textarea's value. */
+function toggleHighlightNotePreview(uid) {
+    const editor = document.getElementById(`highlight-note-editor-${uid}`);
+    if (!editor) return;
+    const textarea = editor.querySelector(".highlight-note-textarea");
+    const preview = editor.querySelector(".highlight-note-preview");
+    const btn = editor.querySelector(".highlight-note-preview-toggle-btn");
+    if (!textarea || !preview || !btn) return;
+
+    const showingPreview = preview.style.display !== "none";
+    if (showingPreview) {
+        preview.style.display = "none";
+        textarea.style.display = "";
+        btn.textContent = "Preview";
+    } else {
+        preview.innerHTML = renderMarkdown(textarea.value);
+        preview.style.display = "block";
+        textarea.style.display = "none";
+        btn.textContent = "Edit";
+    }
+}
+
+function saveHighlightNoteFromEditor(uid) {
+    const editor = document.getElementById(`highlight-note-editor-${uid}`);
+    const textarea = editor && editor.querySelector(".highlight-note-textarea");
+    if (!textarea) return;
+    saveHighlightNote(uid, textarea.value);
+}
+
+/** Merge a PATCH/create response into the local `annotationHighlights` cache
+ * by uid. `anchor_status` is deliberately never touched here — PATCH's
+ * response shape (`_highlight_row_to_dict`) has no such field (only the GET/
+ * annotations reconciler computes it), so a spread merge naturally leaves
+ * the previously-known anchor_status in place, which is correct: neither a
+ * color nor a note edit changes a highlight's text position. */
+function mergeHighlightUpdate(data) {
+    const idx = annotationHighlights.findIndex((h) => h.uid === data.uid);
+    if (idx !== -1) {
+        annotationHighlights[idx] = { ...annotationHighlights[idx], ...data };
+    }
+}
+
+async function updateHighlightColor(uid, color) {
+    if (highlightActionInFlight.has(uid)) return;
+    highlightActionInFlight.add(uid);
+    try {
+        const res = await fetch(`/api/highlights/${uid}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ color }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json || !json.success) {
+            showToast((json && json.detail) || "Failed to change highlight color", "error");
+            return;
+        }
+        mergeHighlightUpdate(json.data);
+        repaintHighlightColor(uid, json.data.color);
+        renderHighlightsPanel();
+    } catch (err) {
+        console.error("Failed to change highlight color:", err);
+        showToast("Failed to change highlight color", "error");
+    } finally {
+        highlightActionInFlight.delete(uid);
+    }
+}
+
+/** Move the ALREADY-PAINTED Range for `uid` between color buckets directly —
+ * no repaint pass (no re-running the DOM<->plain bridge), since a color
+ * change never changes a highlight's text position. No-op if the highlight
+ * isn't currently painted (CSS.highlights unsupported, or its anchor status
+ * was hash_mismatch/missing and so was never painted in the first place). */
+function repaintHighlightColor(uid, newColor) {
+    const rec = annotationPaintedRanges.get(uid);
+    if (!rec || !annotationCssSupported) return;
+    const oldBucket = annotationHighlightObjects[rec.color];
+    const resolvedColor = annotationHighlightObjects[newColor] ? newColor : ANNOTATE_DEFAULT_COLOR;
+    const newBucket = annotationHighlightObjects[resolvedColor];
+    if (oldBucket) oldBucket.delete(rec.range);
+    if (newBucket) newBucket.add(rec.range);
+    rec.color = resolvedColor;
+}
+
+function unpaintHighlight(uid) {
+    const rec = annotationPaintedRanges.get(uid);
+    if (rec && annotationCssSupported) {
+        annotationHighlightObjects[rec.color]?.delete(rec.range);
+    }
+    annotationPaintedRanges.delete(uid);
+}
+
+async function deleteHighlightRow(uid) {
+    const confirmed = await confirmDialog(
+        "Delete this highlight? This cannot be undone.",
+        { title: "Delete highlight", confirmText: "Delete", cancelText: "Cancel", danger: true }
+    );
+    if (!confirmed) return;
+    if (highlightActionInFlight.has(uid)) return;
+    highlightActionInFlight.add(uid);
+    try {
+        const res = await fetch(`/api/highlights/${uid}`, { method: "DELETE" });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json || !json.success) {
+            showToast((json && json.detail) || "Failed to delete highlight", "error");
+            return;
+        }
+        unpaintHighlight(uid);
+        annotationHighlights = annotationHighlights.filter((h) => h.uid !== uid);
+        renderHighlightsPanel();
+        showToast("Highlight deleted", "success");
+    } catch (err) {
+        console.error("Failed to delete highlight:", err);
+        showToast("Failed to delete highlight", "error");
+    } finally {
+        highlightActionInFlight.delete(uid);
+    }
+}
+
+async function saveHighlightNote(uid, noteMarkdown) {
+    if (highlightActionInFlight.has(uid)) return;
+    highlightActionInFlight.add(uid);
+    try {
+        const res = await fetch(`/api/highlights/${uid}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ note_markdown: noteMarkdown }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json || !json.success) {
+            showToast((json && json.detail) || "Failed to save note", "error");
+            return;
+        }
+        mergeHighlightUpdate(json.data);
+        renderHighlightsPanel();
+        showToast("Note saved", "success");
+    } catch (err) {
+        console.error("Failed to save highlight note:", err);
+        showToast("Failed to save note", "error");
+    } finally {
+        highlightActionInFlight.delete(uid);
+    }
+}
+
+/** Seam consumer for T2's `tiro:highlight-created` CustomEvent: opens (via
+ * setupHighlightsPanel's listener, already called before this) the new
+ * highlight's note editor and scrolls the panel row into view. Called after
+ * renderHighlightsPanel() has already run for the freshly-created highlight,
+ * so the row/editor DOM is guaranteed to exist. */
+function focusHighlightNote(uid) {
+    toggleHighlightNoteEditor(uid);
+    document.querySelector(`.highlight-row[data-uid="${uid}"]`)?.scrollIntoView({ block: "center" });
+}
+
+/**
+ * Click-to-open judgment call (documented per the brief's "judge and
+ * document" instruction): only the PANEL-ROW -> BODY direction is
+ * implemented. A panel row click scrolls the article body to the
+ * ALREADY-COMPUTED painted Range (`annotationPaintedRanges`, populated by
+ * paintHighlight — no re-running the DOM<->plain bridge) and flashes it via
+ * a fifth, transient `tiro-hl-flash` Custom Highlight bucket cleared after
+ * ~1.2s (a plain setTimeout, not a CSS transition/animation — ::highlight()
+ * pseudo-element animation support is inconsistent across engines).
+ *
+ * The REVERSE direction (clicking a painted highlight IN the article body ->
+ * open its panel row) is NOT implemented. CSS Custom Highlights carry no
+ * click/pointer-event semantics of their own (unlike a wrapper `<mark>`
+ * span, there's no element to attach a listener to) — resolving a body click
+ * to "which highlight is under the cursor" would need
+ * `document.caretPositionFromPoint`/`caretRangeFromPoint` (non-standard/
+ * inconsistent browser support) to get a text offset, THEN a linear scan
+ * over every painted Range's boundaries to find a containing one, on every
+ * click anywhere in the article body. That's not "cheap" by the brief's own
+ * bar, and the panel-row-driven direction already gets the user from any
+ * highlight to its note/actions in one click from the panel — reserved as a
+ * candidate for a future task if real usage shows the reverse direction is
+ * needed.
+ */
+function flashHighlightRange(uid) {
+    const rec = annotationPaintedRanges.get(uid);
+    if (!rec) {
+        // Unanchored (warning-section) highlights have no live Range — the
+        // full quote text shown in that row is the user's manual-search aid
+        // instead (the brief's "find similar text" affordance is out of
+        // scope, per its own note).
+        return;
+    }
+    const { range } = rec;
+    const container = range.startContainer;
+    const el = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    if (!annotationCssSupported) return;
+    let flashBucket = CSS.highlights.get("tiro-hl-flash");
+    if (!flashBucket) {
+        flashBucket = new Highlight();
+        CSS.highlights.set("tiro-hl-flash", flashBucket);
+    }
+    flashBucket.clear();
+    flashBucket.add(range);
+    setTimeout(() => flashBucket.clear(), 1200);
+}
+
+/* --- Article-level note drawer (M2.2 Task 3) --- */
+
+function renderArticleNoteDrawer() {
+    const textarea = document.getElementById("article-note-textarea");
+    const preview = document.getElementById("article-note-preview");
+    if (!textarea || !preview) return;
+    // Don't clobber an in-progress edit on an unrelated re-render (e.g. a
+    // highlight created elsewhere) — only sync from server state when the
+    // textarea isn't the currently focused element.
+    if (document.activeElement !== textarea) {
+        textarea.value = articleNoteState ? articleNoteState.body_markdown || "" : "";
+    }
+    preview.innerHTML = textarea.value ? renderMarkdown(textarea.value) : "";
+}
+
+function setupArticleNoteControls(articleId) {
+    const textarea = document.getElementById("article-note-textarea");
+    const preview = document.getElementById("article-note-preview");
+    const saveBtn = document.getElementById("article-note-save");
+    const clearBtn = document.getElementById("article-note-clear");
+    if (!textarea || !preview || !saveBtn || !clearBtn) return;
+
+    // Live preview — renderMarkdown only, per the XSS rule.
+    textarea.addEventListener("input", () => {
+        preview.innerHTML = textarea.value ? renderMarkdown(textarea.value) : "";
+    });
+
+    saveBtn.addEventListener("click", async () => {
+        if (noteSaveInFlight) return;
+        noteSaveInFlight = true;
+        try {
+            const res = await fetch(`/api/articles/${articleId}/note`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ body_markdown: textarea.value }),
+            });
+            const json = await res.json().catch(() => null);
+            if (!res.ok || !json || !json.success) {
+                // 400 (whitespace-only body_markdown) surfaces here as a toast.
+                showToast((json && json.detail) || "Failed to save note", "error");
+                return;
+            }
+            articleNoteState = json.data;
+            showToast("Note saved", "success");
+        } catch (err) {
+            console.error("Failed to save article note:", err);
+            showToast("Failed to save note", "error");
+        } finally {
+            noteSaveInFlight = false;
+        }
+    });
+
+    clearBtn.addEventListener("click", async () => {
+        const confirmed = await confirmDialog(
+            "Clear the article-level note? This cannot be undone.",
+            { title: "Clear note", confirmText: "Clear", cancelText: "Cancel", danger: true }
+        );
+        if (!confirmed) return;
+        if (noteClearInFlight) return;
+        noteClearInFlight = true;
+        try {
+            const res = await fetch(`/api/articles/${articleId}/note`, { method: "DELETE" });
+            const json = await res.json().catch(() => null);
+            if (!res.ok || !json || !json.success) {
+                showToast((json && json.detail) || "Failed to clear note", "error");
+                return;
+            }
+            articleNoteState = null;
+            textarea.value = "";
+            preview.innerHTML = "";
+            showToast("Note cleared", "success");
+        } catch (err) {
+            console.error("Failed to clear article note:", err);
+            showToast("Failed to clear note", "error");
+        } finally {
+            noteClearInFlight = false;
+        }
+    });
 }

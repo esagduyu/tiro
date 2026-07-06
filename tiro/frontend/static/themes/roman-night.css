@@ -44,3 +44,9 @@
 ::highlight(tiro-hl-pink) {
   background-color: rgba(196, 107, 138, 0.35);
 }
+/* Transient "flash" highlight (M2.2 Task 3) — see papyrus.css's matching
+   block for the full rationale. Same accent-toned flash tint at a lower
+   alpha, consistent with this theme's more muted color-fill posture. */
+::highlight(tiro-hl-flash) {
+  background-color: rgba(212, 107, 78, 0.5);
+}

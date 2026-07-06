@@ -158,4 +158,134 @@ test.describe('M2.2 reader annotation UI', () => {
     // --- Manual console sweep: zero JS errors across the whole flow ---
     expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
   });
+
+  // M2.2 Task 3 addition: the soft-fail case folded in from T2's review —
+  // a selection whose text CANNOT be anchored must toast and post nothing.
+  test('unanchorable selection shows a toast and posts nothing', async ({ page }) => {
+    const consoleErrors = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+    const highlightPosts = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/highlights') && req.method() === 'POST') {
+        highlightPosts.push(req.url());
+      }
+    });
+
+    await loginOrSetup(page);
+    await saveAndOpenTestArticle(page);
+
+    // Mutate the rendered DOM so the paragraph's text no longer exists
+    // anywhere in the article's underlying markdown. `annotationProjection`
+    // was already built from the ORIGINAL fetched content at load time and
+    // never re-reads the DOM, so a selection over this replaced text is
+    // genuinely unanchorable (not just prefix/suffix noise) — this is the
+    // real soft-fail path, not a contrived one.
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      p.textContent = 'zzqxvville floobernaut unanchorable gibberish 837291';
+    });
+
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.getElementById('reader-body').dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true })
+      );
+    });
+
+    const toolbar = page.locator('#annotate-toolbar.open');
+    await expect(toolbar).toHaveCount(1, { timeout: 5000 });
+
+    const yellowBtn = page.locator('.annotate-color-btn[data-color="yellow"]');
+    await yellowBtn.click();
+
+    // The toast is shown SYNCHRONOUSLY on the same call path that decides
+    // not to POST (no `await` precedes it in createHighlightFromSelection's
+    // failure branch) — waiting for it is a non-flaky synchronization point
+    // rather than a fixed sleep: by the time it's visible, the decision not
+    // to fetch has already been made and won't un-make itself later.
+    await expect(page.locator('.settings-toast')).toContainText("Couldn't anchor", { timeout: 5000 });
+
+    expect(highlightPosts).toEqual([]);
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
+
+  // M2.2 Task 3: highlight note round-trip through the highlights panel.
+  test('highlight note round-trip: add via panel, reload, note visible', async ({ page }) => {
+    const consoleErrors = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+    await loginOrSetup(page);
+    await saveAndOpenTestArticle(page);
+
+    await page.evaluate(() => {
+      const p = document.querySelector('#reader-body p');
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.getElementById('reader-body').dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true })
+      );
+    });
+
+    const toolbar = page.locator('#annotate-toolbar.open');
+    await expect(toolbar).toHaveCount(1, { timeout: 5000 });
+
+    const greenBtn = page.locator('.annotate-color-btn[data-color="green"]');
+    const [createResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes('/highlights') && res.request().method() === 'POST'
+      ),
+      greenBtn.click(),
+    ]);
+    const created = await createResponse.json();
+    const uid = created.data.uid;
+
+    // Open the highlights panel and add a note through it.
+    await page.locator('#highlights-btn').click();
+    await expect(page.locator('#highlights-panel.open')).toHaveCount(1);
+
+    const row = page.locator(`.highlight-row[data-uid="${uid}"]`);
+    await expect(row).toBeVisible();
+    await row.locator('.highlight-note-btn').click();
+
+    const noteText = 'A note added via the panel, round-tripped across reload.';
+    const textarea = row.locator('.highlight-note-textarea');
+    await textarea.fill(noteText);
+
+    const [patchResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/highlights/${uid}`) && res.request().method() === 'PATCH'
+      ),
+      row.locator('.highlight-note-save-btn').click(),
+    ]);
+    expect(patchResponse.status()).toBe(200);
+
+    // Reload: GET /annotations re-fetches and the panel re-renders with the
+    // saved note, from a completely fresh page load (no in-memory carryover).
+    await page.reload();
+    await page.waitForSelector('#reader-body p', { timeout: 10000 });
+    await page.locator('#highlights-btn').click();
+
+    const rowAfterReload = page.locator(`.highlight-row[data-uid="${uid}"]`);
+    await expect(rowAfterReload).toBeVisible({ timeout: 10000 });
+    await expect(rowAfterReload.locator('.highlight-note-indicator')).toHaveCount(1);
+    await rowAfterReload.locator('.highlight-note-btn').click();
+    await expect(rowAfterReload.locator('.highlight-note-textarea')).toHaveValue(noteText);
+
+    expect(consoleErrors, `console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
+  });
 });

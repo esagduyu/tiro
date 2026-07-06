@@ -14,6 +14,8 @@
             <a href="/inbox" class="back-link">&larr; Back to inbox</a>
             <div class="reader-actions">
                 <button id="analysis-btn" class="analysis-btn" title="Ingenuity Analysis">&#9432;</button>
+                <button id="highlights-btn" class="analysis-btn" title="Highlights &amp; Notes">&#9998;</button>
+                <button id="article-note-btn" class="analysis-btn" title="Article note">&#128196;</button>
                 <button class="rate-btn love" data-rating="2" title="Love">&hearts;</button>
                 <button class="rate-btn like" data-rating="1" title="Like">&plus;</button>
                 <button class="rate-btn dislike" data-rating="-1" title="Dislike">&minus;</button>
@@ -107,6 +109,45 @@
     <div id="analysis-body" style="display: none;"></div>
 </div>
 <div id="analysis-overlay" class="analysis-overlay"></div>
+
+<!-- Highlights & Notes side panel (M2.2 Task 3). Same open/close affordance
+     as #analysis-panel (slide-in from the right, backdrop overlay, Esc to
+     close) for consistency — see reader.js's setupHighlightsPanel(). Mutually
+     exclusive with #analysis-panel (opening one closes the other) since both
+     occupy the same fixed right-hand slot. -->
+<div id="highlights-panel" class="analysis-panel highlights-panel">
+    <div class="analysis-panel-header">
+        <h3>Highlights &amp; Notes</h3>
+        <button id="highlights-close" class="analysis-close">&times;</button>
+    </div>
+
+    <div id="note-drawer" class="note-drawer">
+        <div class="note-drawer-label">Article note</div>
+        <textarea id="article-note-textarea" class="note-textarea" placeholder="Write a note about this article..."></textarea>
+        <div id="article-note-preview" class="note-preview"></div>
+        <div class="note-drawer-actions">
+            <button id="article-note-save" class="note-save-btn">Save</button>
+            <button id="article-note-clear" class="note-clear-btn">Clear</button>
+        </div>
+    </div>
+
+    <div id="highlights-empty" class="highlights-empty" style="display: none;">
+        No highlights yet &mdash; select text in the article to add one.
+    </div>
+
+    <div id="highlights-list" class="highlights-list"></div>
+
+    <div id="highlights-warning-section" class="highlights-warning-section" style="display: none;">
+        <h4 class="highlights-warning-header">Couldn't re-anchor</h4>
+        <p class="highlights-warning-hint">
+            These highlights' text couldn't be re-located in the current article
+            content. The full original quote is shown below so you can find it
+            manually.
+        </p>
+        <div id="highlights-warning-list" class="highlights-list"></div>
+    </div>
+</div>
+<div id="highlights-overlay" class="analysis-overlay"></div>
 {% endblock %}
 
 {% block scripts %}
