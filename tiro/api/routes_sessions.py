@@ -60,12 +60,19 @@ async def record_reading_session(article_id: int, request: Request):
     """Record one reading-session telemetry row for an article visit.
 
     Body: {started_at, max_scroll_pct, active_seconds, dwell: [{heading, seconds}]}.
-    Validated and clamped (see module docstring / task brief for the exact
-    table); malformed JSON/shape -> 400. Unknown article -> 404. When
-    telemetry is disabled -> 204, no-op (no insert, no error) — the server
-    refuses to store data even if a client sends it.
+    When telemetry is disabled, the flag is checked FIRST -- before body
+    parsing/validation or the article lookup -- so a disabled server 204
+    no-ops (no insert, no error) even for a malformed body or an unknown
+    article id. This is a deliberate ordering: "disabled means disabled"
+    must not leak information via 400s or 404s. Only when enabled do the
+    usual checks apply: malformed JSON/shape -> 400, unknown article -> 404,
+    then validated + clamped (see module docstring / task brief for the
+    exact table) and inserted.
     """
     config = request.app.state.config
+
+    if not config.reading_telemetry_enabled:
+        return Response(status_code=204)
 
     try:
         raw_body = await request.json()
@@ -76,9 +83,6 @@ async def record_reading_session(article_id: int, request: Request):
         payload = SessionPayload.model_validate(raw_body)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-    if not config.reading_telemetry_enabled:
-        return Response(status_code=204)
 
     conn = get_connection(config.db_path)
     try:

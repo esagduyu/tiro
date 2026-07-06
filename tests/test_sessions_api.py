@@ -155,6 +155,22 @@ def test_session_204_even_for_unknown_article_when_disabled(authenticated_client
     assert r.status_code == 204
 
 
+def test_session_204_even_for_malformed_body_when_disabled(authenticated_client, configured_library):
+    """Privacy posture (review finding 2): the disabled check happens before
+    request.json()/validation too, so a malformed body never 400s on a
+    disabled server -- 'disabled means disabled' with no exceptions, and no
+    row is inserted."""
+    configured_library.reading_telemetry_enabled = False
+    article_id = _seed_article(configured_library)
+    r = authenticated_client.post(
+        f"/api/articles/{article_id}/session",
+        content=b"not json{{{",
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 204
+    assert _sessions(configured_library, article_id) == []
+
+
 # --- clamps -----------------------------------------------------------------
 
 
@@ -203,6 +219,85 @@ def test_session_dwell_capped_at_100_entries(authenticated_client, configured_li
     row = _sessions(configured_library, article_id)[0]
     dwell = json.loads(row["dwell_json"])
     assert len(dwell) == 100
+
+
+# --- exact boundary clamps (review finding 3) --------------------------------
+
+
+def test_session_max_scroll_pct_exactly_100_not_clamped(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "max_scroll_pct": 100}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    assert row["max_scroll_pct"] == 100
+
+
+def test_session_max_scroll_pct_101_clamped_to_100(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "max_scroll_pct": 101}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    assert row["max_scroll_pct"] == 100
+
+
+def test_session_dwell_exactly_100_entries_all_kept(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {
+        **VALID_BODY,
+        "dwell": [{"heading": f"h{i}", "seconds": 1} for i in range(100)],
+    }
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    dwell = json.loads(row["dwell_json"])
+    assert len(dwell) == 100
+
+
+def test_session_dwell_101_entries_truncated_to_100(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {
+        **VALID_BODY,
+        "dwell": [{"heading": f"h{i}", "seconds": 1} for i in range(101)],
+    }
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    dwell = json.loads(row["dwell_json"])
+    assert len(dwell) == 100
+
+
+def test_session_heading_exactly_200_chars_kept(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "dwell": [{"heading": "x" * 200, "seconds": 1}]}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    dwell = json.loads(row["dwell_json"])
+    assert len(dwell[0]["heading"]) == 200
+
+
+def test_session_heading_201_chars_truncated_to_200(authenticated_client, configured_library):
+    configured_library.reading_telemetry_enabled = True
+    article_id = _seed_article(configured_library)
+
+    body = {**VALID_BODY, "dwell": [{"heading": "x" * 201, "seconds": 1}]}
+    r = authenticated_client.post(f"/api/articles/{article_id}/session", json=body)
+    assert r.status_code in (200, 201), r.text
+    row = _sessions(configured_library, article_id)[0]
+    dwell = json.loads(row["dwell_json"])
+    assert len(dwell[0]["heading"]) == 200
 
 
 # --- auth --------------------------------------------------------------------
