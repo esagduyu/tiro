@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 
 def cmd_init(args):
     """Initialize a new Tiro library."""
@@ -124,6 +126,27 @@ def cmd_run(args):
 
     config = load_config(args.config)
 
+    # --cert/--key (M3.0 Task 4): both-or-neither is already enforced at the
+    # argparse layer in main() (a real usage error, before we even get
+    # here). What's left is the runtime file-exists check, which must
+    # produce a clear error and exit BEFORE uvicorn ever starts -- uvicorn's
+    # own failure mode for a missing cert/key is a far less legible
+    # traceback buried inside its TLS setup. getattr() with a None default:
+    # existing tests construct argparse.Namespace(...) by hand without
+    # cert/key attributes at all (see test_auth.py), and those callers must
+    # keep working unchanged.
+    cert = getattr(args, "cert", None)
+    key = getattr(args, "key", None)
+    tls_enabled = bool(cert and key)
+    if tls_enabled:
+        from tiro.tls import check_tls_files_exist
+
+        try:
+            check_tls_files_exist(cert, key)
+        except FileNotFoundError as e:
+            print(str(e))
+            sys.exit(1)
+
     # Compute the effective host FIRST — a bare `host: "0.0.0.0"` in
     # config.yaml (without --lan) is just as exposed as --lan, and must be
     # refused the same way. Checking args.lan alone let config.yaml bypass
@@ -152,10 +175,11 @@ def cmd_run(args):
     # uvicorn.run below.
     config.host = effective_host
 
-    app = create_app(config)
+    app = create_app(config, tls_enabled=tls_enabled)
 
     host = effective_host
-    url = f"http://localhost:{config.port}"
+    scheme = "https" if tls_enabled else "http"
+    url = f"{scheme}://localhost:{config.port}"
 
     if args.lan:
         # create_app() already ran _detect_lan_ips() and populated
@@ -164,18 +188,40 @@ def cmd_run(args):
         candidate_ips = sorted(app.state.lan_ips)
         if candidate_ips:
             for ip in candidate_ips:
-                print(f"LAN mode: accessible at http://{ip}:{config.port}")
+                print(f"LAN mode: accessible at {scheme}://{ip}:{config.port}")
         else:
             print("LAN mode: binding to 0.0.0.0 (could not detect LAN IP)")
 
+    # Startup warning (M3.0 Task 4): extends the LAN-IP print above with a
+    # logged WARNING when serving plain HTTP to a non-loopback bind --
+    # app.state.insecure_lan_http (set by create_app from the same
+    # effective-host + tls_enabled inputs) is the single source of truth,
+    # so this can't drift from what the browser banner shows.
+    if app.state.insecure_lan_http:
+        auth_url = f"http://{app.state.lan_ip}:{config.port}" if app.state.lan_ip else url
+        logger.warning(
+            "Serving unencrypted HTTP on your local network (%s) — "
+            "use Tailscale Serve or `tiro run --cert/--key` for HTTPS.",
+            auth_url,
+        )
+
     if not args.no_browser:
         def open_browser():
+            import ssl
             import urllib.request
-            # Poll until the server is actually responding (up to 30s)
+            # Poll until the server is actually responding (up to 30s).
+            # Self-signed certs (the expected --cert/--key case) fail normal
+            # verification, but this is a same-machine readiness ping, not a
+            # security-sensitive request -- verification is deliberately
+            # skipped here so TLS mode doesn't just retry-and-timeout for
+            # the full 30s on every launch before opening the browser late.
+            ctx = ssl._create_unverified_context() if tls_enabled else None
             for _ in range(60):
                 time.sleep(0.5)
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:{config.port}/healthz", timeout=1)
+                    urllib.request.urlopen(
+                        f"{scheme}://127.0.0.1:{config.port}/healthz", timeout=1, context=ctx
+                    )
                     break
                 except Exception:
                     continue
@@ -184,7 +230,7 @@ def cmd_run(args):
         threading.Thread(target=open_browser, daemon=True).start()
 
     print(f"Starting Tiro at {url}")
-    uvicorn.run(app, host=host, port=config.port)
+    uvicorn.run(app, host=host, port=config.port, ssl_certfile=cert, ssl_keyfile=key)
 
 
 def cmd_export(args):
@@ -742,6 +788,8 @@ def main():
     run_parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access (e.g. read on your phone)")
     run_parser.add_argument("--insecure-no-auth", action="store_true",
                             help="Allow --lan without a password (dangerous)")
+    run_parser.add_argument("--cert", help="TLS certificate file (must be given with --key)")
+    run_parser.add_argument("--key", help="TLS private key file (must be given with --cert)")
 
     export_parser = subparsers.add_parser("export", help="Export library as a zip bundle")
     export_parser.add_argument("--output", "-o", default="tiro-export.zip", help="Output zip file path")
@@ -811,6 +859,15 @@ def main():
     token_revoke.add_argument("id", type=int, help="Token id from 'tiro token list'")
 
     args = parser.parse_args()
+
+    # --cert/--key: both-or-neither, enforced as an argparse usage error
+    # (not a plain print+exit) so it matches the shape of every other CLI
+    # validation error and prints run_parser's own usage line. File-exists
+    # validation happens later in cmd_run, since that's a runtime check
+    # (the path might be valid syntax but point nowhere), not a parse-time
+    # shape check.
+    if args.command == "run" and bool(getattr(args, "cert", None)) != bool(getattr(args, "key", None)):
+        run_parser.error("--cert and --key must be given together")
 
     if args.command == "init":
         cmd_init(args)

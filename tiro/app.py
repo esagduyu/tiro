@@ -26,7 +26,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "62"
+STATIC_VERSION = "63"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -45,11 +45,20 @@ def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
     return f"/static/themes/{fallback}.css?v={STATIC_VERSION}"
 
 
-def _theme_context(config: TiroConfig) -> dict:
-    """Server-resolved theme hrefs injected into every page template."""
+def _theme_context(request: Request) -> dict:
+    """Server-resolved context injected into every page template render:
+    theme hrefs plus (M3.0 Task 4) the `insecure_lan_http` flag driving
+    base.html's dismissable warning banner. Takes the request (not just
+    config) so it can also read `app.state.insecure_lan_http`, which is
+    computed once in create_app from the effective bind host + whether TLS
+    is active — extend this single function for any future per-request
+    page-context flag rather than threading a new kwarg through every route
+    handler individually."""
+    config = request.app.state.config
     return {
         "theme_light_href": _theme_href(config, config.theme_light, "papyrus"),
         "theme_dark_href": _theme_href(config, config.theme_dark, "roman-night"),
+        "insecure_lan_http": getattr(request.app.state, "insecure_lan_http", False),
     }
 
 
@@ -368,8 +377,17 @@ async def lifespan(app: FastAPI):
         logger.warning("mDNS unregister failed (non-fatal): %s", e)
 
 
-def create_app(config: TiroConfig | None = None) -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    `tls_enabled` (M3.0 Task 4): uvicorn — not create_app — owns the actual
+    TLS handshake (it's given ssl_certfile/ssl_keyfile directly), so
+    create_app has no way to observe whether TLS is active on its own. Both
+    entry points that know (tiro/cli.py's cmd_run and run.py's main(), which
+    decide this from --cert/--key) pass it in explicitly. Defaults to False
+    so every existing caller (tests, MCP-adjacent code, anything constructing
+    create_app() bare) keeps behaving as plain HTTP.
+    """
     if config is None:
         config = load_config()
 
@@ -384,6 +402,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     )
 
     app.state.config = config
+    app.state.tls_enabled = tls_enabled
 
     # LAN mode: populate app.state.lan_ips whenever the EFFECTIVE bind host
     # is non-loopback — a config-file `host: "0.0.0.0"` (no --lan flag) is
@@ -395,6 +414,12 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
     app.state.lan_mode = config.host not in ("127.0.0.1", "localhost")
     app.state.lan_ips = set(_detect_lan_ips()) if app.state.lan_mode else set()
     app.state.lan_ip = sorted(app.state.lan_ips)[0] if app.state.lan_ips else None
+
+    # insecure_lan_http (M3.0 Task 4): drives base.html's dismissable warning
+    # banner via `_theme_context`. True only when the effective bind host is
+    # non-loopback AND no TLS is active — LAN-over-HTTPS (--cert/--key) and
+    # plain loopback HTTP are both fine and get no banner.
+    app.state.insecure_lan_http = app.state.lan_mode and not tls_enabled
 
     # CORS — restrict to the app's own origin (credentials require an exact match)
     app.add_middleware(
@@ -528,7 +553,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
-        return templates.TemplateResponse(request, "login.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "login.html", _theme_context(request))
 
     @app.get("/login/qr")
     async def login_via_qr(request: Request, token: str = ""):
@@ -567,11 +592,11 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/inbox", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def inbox_page(request: Request):
-        return templates.TemplateResponse(request, "inbox.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "inbox.html", _theme_context(request))
 
     @app.get("/digest", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def digest_page(request: Request):
-        return templates.TemplateResponse(request, "digest.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "digest.html", _theme_context(request))
 
     @app.get("/articles/{article_id}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def reader(request: Request, article_id: int):
@@ -581,25 +606,25 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
             {
                 "article_id": article_id,
                 "reading_telemetry_enabled": request.app.state.config.reading_telemetry_enabled,
-                **_theme_context(request.app.state.config),
+                **_theme_context(request),
             },
         )
 
     @app.get("/stats", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def stats_page(request: Request):
-        return templates.TemplateResponse(request, "stats.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "stats.html", _theme_context(request))
 
     @app.get("/settings", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def settings_page(request: Request):
-        return templates.TemplateResponse(request, "settings.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "settings.html", _theme_context(request))
 
     @app.get("/graph", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def graph_page(request: Request):
-        return templates.TemplateResponse(request, "graph.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "graph.html", _theme_context(request))
 
     @app.get("/sources", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def sources_page(request: Request):
-        return templates.TemplateResponse(request, "sources.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "sources.html", _theme_context(request))
 
     async def _qr_setup_response(request: Request) -> HTMLResponse:
         config = request.app.state.config
@@ -612,7 +637,7 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
                 "qr_svg": _qr_svg(qr_url),
                 "qr_url": qr_url,
                 "qr_ttl_minutes": auth.LOGIN_TOKEN_TTL_MINUTES,
-                **_theme_context(config),
+                **_theme_context(request),
             },
         )
 
@@ -635,16 +660,16 @@ def create_app(config: TiroConfig | None = None) -> FastAPI:
 
     @app.get("/wiki", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_list_page(request: Request):
-        return templates.TemplateResponse(request, "wiki.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "wiki.html", _theme_context(request))
 
     @app.get("/wiki/{slug:path}", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def wiki_page_view(request: Request, slug: str):
         return templates.TemplateResponse(
-            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request.app.state.config)}
+            request, "wiki_page.html", {"wiki_slug": slug, **_theme_context(request)}
         )
 
     @app.get("/highlights", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def highlights_page(request: Request):
-        return templates.TemplateResponse(request, "highlights.html", _theme_context(request.app.state.config))
+        return templates.TemplateResponse(request, "highlights.html", _theme_context(request))
 
     return app
