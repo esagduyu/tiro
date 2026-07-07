@@ -38,7 +38,9 @@ The original hackathon submission is preserved, frozen, at [esagduyu/project-tir
 
 ---
 
-## From hackathon to 0.2.0
+## The security & integrity foundation (0.2.0)
+
+Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
 
 The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
 
@@ -97,7 +99,7 @@ Then run `tiro run`, rate a few more articles if needed, and click "Classify inb
 uv run tiro run --lan         # binds to 0.0.0.0, prints your LAN IP
 ```
 
-Then open `http://<your-ip>:8000` on your phone. The mobile UI has a responsive sidebar and touch-friendly controls.
+Then open `http://<your-ip>:8000` on your phone. The mobile UI has a responsive sidebar, swipe triage, and touch-friendly controls — and for the full phone story (install as an app, QR sign-in, offline reading, HTTPS via Tailscale), see [Remote access](#remote-access-mobile--lan).
 
 > **Tip:** If you use `direnv`, set `ANTHROPIC_API_KEY` in your `.envrc` instead of adding it to config.yaml.
 >
@@ -197,7 +199,8 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 
 ### Interface
 
-- **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Graph, Stats, Settings. Collapses to icons on narrower screens, hamburger menu on mobile.
+- **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Wiki, Highlights, Sources, Stats, Graph, Settings, plus your saved views. Collapses to icons on narrower screens, hamburger menu on mobile.
+- **Saved views** — Save any filter-panel state as a named view in the sidebar (up to 20, reorderable) for one-click inbox slices.
 - **Filter panel** — Right-edge tab opens a slide-out panel with 11 filter facets: AI tier, rating, source, tag, read status, VIP, ingestion method, date range. Active filter pills. URL-synced state.
 - **Dark mode** — Toggle between Papyrus (warm cream) and Roman Night (warm charcoal) themes. Persists via localStorage.
 - **Theming** — CSS variable-based theme system with 20 `--tiro-*` variables. Roman-inspired palette: terra cotta accent, olive secondary, warm gold for links. Custom theme import support. (One more variable to know about if you're writing a custom theme: the LAN-over-HTTP warning banner reuses `--tiro-tier-must-read` for its background — define it or the banner falls back to an unstyled background on your theme.)
@@ -235,7 +238,10 @@ Storage Layer (all local)
   ├── audio/*.mp3        (cached TTS audio files)
   ├── annotations/*.jsonl (highlight sidecars, one per article — source of truth)
   ├── notes/*.md         (article-level note sidecars, one per article — source of truth)
-  ├── tiro.db            (SQLite — metadata, preferences, stats, audio, highlights/notes index)
+  ├── wiki/**/*.md       (AI-generated, cited wiki pages — files are the truth here too)
+  ├── audit/*.jsonl      (external-API audit log, one line per call)
+  ├── backups/           (library snapshots, tar.zst)
+  ├── tiro.db            (SQLite — metadata, preferences, stats, audio, highlights/notes/wiki index)
   ├── chroma/            (ChromaDB — vector embeddings)
   └── config.yaml
 ```
@@ -265,7 +271,8 @@ Storage Layer (all local)
 | `uv run tiro token create <name>` | Create an API token for a non-browser client (shown once) |
 | `uv run tiro token list` | List existing API tokens |
 | `uv run tiro token revoke <id>` | Revoke an API token |
-| `uv run tiro doctor [--fix] [--json]` | Check (and optionally repair) consistency across SQLite, ChromaDB, markdown, and audio |
+| `uv run tiro doctor [--fix] [--json]` | Check (and optionally repair) consistency across all file-backed stores — SQLite, ChromaDB, markdown, audio, annotation/note sidecars, and the wiki index |
+| `uv run tiro migrate` | Apply any pending database schema migrations (also run automatically on server start) |
 | `uv run tiro audit [--date\|--month] [--service] [--json]` | Show the external-API audit log and cost estimates |
 | `uv run tiro status` | Library status and store sizes — works without a running server |
 | `uv run tiro delete <id>` | Delete an article by id from all stores |
@@ -416,7 +423,7 @@ The full walkthrough, once your desktop server is running:
 
 **What you get offline.** Once the service worker has run at least once, previously-viewed articles (up to the last 50) stay readable with no connection — the app itself, and any cached article JSON, come straight from Cache Storage. Try to save a new URL while offline and it's queued locally (up to 20, oldest dropped first) instead of failing outright; the queue silently drains and files each save for real the moment you're back online (and immediately checks on `online` events and page load, not just on your next manual retry). A dedicated `/offline` page appears for any navigation that can't reach the server at all.
 
-**A known limitation right now:** none of the above has been verified on a physical phone yet in this session — it's covered by the automated test suite (unit tests, Playwright, a headless PWA audit) but real-device installability, the A2HS prompt's actual appearance, and true airplane-mode reading are still on the owner's manual checklist for the next hands-on pass.
+**A known limitation right now:** the mobile flow is covered by the automated test suite (unit tests, Playwright, a headless PWA audit), but real-device installability, the Add-to-Home-Screen prompt's actual appearance, and true airplane-mode reading haven't yet had a hands-on pass on a physical phone — treat rough edges there as likely-fixable and please report them.
 
 **Find Tiro by name (mDNS/Bonjour).** With `--lan` (or `host: 0.0.0.0`), typing a LAN IP works, but IPs change. Set in `config.yaml`:
 
@@ -505,15 +512,20 @@ Then `http://tiro.local:8000` resolves on any device on the same network that su
 tiro/
 ├── tiro/                       # Python package
 │   ├── app.py                  # FastAPI app, router registration
-│   ├── cli.py                  # CLI commands (init, run, export, import-emails, setup-email, check-email)
-│   ├── config.py               # Config loading (dataclass + YAML)
+│   ├── cli.py                  # CLI commands (see the CLI table above)
+│   ├── config.py               # Config loading (dataclass + YAML + TIRO_* env overlay)
 │   ├── database.py             # SQLite schema and helpers
-│   ├── vectorstore.py          # ChromaDB initialization
-│   ├── auth.py                 # Password auth, sessions, API tokens
+│   ├── migrations.py           # Versioned schema migrations (PRAGMA user_version)
+│   ├── vectorstore.py          # ChromaDB initialization + embeddings
+│   ├── auth.py                 # Password auth, sessions, API tokens, QR login
 │   ├── sanitize.py             # Server-side HTML sanitization (nh3)
+│   ├── llm.py                  # The single AI chokepoint (tiers → providers, audit built in)
 │   ├── lifecycle.py            # Article delete + ingestion rollback (all seven stores)
 │   ├── doctor.py               # Cross-store consistency check + repair
 │   ├── audit.py                # External-API audit log (JSONL) + cost estimates
+│   ├── annotations.py / anchors.py  # Highlight/note sidecars + text anchoring
+│   ├── wiki.py / wiki_gen.py   # Library wiki index + cited page generation
+│   ├── backup.py               # Snapshots (tar.zst) + restore
 │   ├── decay.py                # Content decay system
 │   ├── stats.py                # Reading stats tracking
 │   ├── export.py               # Library export (zip generation)
@@ -526,6 +538,8 @@ tiro/
 │   └── frontend/               # HTML templates, CSS, JS, themes
 ├── extension/                  # Chrome extension
 ├── scripts/                    # Utility scripts
+├── tests/                      # pytest suite (see Testing below)
+├── playwright-tests/           # End-to-end browser specs
 ├── pyproject.toml              # Package config
 └── tiro-library/               # Default data directory (gitignored)
 ```
@@ -534,7 +548,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/`). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/` — 866 tests at 0.5.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
@@ -549,7 +563,7 @@ The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-con
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
-- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Currently deferred by owner directive — next up after 0.5.0 is either this or Phase 4.)
+- **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Deferred as a standalone phase — the current plan delivers its reconciliation engine as the first milestone of the Phase 7a sync work, so external edits and multi-device sync share one merge core.)
 - **Phase 3 — Private remote access (0.5): shipped.** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend (snooze, QR login, mDNS discovery, TLS run flags), the installable PWA (manifest, service worker, offline reading, offline save queue, `/setup/remote` wizard), and the swipe-triage inbox (gestures, undo, snooze UI, inbox zero) all landed.
 - **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
 - **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion — unblocked now that Phase 3 has shipped.
