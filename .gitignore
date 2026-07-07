@@ -38,3 +38,6 @@ seed-files/
 # Temp files
 tmp/
 .DS_Store
+
+# Design reference (local-only, not shipped)
+Tiro Design System.html
