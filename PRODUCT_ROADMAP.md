@@ -2,7 +2,7 @@
 
 Review date: 2026-05-25
 Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03); 2026-07-04 (v0.2.0 tagged; Decisions #7–8: AI-layer plan, subscription-CLI backends, LLM wiki; Phase 1 foundation milestone expanded; Phase 1b added)
-Status: Phase 0 (Security & Integrity) is **complete — shipped and tagged `v0.2.0`** on `main` (2026-07-04). Next up: Phase 1, which now **opens with the Foundation Milestone (M1.0)** — read "Decisions Made" #0, #7, and #8 before planning it. Origin: hackathon top-30 (out of ~500).
+Status (2026-07-06): Phases 0 through 3 are **complete and shipped** — 0.2.0 (security & integrity), 0.3.0 (Phase 1, library integrity), 0.3.5 (Phase 1b W1, library wiki), 0.4.0 (Phase 2, highlights & notes), and **`v0.5.0` (Phase 3, private remote access + mobile PWA)**, with 866 Python + 140 node tests. Phase 2b no longer exists as a standalone phase — it is **absorbed into Phase 7a** as the sync engine's first milestone (Decision #9). Next up: **Phase 4 (RSS + imports)** and/or the **native iOS companion** (specced 2026-07-06, Decision #9); design/spec work is also already banked for the frontend design overhaul, Phase 6's kernel, and Phase 7a (local planning docs). Read "Decisions Made" #0 and #7–#9 before planning anything. Origin: hackathon top-30 (out of ~500).
 
 ## How To Use This Document
 
@@ -66,7 +66,7 @@ The product itself decomposes into three components the phases advance: (1) the 
 
 ## Codebase Health Summary
 
-> **2026-07-04 note:** this section is the pre-Phase-0 snapshot (2026-05-25) that motivated the plan. Everything under "Severe issues" and "Quality issues" was resolved by Phase 0 (0.2.0), and "Test coverage" is now a 169-test pytest suite plus a Playwright E2E spec. Kept for historical context — do not re-fix these.
+> **2026-07-04 note (updated 2026-07-06):** this section is the pre-Phase-0 snapshot (2026-05-25) that motivated the plan. Everything under "Severe issues" and "Quality issues" was resolved by Phase 0 (0.2.0); "Test coverage" grew from zero to 169 tests at 0.2.0 and stands at 866 pytest + 140 node tests plus seven Playwright specs at 0.5.0. Kept for historical context — do not re-fix these.
 
 Verified during this review:
 
@@ -254,6 +254,8 @@ None. This is the foundation phase.
 
 ## Phase 1 — Local Library Integrity
 
+**Status: ✅ COMPLETE — shipped as 0.3.0.** (M1.0 Foundation, M1.1 Backup & Portability, M1.2 Sources/Authors/Views + Docker.) Preserved as the executed plan of record; CLAUDE.md's conventions block is current where details drifted.
+
 **Release target:** `0.3 local-beta`
 **Relative complexity:** L
 **Goal:** Make the local-first data promise credible end-to-end: rename, merge, restore, back up.
@@ -368,6 +370,8 @@ This phase also closes the export story (notes/highlights are not in it yet — 
 
 ## Phase 1b — Library Wiki (MVP)
 
+**Status: ✅ W1 SHIPPED as 0.3.5** (on-demand generation, mark-stale, mandatory citations). W2 (nightly sync + digest knowledge-diff) and W3 (lint) remain future ad-hoc features per Decision #8; W4 (wiki maintainers) re-homes into Phase 6 personas.
+
 **Release target:** `0.3.5 wiki-alpha`
 **Relative complexity:** M
 **Goal:** Ship the first cut of the LLM-maintained wiki: on-demand synthesis pages over the user's library, compiled and owned by the LLM, browsable from the knowledge graph.
@@ -419,6 +423,8 @@ Per-item summaries are commoditized (Decision #0); cross-document synthesis is T
 ---
 
 ## Phase 2 — Highlights & Notes
+
+**Status: ✅ COMPLETE — shipped as 0.4.0** (M2.0 frontend modularization, M2.1 sidecar backend, M2.2 reader annotation UI, M2.3 telemetry + Obsidian-compatible mode + digest highlight recap).
 
 **Release target:** `0.4 reader-memory-beta`
 **Relative complexity:** L
@@ -477,14 +483,14 @@ This phase comes before desktop packaging (Phase 5) because packaging an app who
 - Strictly local; never transmitted off-device unless cloud sync is opted in.
 - **These signals are also the wiki's importance/trust input (Decision #8)**: %-read, active seconds, likes, and favorited authors let wiki synthesis weight what the user actually engaged with, not just what they hoarded — the primary defense against a poisoned/noisy wiki. Longer-term (post-Phase-6): an opt-in, **locally-running lightweight importance model** trained on these signals (ratings + engagement + VIP as labels) scores articles/claims continuously; the score feeds wiki page weighting and digest ranking. Local inference only (same posture as the sentence-transformers embeddings); never a cloud call.
 
-**Obsidian-vault compatibility** (on-disk format only — bidirectional sync is Phase 2b):
+**Obsidian-vault compatibility** (on-disk format only — bidirectional sync is now Phase 7a's first milestone, née Phase 2b):
 - New config flag: `obsidian_compatible_mode: bool`. When true:
   - Article frontmatter uses Obsidian-friendly fields (`tags:` as YAML list, `aliases:`, `created:`).
   - Inline `[[wikilinks]]` for related articles (instead of `/articles/{id}` URLs).
   - Notes sidecars use the same naming convention as the article (`notes/{slug}.md`).
   - Optional: point `library_path` at an existing Obsidian vault subdirectory.
 - Does not require Obsidian to be installed; just lays out files so Obsidian opens them cleanly if the user wants.
-- This phase ships the read-friendly format; **Phase 2b ships the file-watcher and bidirectional reconciliation** that makes Obsidian a co-equal editing surface.
+- This phase ships the read-friendly format; **the file-watcher and bidirectional reconciliation** that make Obsidian a co-equal editing surface ship as the sync engine's first milestone (Phase 7a S1 — the absorbed Phase 2b, see Decision #9).
 
 ### Out of scope
 
@@ -523,6 +529,8 @@ This phase comes before desktop packaging (Phase 5) because packaging an app who
 ---
 
 ## Phase 2b — Obsidian Bidirectional Sync
+
+**Status: ⤳ ABSORBED INTO PHASE 7a (2026-07-06, Decision #9) — no longer a standalone phase.** The 2026-07-06 sync-engine design (local planning docs) delivers everything below as the sync engine's first milestone (S1, "local reconcile engine"), so external Obsidian edits and multi-device sync share one merge core and one conflict-file semantic instead of two overlapping reconciliation implementations. This section is preserved as the requirements source for that milestone; the `0.4.5` release target is retired.
 
 **Release target:** `0.4.5 obsidian-beta`
 **Relative complexity:** L
@@ -608,6 +616,8 @@ Sequencing rationale: this lands immediately after Phase 2 because (a) the on-di
 ---
 
 ## Phase 3 — Private Remote Access
+
+**Status: ✅ COMPLETE — shipped and tagged `v0.5.0` (2026-07-06)** (M3.0 remote backend: snooze, QR login, mDNS, TLS flags; M3.1 PWA: manifest, service worker, offline save queue, `/setup/remote` wizard; M3.2 swipe-triage inbox: gestures, undo, inbox zero). Real-device verification remains an owner checklist item.
 
 **Release target:** `0.5 private-remote-beta`
 **Relative complexity:** M
@@ -901,6 +911,8 @@ This phase deliberately follows highlights and RSS because both are daily-return
 
 > **Amended 2026-07-03 — see "Decisions Made" #0:** MCP servers are now table stakes across competitors; the local agent runtime over audit-logged files-on-disk is the durable differentiator. Treat this phase as strategic payload, not nice-to-have.
 
+> **Amended 2026-07-06 — kernel designed (Decision #9):** the runtime kernel has an approved design (local planning docs: spec + K1–K4 skeleton plan), deliberately **kernel-deep, roster-shallow** to honor this section's own abstraction-risk warning. Frozen there: structural provenance (context auto-captures citations + traces; no other data/LLM path), traces as files with `agent_runs` as index, NO second provider abstraction (Decision #7's tier map is the seam; replay adds only a per-run model override), and the trust boundary **code agents may write, personas may only suggest** (structural sandbox: scope-derived read-only contexts, a suggestions-and-accept surface, no network tools). ContradictionDetector is the first new agent (owner priority). Where this section's sketch conflicts with that spec, the spec wins.
+
 ### Why this phase, why now
 
 By 0.7 we have multiple ad-hoc AI features (metadata extractor, digest writer, ingenuity analyst, preference classifier). We are about to add more (highlight summarizer, contradiction detector, reading coach). Continuing as ad-hoc prompts means N feature surfaces with N prompt-update patterns, N retry strategies, N observability stories.
@@ -1016,6 +1028,8 @@ Crucially, this phase is *sixth*, not earlier, because the right abstractions fo
 The local-first promise is strongest when "syncing across my devices" doesn't require trusting a Tiro-operated server. BYO sync ships **before** the paid hosted product on purpose: it's the version that matches the philosophy. Tiro Cloud (Phase 7b) is the convenience layer that funds the open work; it must never become the only way to use Tiro across devices.
 
 The model is borrowed from Obsidian: the file-and-DB layout is sync-friendly by construction, and any commodity storage backend can hold it.
+
+> **Amended 2026-07-06 — designed, with deltas (Decision #9):** this phase now has an approved design (local planning docs: spec + S1–S6 skeleton plan) that **absorbs Phase 2b** as its first milestone (S1, local reconcile engine — independently shippable). Deliberate deltas from the sketch below, all owner-decided: **no CRDT library** — LWW + both-versions-kept conflict files for notes/highlights (the CRDT bullet below is superseded; the journal format keeps CRDT headroom); change capture is **state-diff against a shadow manifest**, never write-site instrumentation; **audio never syncs** (derived cache, regenerated per device, like vectors); `reading_stats` stays device-local in v1; encryption is an **Argon2id-derived X25519 age identity** (keeps this section's Argon2id while staying reproducible in Swift and browser for the iOS v2 replica and 7b). Where this section conflicts with that spec, the spec wins.
 
 ### In scope
 
@@ -1270,7 +1284,7 @@ Strategic decisions that were Open Questions in earlier roadmap revisions but ha
 
 2. **License: AGPL across the project.** Tiro moves from MIT to AGPL-3.0. Rationale: AGPL doesn't affect end-users running Tiro on their own laptop/server (they aren't redistributing a service), but it does discourage hosted clones from competing with Tiro Cloud without contributing back. The local-first user base is unaffected; the paid Cloud business is protected. Existing contributions remain MIT-licensed at their commit point; future contributions are AGPL. The license change applies to Tiro Local, Phase 7a (BYO sync), and Phase 7b (Tiro Cloud server) uniformly — keeping the licensing story simple. *(Action item completed 2026-05-28: LICENSE, README grandfather clause, and pyproject metadata all updated.)*
 
-3. **Obsidian bidirectional sync: shipping in Phase 2b.** Promoted from "open question" to a committed phase. See Phase 2b above. Rationale: Obsidian is the closest neighboring product, the user bases overlap, and treating Obsidian as a peer is a defensible differentiator that nobody else in the read-it-later space offers.
+3. **Obsidian bidirectional sync: shipping in Phase 2b.** Promoted from "open question" to a committed phase. See Phase 2b above. Rationale: Obsidian is the closest neighboring product, the user bases overlap, and treating Obsidian as a peer is a defensible differentiator that nobody else in the read-it-later space offers. *(Amended 2026-07-06: the commitment stands, but the delivery vehicle changed — Phase 2b is absorbed into Phase 7a as the sync engine's first milestone. See Decision #9.)*
 
 4. **Twitter / X connector: deferred past 1.0.** Moved out of Phase 4 into the post-1.0 Rich Media & Social Connectors track, likely shipped as a community ingestion plugin rather than first-party code. Rationale: X's anti-scraping environment makes maintenance expensive, the user value-per-engineering-week is lower than RSS or Pocket import, and the plugin API (Phase 6) is a more sustainable home for fragile connectors.
 
@@ -1289,13 +1303,20 @@ Strategic decisions that were Open Questions in earlier roadmap revisions but ha
    - **Anti-poisoning posture** (the design's central risk): mandatory citations; page updates consume article summaries + prior page only (wiki never reads wiki); regenerate-from-scratch always available; on-demand ships before any automation; extraction-quality fixes (truncation, entity canonicalization) are hard prerequisites in M1.0. **Reading telemetry is the importance signal** (owner direction): local-only %-read/active-seconds/likes/favorited-authors (Phase 2 instrumentation) weight wiki synthesis toward what the user actually engaged with; later, an opt-in locally-running lightweight importance model trained on those signals scores content continuously (local inference only — same posture as local embeddings, never a cloud call, consistent with the telemetry principles: local by default, opt-in for anything more).
    - **Agent personas confirmed as the Phase 6 user-facing frame**: spec files (prompt + scope + schedule + output target) in `{library}/personas/`, shareable; today's four AI features become the built-in set; sandboxing in the spec from v1. M1.0 builds the prerequisites (prompts-as-data, tiers, scheduler registry), not the framework.
 
+9. **2026-07-06 — Fable design session: four workstreams specced before implementation.** With Phase 3 shipped at `v0.5.0`, a single deep-design session banked specs (all local planning docs under `docs/plans/`, dated 2026-07-06) so later, cheaper sessions execute rather than re-decide:
+   - **Frontend design overhaul** (spec + full 12-task plan, execution-ready): full visual pass from the owner's design-system artifact — a 55-icon SVG line-icon set replacing every text-glyph/emoji icon, CSS component primitives, editorial serif accents, and three-tier responsive chrome (240px desktop sidebar / 64px tablet icon rail / **phone bottom tab bar replacing the hamburger**). Owner chose full overhaul + bottom tab bar.
+   - **Native iOS client v1.0** (spec + full 14-task plan, execution-ready): SwiftUI thin client per Decision #0's strategy doc; owner chose **everything-in-v1.0 scope** (pairing, inbox triage, reader + highlights, search, digest, Share Extension, TTS with lock-screen controls, offline cache + write queue), **TestFlight-only** distribution for now, and a **separate MIT-licensed repo (`tiro-ios`)**. Two server-side tasks land in this repo: a device-pairing flow (`/setup/qr?mode=device` + `POST /api/auth/pair` minting API tokens, mirroring the login-token pattern; PWA cookie lane untouched — two parallel auth lanes forever) and an anchor-parity fixture export so the Swift highlight-anchoring port is test-locked to `annotate.js`.
+   - **Sync engine = Phase 7a + absorbed Phase 2b** (spec + S1–S6 skeleton plan; milestones expand into full plans at execution time): see the amended Phase 7a section for the deltas (no CRDT — LWW + conflict files; state-diff capture; audio excluded; Argon2id→X25519 age identity). Phase 2b's section is retained as the requirements source for milestone S1.
+   - **Phase 6 agent-runtime kernel** (kernel spec + K1–K4 skeleton plan): see the amended Phase 6 section for the frozen kernel decisions (structural provenance; traces-as-files; no second provider layer; code-agents-write / personas-suggest). ContradictionDetector is the owner's priority new agent. Roster and plugin API stay open, designed at execution time.
+   - **Convention established:** skeleton plans freeze milestone boundaries + FROZEN/OPEN markers; each milestone is expanded into a full step-level plan against the then-current codebase right before execution. Session memory carries per-workstream status trackers.
+
 ## Open Strategic Questions
 
 These remain unresolved and need product decisions before the relevant phase begins.
 
 1. **Release-hosting decision.** GitHub Releases is the obvious default for Phase 5, but auto-update at scale eventually wants a CDN. Decide before Phase 5 ships.
 2. **Tiro Cloud backend infrastructure choice.** For Phase 7b: own VPS infra vs. managed serverless (Fly.io, Railway) vs. managed K8s vs. fully serverless (Cloudflare Workers + R2). Each has different cost/lock-in/encryption-handling profiles. Phase 7a is unaffected — BYO sync works against any S3-compatible.
-3. **Mobile native app trigger.** PWA is the plan through Phase 7b; the threshold for committing to native iOS/Android is unclear. Likely trigger: "when users ask for features the PWA cannot deliver" — reliable background audio, lock-screen audio controls, push notifications, widgets, share-sheet integration.
+3. **Mobile native app trigger.** ~~PWA is the plan through Phase 7b; the threshold for committing to native iOS/Android is unclear.~~ **Resolved:** Decision #0 committed the native iOS client post-Phase-3, and Decision #9 specced v1.0 (TestFlight-only, separate `tiro-ios` repo). Android remains PWA-only with no trigger defined — that half of the question stays open.
 4. **MCP-vs-native-tool calling** as the canonical tool surface for the agent runtime. MCP is more portable; native is lower-latency. Phase 6 should standardize on one and clearly support the other.
 5. **Plugin sandboxing approach.** Process isolation? WASM? Trust-the-user-with-warnings? Phase 6 ships without a sandbox; the answer to this question determines when sandboxing becomes mandatory.
 6. **Pricing point ($X/mo).** The model is decided (single tier); the actual number is not. Calibrate against Obsidian Sync (~$8/mo), Readwise Reader (~$8/mo), and the cost of the bundled AI quota. Recommendation: pick after Phase 6 lands so the actual hosted-AI cost is known, not estimated.
