@@ -129,7 +129,7 @@ body {
 }
 
 /* --- LAN-over-HTTP warning banner (M3.0 Task 4) ---
-   Fixed full-width top strip, above the sidebar/mobile-header (higher
+   Fixed full-width top strip, above the sidebar/phone-header (higher
    z-index) so it never gets tucked behind them. Only ever present in the
    DOM when insecure_lan_http is true (Jinja conditional in base.html), so
    the body.has-lan-banner rules below only ever apply alongside it -- a
@@ -188,8 +188,7 @@ body {
    mobile header, or content -- applied only when body carries the
    has-lan-banner class (set server-side alongside the banner itself). */
 body.has-lan-banner .sidebar,
-body.has-lan-banner .mobile-header,
-body.has-lan-banner .sidebar-overlay {
+body.has-lan-banner .phone-header {
     top: var(--tiro-lan-banner-h);
 }
 
@@ -205,21 +204,14 @@ body.has-lan-banner .content {
     /* The banner's text wraps onto two (sometimes three) lines on narrow
        viewports (unlike the single-line desktop case), so reserve roughly
        double the height here -- deliberately approximate, not measured,
-       per the "keep it simple" guidance in the M3.0 Task 4 brief. Also
-       re-override .sidebar's top/height here: the desktop rule above still
-       applies at this breakpoint (nothing narrows it back down), and the
-       mobile drawer (.sidebar.open, slid in from the hamburger button)
-       would otherwise start under the banner's single-line offset instead
-       of its wrapped one, clipping into the banner's lower lines. */
+       per the "keep it simple" guidance in the M3.0 Task 4 brief. The
+       sidebar is hidden entirely at this breakpoint; the slim phone header
+       is the fixed top element that must sit below the (wrapped) banner. */
     .lan-http-banner {
         padding: 0.35rem 2rem;
     }
-    body.has-lan-banner .mobile-header,
-    body.has-lan-banner .sidebar {
+    body.has-lan-banner .phone-header {
         top: calc(var(--tiro-lan-banner-h) * 2);
-    }
-    body.has-lan-banner .sidebar {
-        height: calc(100vh - var(--tiro-lan-banner-h) * 2);
     }
     body.has-lan-banner .content {
         padding-top: calc(60px + var(--tiro-lan-banner-h) * 2);
@@ -703,46 +695,185 @@ body.has-lan-banner .content {
     border: 1px solid var(--tiro-border);
 }
 
-/* Mobile header (hidden on desktop) */
-.mobile-header {
+/* Slim phone header (hidden on desktop; shown ≤768px). Replaces the old
+   hamburger header — brand glyph + serif page title, no buttons. */
+.phone-header {
     display: none;
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
-    height: 48px;
+    height: calc(52px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 1rem 0;
     background: var(--tiro-sidebar-bg);
     border-bottom: 1px solid var(--tiro-border);
     align-items: center;
-    padding: 0 1rem;
+    gap: 0.55rem;
     z-index: 40;
 }
 
-.mobile-menu-btn,
-.mobile-theme-toggle {
-    border: none;
-    background: none;
-    font-size: 1.2rem;
-    cursor: pointer;
-    color: var(--tiro-fg-secondary);
-    padding: 0.4rem;
+.phone-header-brand {
+    font-family: var(--tiro-font-serif);
+    font-size: 1.35rem;
+    line-height: 1;
+    color: var(--tiro-accent);
 }
 
-.mobile-brand {
-    flex: 1;
-    text-align: center;
-    font-weight: 700;
-    font-size: 1rem;
+.page-title-serif {
+    font-family: var(--tiro-font-serif);
+    font-size: 1.05rem;
+    font-weight: 600;
     color: var(--tiro-fg);
-    font-family: Georgia, 'Times New Roman', serif;
 }
 
-.sidebar-overlay {
+/* --- Bottom tab bar (phone chrome, ≤768px only) --- */
+#tab-bar {
     display: none;
     position: fixed;
+    inset: auto 0 0 0;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--tiro-sidebar-bg);
+    border-top: 1px solid var(--tiro-border);
+    z-index: 60;
+    grid-template-columns: repeat(5, 1fr);
+    align-items: center;
+}
+
+.tab-slot {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 100%;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: var(--tiro-muted);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+
+.tab-slot:hover,
+.tab-slot.active {
+    color: var(--tiro-accent);
+}
+
+.tab-save {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    margin: 0 auto;
+    border: none;
+    border-radius: 50%;
+    background: var(--tiro-accent);
+    color: #fff;
+    cursor: pointer;
+    transform: translateY(-12px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.tab-save .ti {
+    color: #fff;
+}
+
+.tab-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 16px);
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--tiro-accent);
+}
+
+.tab-badge[hidden] {
+    display: none;
+}
+
+/* --- Generic bottom sheet (phone chrome). Geometry pattern donated by the
+   snooze preset sheet family: scrim + slide-up panel, radius-xl top corners.
+   The .snooze-preset-* originals are deliberately left untouched. --- */
+.sheet {
+    position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.3);
-    z-index: 45;
+    z-index: 70;
+}
+
+.sheet[hidden] {
+    display: none;
+}
+
+.sheet-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.sheet.open .sheet-scrim {
+    opacity: 1;
+}
+
+.sheet-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 1rem 1rem calc(1.25rem + env(safe-area-inset-bottom));
+    background: var(--tiro-bg-surface, var(--tiro-sidebar-bg));
+    border-top: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-xl, 20px) var(--tiro-radius-xl, 20px) 0 0;
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.18);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    transform: translateY(100%);
+    transition: transform 0.2s ease;
+}
+
+.sheet.open .sheet-panel {
+    transform: translateY(0);
+}
+
+.sheet-panel a,
+.sheet-panel button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 1rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius, 10px);
+    background: var(--tiro-bg);
+    font-family: inherit;
+    font-size: 0.8rem;
+    color: var(--tiro-fg);
+    text-decoration: none;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.sheet-panel a:hover,
+.sheet-panel button:hover {
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sheet-scrim,
+    .sheet-panel {
+        transition: none;
+    }
 }
 
 /* Content area */
@@ -4199,11 +4330,8 @@ main {
     opacity: 1;
 }
 
-@media (max-width: 768px) {
-    .a2hs-hint {
-        bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
-    }
-}
+/* Phone (≤768px) bottom offset for .a2hs-hint is handled in the consolidated
+   responsive block near the end of this file (sits above the bottom tab bar). */
 
 /* --- Settings toast --- */
 
@@ -4497,27 +4625,24 @@ main {
 }
 
 @media (max-width: 768px) {
-    .sidebar {
-        transform: translateX(-100%);
-        width: 260px;
-        transition: transform 0.25s ease;
+    /* Phone chrome (design pass, Task 4): the sidebar is fully replaced by
+       the bottom tab bar + slim top header; no off-canvas drawer. */
+    .sidebar { display: none; }
+    #tab-bar { display: grid; }
+    .phone-header { display: flex; }
+    .content {
+        margin-left: 0;
+        padding-top: calc(52px + env(safe-area-inset-top));
+        padding-bottom: calc(72px + env(safe-area-inset-bottom));
     }
-    .sidebar.open { transform: translateX(0); }
-    .sidebar-overlay.open { display: block; }
-    /* Restore labels hidden by the 1200px icon-only mode */
-    .sidebar-label, .sidebar-title, .sidebar-badge { display: unset; }
-    .sidebar-brand { justify-content: flex-start; }
-    .sidebar-logo { margin-right: 0.6rem; }
-    .sidebar-item { justify-content: flex-start; padding: 0.65rem 1rem; border-left: 3px solid transparent; border-bottom: none; }
-    .sidebar-item.active { border-left-color: var(--tiro-sidebar-active); border-bottom-color: transparent; }
-    .sidebar-footer { align-items: stretch; }
-    .sidebar-about .sidebar-label { display: unset; }
-    .sidebar-views { display: block; }
-    .mobile-header { display: flex; }
-    .content { margin-left: 0; padding-top: 60px; }
     /* Filter panel: full width on mobile */
     .filter-panel { width: 100%; max-width: 100vw; }
     .filter-panel.open + .filter-tab { right: 100%; }
+    /* Fixed-bottom overlays sit above the tab bar. */
+    .settings-toast,
+    .a2hs-hint {
+        bottom: calc(56px + env(safe-area-inset-bottom) + 12px);
+    }
     /* Inbox: tighter spacing, normal centering */
     .inbox-main { padding: 0.75rem; margin-left: auto; }
     .article-card { padding: 0.75rem; }

@@ -62,12 +62,21 @@ function applyTheme(mode) {
     // Show the mode you'd switch TO: sun in dark mode (→ light),
     // moon in light mode (→ dark).
     const themeGlyph = icon(mode === 'dark' ? 'sun' : 'moon', { size: 17 });
-    document.querySelectorAll('#theme-toggle, #mobile-theme-toggle').forEach(btn => {
+    // Sidebar footer toggle wraps its icon in a `.sidebar-icon` span (empty
+    // in markup, filled here); the phone More-sheet toggle (#sheet-theme-toggle)
+    // instead has a bare `.ti` icon followed by its own `<span>Theme</span>`
+    // label — swap just the `.ti` there so the label survives.
+    document.querySelectorAll('#theme-toggle, #sheet-theme-toggle').forEach(btn => {
         const iconEl = btn.querySelector('.sidebar-icon');
         if (iconEl) {
             iconEl.innerHTML = themeGlyph;
         } else {
-            btn.innerHTML = themeGlyph;
+            const svg = btn.querySelector('.ti');
+            if (svg) {
+                svg.outerHTML = themeGlyph;
+            } else {
+                btn.innerHTML = themeGlyph;
+            }
         }
     });
     const label = document.getElementById('theme-label');
@@ -80,16 +89,59 @@ function toggleTheme() {
     applyTheme(current === 'dark' ? 'light' : 'dark');
 }
 
-/* ---- Mobile sidebar ---- */
+/* ---- Phone bottom sheets (Library / More) ----
+   Sheets are toggled by [data-sheet="<sheet-id>"] buttons in the tab bar.
+   The `hidden` attribute controls presence; a `.open` class (added on the
+   next frame) drives the slide-up + scrim fade transition. The scrim and
+   any [data-sheet-close] element close it, as does Escape. */
 
-function openSidebar() {
-    document.getElementById('sidebar')?.classList.add('open');
-    document.getElementById('sidebar-overlay')?.classList.add('open');
+function openSheet(id) {
+    const sheet = document.getElementById(id);
+    if (!sheet) return;
+    // Close any other open sheet first (only one at a time).
+    document.querySelectorAll('.sheet.open').forEach(closeSheet);
+    sheet.hidden = false;
+    // Force a reflow so the transition runs from the hidden state.
+    void sheet.offsetWidth;
+    sheet.classList.add('open');
 }
 
-function closeSidebar() {
-    document.getElementById('sidebar')?.classList.remove('open');
-    document.getElementById('sidebar-overlay')?.classList.remove('open');
+function closeSheet(sheet) {
+    if (!sheet) return;
+    sheet.classList.remove('open');
+    // Hide after the slide-down transition (200ms) so it animates out.
+    setTimeout(() => {
+        if (!sheet.classList.contains('open')) sheet.hidden = true;
+    }, 220);
+}
+
+function closeAllSheets() {
+    document.querySelectorAll('.sheet.open').forEach(closeSheet);
+}
+
+/* ---- Logout ---- */
+
+// Shared by the sidebar's #logout-btn (all form factors, CSS-hidden on
+// phones) and the phone More-sheet's #logout-btn-sheet — same function so
+// behavior can never drift. Best-effort clears the SW article cache before
+// ending the session (device-possession hardening, M3.2 Task 4); its own
+// failure must NEVER block or delay the actual logout.
+async function handleLogout() {
+    if ('caches' in window) {
+        try {
+            const keys = await caches.keys();
+            await Promise.all(
+                keys
+                    .filter((k) => /^tiro-.*-articles$/.test(k))
+                    .map((k) => caches.delete(k))
+            );
+        } catch (e) {
+            // Best-effort only -- never blocks logout.
+        }
+    }
+    fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
+        window.location.href = '/login';
+    });
 }
 
 /* ---- Unread count (shared with inbox.js's "N to zero" pill, M3.2 Task 4) ----
@@ -104,14 +156,20 @@ function closeSidebar() {
 let unreadCount = null;
 
 function renderUnreadBadge() {
+    const hasUnread = unreadCount !== null && unreadCount > 0;
     const badge = document.getElementById('unread-badge');
-    if (!badge) return;
-    if (unreadCount !== null && unreadCount > 0) {
-        badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
-        badge.style.display = '';
-    } else {
-        badge.style.display = 'none';
+    if (badge) {
+        if (hasUnread) {
+            badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+            badge.style.display = '';
+        } else {
+            badge.style.display = 'none';
+        }
     }
+    // Phone tab-bar unread dot (no count, just presence).
+    document.querySelectorAll('[data-unread-dot]').forEach((dot) => {
+        dot.hidden = !hasUnread;
+    });
 }
 
 async function updateUnreadBadge() {
@@ -791,40 +849,39 @@ export {
 /* ---- Init (runs on every page) ---- */
 
 document.addEventListener("DOMContentLoaded", () => {
-    // Theme toggles
+    // Theme toggles (sidebar footer + phone More-sheet)
     document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
-    document.getElementById('mobile-theme-toggle')?.addEventListener('click', toggleTheme);
+    document.getElementById('sheet-theme-toggle')?.addEventListener('click', toggleTheme);
 
-    // Mobile sidebar
-    document.getElementById('mobile-menu-btn')?.addEventListener('click', openSidebar);
-    document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
+    // Phone tab bar: Save circle opens the same save modal as the sidebar.
+    document.getElementById('tab-save-btn')?.addEventListener('click', openSaveModal);
 
-    // Logout (M3.2 Task 4: SW article-cache hardening, M3.1 final-review
-    // adjudication). Tiro's auth posture is device possession, not cache
-    // secrecy -- logging out ends the session server-side regardless -- so
-    // this is defense-in-depth only: best-effort clear the service worker's
-    // article cache (which can hold previously-fetched /api/articles/{id}
-    // JSON bodies) before handing the device back. Feature-detected and
-    // wrapped in try/catch, and its own failure must NEVER block or delay
-    // the actual logout. The static cache (versioned, cookie-free assets)
-    // is deliberately left alone -- it's public content either way.
-    document.getElementById('logout-btn')?.addEventListener('click', async () => {
-        if ('caches' in window) {
-            try {
-                const keys = await caches.keys();
-                await Promise.all(
-                    keys
-                        .filter((k) => /^tiro-.*-articles$/.test(k))
-                        .map((k) => caches.delete(k))
-                );
-            } catch (e) {
-                // Best-effort only -- never blocks logout.
-            }
-        }
-        fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
-            window.location.href = '/login';
-        });
+    // Phone bottom sheets: [data-sheet] buttons open, scrim / [data-sheet-close]
+    // / Escape close.
+    document.querySelectorAll('[data-sheet]').forEach((btn) => {
+        btn.addEventListener('click', () => openSheet(btn.dataset.sheet));
     });
+    document.querySelectorAll('[data-sheet-close]').forEach((el) => {
+        el.addEventListener('click', () => closeSheet(el.closest('.sheet')));
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeAllSheets();
+    });
+
+    // About (phone More-sheet) mirrors the sidebar's About link — opens the
+    // project page in a new tab.
+    document.getElementById('about-btn-sheet')?.addEventListener('click', () => {
+        window.open('https://github.com/esagduyu/project-tiro', '_blank', 'noopener');
+    });
+
+    // Logout — the sidebar #logout-btn (all form factors, CSS-hidden on
+    // phones) and the phone More-sheet #logout-btn-sheet share handleLogout.
+    document.getElementById('logout-btn')?.addEventListener('click', handleLogout);
+    document.getElementById('logout-btn-sheet')?.addEventListener('click', handleLogout);
+
+    // Keep the phone tab-bar unread dot in sync when any module settles the
+    // shared count (same event inbox.js's pill listens to).
+    document.addEventListener('tiro:unread-count-updated', renderUnreadBadge);
 
     // Apply stored theme (reinforces the inline script in base.html)
     const mode = localStorage.getItem('tiro-mode') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');

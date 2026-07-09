@@ -94,13 +94,13 @@
                 <span class="sidebar-icon"></span>
                 <span class="sidebar-label" id="theme-label">Light</span>
             </button>
-            <a href="/settings" title="Settings" class="sidebar-footer-item {% block nav_settings %}{% endblock %}">
-                {{ icon("settings", size=17) }}
-                <span class="sidebar-label">Settings</span>
-            </a>
             <a href="https://github.com/esagduyu/project-tiro" target="_blank" rel="noopener" title="About Tiro" class="sidebar-footer-item">
                 {{ icon("info", size=17) }}
                 <span class="sidebar-label">About Tiro</span>
+            </a>
+            <a href="/settings" title="Settings" class="sidebar-footer-item {% block nav_settings %}{% endblock %}">
+                {{ icon("settings", size=17) }}
+                <span class="sidebar-label">Settings</span>
             </a>
             <button id="logout-btn" title="Log out" class="sidebar-footer-item sidebar-logout-btn">
                 {{ icon("logout", size=17) }}
@@ -109,15 +109,13 @@
         </div>
     </nav>
 
-    <!-- Mobile top bar -->
-    <header id="mobile-header" class="mobile-header">
-        <button id="mobile-menu-btn" class="mobile-menu-btn">&#9776;</button>
-        <span class="mobile-brand">Tiro</span>
-        <button id="mobile-theme-toggle" class="mobile-theme-toggle">&#9728;</button>
+    <!-- Slim phone header (≤768px only; replaces the old hamburger header).
+         Brand glyph + serif page title, no buttons — phone navigation lives
+         in the bottom tab bar (below). Inbox's own toolbar keeps search. -->
+    <header id="phone-header" class="phone-header">
+        <span class="phone-header-brand" aria-hidden="true">⁊</span>
+        <span class="page-title-serif">{% block page_title %}Tiro{% endblock %}</span>
     </header>
-
-    <!-- Sidebar overlay for mobile -->
-    <div id="sidebar-overlay" class="sidebar-overlay"></div>
 
     <main class="content {% block content_class %}{% endblock %}">
         {% block content %}{% endblock %}
@@ -169,6 +167,43 @@
             </div>
             <div id="shortcuts-body" class="shortcuts-body"></div>
         </div>
+    </div>
+    <!-- Phone bottom tab bar + sheets (≤768px only; pure CSS-media-gated,
+         no body class). Login/offline templates are standalone and never
+         extend base.html, so they never render this. active state reuses
+         the same {% raw %}{% block nav_* %}active{% endraw %} mechanism the
+         sidebar uses, via self.nav_*(). -->
+    <nav id="tab-bar" aria-label="Primary">
+      <a href="/inbox" class="tab-slot {{ self.nav_inbox() }}">
+        {{ icon("inbox", size=20) }}<span>Inbox</span>
+        <span class="tab-badge" data-unread-dot hidden></span></a>
+      <a href="/digest" class="tab-slot {{ self.nav_digest() }}">
+        {{ icon("layers", size=20) }}<span>Digest</span></a>
+      <button id="tab-save-btn" class="tab-save" aria-label="Save to Tiro">
+        {{ icon("bookmark", size=22) }}</button>
+      <button class="tab-slot" data-sheet="library-sheet">
+        {{ icon("grid", size=20) }}<span>Library</span></button>
+      <button class="tab-slot" data-sheet="more-sheet">
+        {{ icon("ellipsis", size=20) }}<span>More</span></button>
+    </nav>
+    <div id="library-sheet" class="sheet" hidden>
+      <div class="sheet-scrim" data-sheet-close></div>
+      <div class="sheet-panel">
+        <a href="/sources">{{ icon("library", size=22) }}<span>Sources</span></a>
+        <a href="/wiki">{{ icon("book-open", size=22) }}<span>Wiki</span></a>
+        <a href="/highlights">{{ icon("highlighter", size=22) }}<span>Highlights</span></a>
+        <a href="/graph">{{ icon("graph", size=22) }}<span>Graph</span></a>
+        <a href="/stats">{{ icon("bar-chart", size=22) }}<span>Stats</span></a>
+      </div>
+    </div>
+    <div id="more-sheet" class="sheet" hidden>
+      <div class="sheet-scrim" data-sheet-close></div>
+      <div class="sheet-panel">
+        <a href="/settings">{{ icon("settings", size=22) }}<span>Settings</span></a>
+        <button id="sheet-theme-toggle">{{ icon("moon", size=22) }}<span>Theme</span></button>
+        <button id="about-btn-sheet">{{ icon("info", size=22) }}<span>About</span></button>
+        <button id="logout-btn-sheet">{{ icon("logout", size=22) }}<span>Log out</span></button>
+      </div>
     </div>
     <script src="/static/vendor/marked.min.js?v={{ static_v }}"></script>
     <script src="/static/vendor/purify.min.js?v={{ static_v }}"></script>

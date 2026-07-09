@@ -161,15 +161,15 @@ test.describe('M3.2 triage pill + inbox-zero (mobile emulation)', () => {
     expect(consoleErrors, `light-theme console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
 
     // Toggle dark mode with the zero state on screen -- sweep again. Mobile
-    // viewport: the theme toggle lives inside the hamburger sidebar, so open
-    // it first.
-    await page.locator('#mobile-menu-btn').click();
-    await page.locator('#mobile-theme-toggle').click({ force: true });
+    // viewport (design pass): the theme toggle lives inside the phone "More"
+    // bottom sheet, opened from the tab bar's More slot.
+    await page.locator('[data-sheet="more-sheet"]').click();
+    await page.locator('#sheet-theme-toggle').click({ force: true });
     await page.waitForTimeout(300);
     await expect(zeroState).toBeVisible();
     expect(consoleErrors, `dark-theme console errors: ${JSON.stringify(consoleErrors)}`).toEqual([]);
-    // Close the sidebar (back to light doesn't matter for assertions either way).
-    await page.locator('#sidebar-overlay').click({ force: true }).catch(() => {});
+    // Close the sheet (back to light doesn't matter for assertions either way).
+    await page.locator('#more-sheet .sheet-scrim').click({ force: true }).catch(() => {});
 
     // Undo the last archive -> pill back to "1 to zero", zero state gone.
     const toast = page.locator('#undo-toast');
