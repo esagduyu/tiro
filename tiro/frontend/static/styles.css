@@ -550,6 +550,23 @@ body.has-lan-banner .content {
     color: var(--tiro-fg);
 }
 
+/* Modal entrance (spec §8): a single fade + 2%-scale keyframe shared by every
+   dialog that mounts fresh into the DOM (save modal, shortcuts, and the
+   .export-dialog family incl. the confirm + snooze sheets). Sheets and toasts
+   keep their bidirectional open/close TRANSITIONS instead (reconciled to
+   ease-out above / below) — one source of truth per component. Killed under
+   the shared prefers-reduced-motion block. */
+@keyframes modal-in {
+    from { opacity: 0; transform: scale(0.98); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.save-modal,
+.shortcuts-modal,
+.export-dialog {
+    animation: modal-in 280ms ease-out;
+}
+
 .save-modal-header {
     display: flex;
     align-items: center;
@@ -820,7 +837,7 @@ body.has-lan-banner .content {
     inset: 0;
     background: rgba(0, 0, 0, 0.4);
     opacity: 0;
-    transition: opacity 0.2s ease;
+    transition: opacity 200ms ease-out;
 }
 
 .sheet.open .sheet-scrim {
@@ -841,7 +858,7 @@ body.has-lan-banner .content {
     grid-template-columns: 1fr 1fr;
     gap: 0.5rem;
     transform: translateY(100%);
-    transition: transform 0.2s ease;
+    transition: transform 200ms ease-out;
 }
 
 .sheet.open .sheet-panel {
@@ -873,10 +890,20 @@ body.has-lan-banner .content {
     color: var(--tiro-accent);
 }
 
+/* Reduced-motion: kill the sheet slide (above) plus every §8 motion added in
+   Task 10 — the modal fade-in, the card hover tint, and the rating-pop scale.
+   This is the shared reduced-motion block; new selectors fold in here rather
+   than opening a second media query. */
 @media (prefers-reduced-motion: reduce) {
     .sheet-scrim,
-    .sheet-panel {
+    .sheet-panel,
+    .article-card,
+    .save-modal,
+    .shortcuts-modal,
+    .export-dialog,
+    .icon-btn.active .ti {
         transition: none;
+        animation: none;
     }
 }
 
@@ -978,10 +1005,22 @@ main {
     display: flex;
     gap: 1rem;
     align-items: flex-start;
+    transition: background-color 120ms ease-out;
 }
 
 .article-card:first-child {
     padding-top: 0;
+}
+
+/* Card hover tint (spec §8): pointer devices only — a background tint to
+   hover-bg with NO translate/scale, so the list stays geometrically stable
+   during touch triage. Gated on (hover: hover) so it never fires on the
+   phone where the swipe gesture lives; the .swiping / .swipe-*-hint classes
+   set their own (more specific) background + transition mid-drag and win. */
+@media (hover: hover) and (pointer: fine) {
+    .article-card:hover {
+        background: var(--tiro-bg-hover);
+    }
 }
 
 .article-card.is-read .article-title a {
@@ -4405,7 +4444,7 @@ main {
     font-weight: 500;
     color: white;
     opacity: 0;
-    transition: opacity 0.3s, transform 0.3s;
+    transition: opacity 280ms ease-out, transform 280ms ease-out;
     z-index: 300;
     pointer-events: none;
 }
