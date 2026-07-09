@@ -95,6 +95,7 @@ import {
     confirmDialog,
 } from "./core.js";
 import { showShortcuts, hideShortcuts } from "./sidebar.js";
+import { icon } from "./icons.js";
 import {
     projectMarkdown,
     plainToMarkdownRange,
@@ -108,6 +109,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const articleId = reader.dataset.articleId;
     loadArticle(articleId);
     setupReaderKeyboard(articleId);
+    setupReaderKebab();
+    setupReaderActionBar(articleId);
 });
 
 async function loadArticle(id) {
@@ -174,11 +177,23 @@ async function loadArticle(id) {
         document.getElementById("reader-time").textContent =
             `${a.reading_time_min || "?"} min read`;
 
-        // Original URL
+        // Original URL. The accent "Read the original" link in the meta area,
+        // plus the desktop kebab item and the phone overflow-sheet item, all
+        // point at the same URL (hidden when the article has none).
         const linkEl = document.getElementById("reader-original-link");
+        const kebabOriginal = document.getElementById("reader-kebab-original");
+        const sheetOriginal = document.getElementById("reader-sheet-original");
         if (a.url) {
             linkEl.href = a.url;
-            linkEl.textContent = new URL(a.url).hostname;
+            linkEl.innerHTML = `${icon("external", { size: 13 })}${esc(new URL(a.url).hostname)}`;
+            if (kebabOriginal) {
+                kebabOriginal.href = a.url;
+                kebabOriginal.style.display = "";
+            }
+            if (sheetOriginal) {
+                sheetOriginal.href = a.url;
+                sheetOriginal.style.display = "";
+            }
         } else {
             linkEl.parentElement.style.display = "none";
         }
@@ -559,7 +574,7 @@ function renderAnalysis(data) {
         </details>
 
         <div class="analysis-actions">
-            <button class="analysis-refresh-btn">Re-analyze</button>
+            <button class="analysis-refresh-btn btn btn-ghost">${icon("refresh", { size: 14 })}Re-analyze</button>
         </div>
     `;
 
@@ -795,6 +810,69 @@ function readerRunAnalysis(articleId) {
     }
 }
 
+/* Desktop reader header overflow menu (kebab → Read original / Delete). Delete
+   inside keeps its `#delete-btn` id (so the `x` key and confirm dialog are
+   unchanged); this just toggles the dropdown's `hidden` attribute. Mirrors the
+   inbox card-menu pattern's markup/classes for free styling. */
+function setupReaderKebab() {
+    const btn = document.getElementById("reader-kebab-btn");
+    if (!btn) return;
+    const dropdown = btn.nextElementSibling;
+    if (!dropdown) return;
+
+    const close = () => {
+        dropdown.hidden = true;
+        btn.setAttribute("aria-expanded", "false");
+    };
+
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const wasOpen = !dropdown.hidden;
+        if (wasOpen) {
+            close();
+        } else {
+            dropdown.hidden = false;
+            btn.setAttribute("aria-expanded", "true");
+        }
+    });
+    // Close on outside click / Escape.
+    document.addEventListener("click", (e) => {
+        if (!dropdown.hidden && !btn.parentElement.contains(e.target)) close();
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !dropdown.hidden) close();
+    });
+}
+
+/* Phone reader action bar (spec §6). Every button delegates to an existing
+   reader.js handler/control — no new logic paths. The overflow-sheet open/close
+   is handled generically by sidebar.js ([data-sheet]/[data-sheet-close]); this
+   only wires each item to its existing action. */
+function setupReaderActionBar() {
+    document.querySelectorAll("#reader-action-bar .reader-bar-rate").forEach((b) => {
+        b.addEventListener("click", () => readerRate(parseInt(b.dataset.rating, 10)));
+    });
+    document
+        .getElementById("reader-bar-audio")
+        ?.addEventListener("click", toggleAudioPlayback);
+    document
+        .getElementById("reader-bar-note")
+        ?.addEventListener("click", () =>
+            document.getElementById("article-note-btn")?.click()
+        );
+    document
+        .getElementById("reader-sheet-analysis")
+        ?.addEventListener("click", readerToggleAnalysis);
+    document
+        .getElementById("reader-sheet-vip")
+        ?.addEventListener("click", readerToggleVip);
+    document
+        .getElementById("reader-sheet-delete")
+        ?.addEventListener("click", () =>
+            document.getElementById("delete-btn")?.click()
+        );
+}
+
 /* --- Audio Player --- */
 
 let audioState = { fallback: false, playing: false };
@@ -810,6 +888,10 @@ async function setupAudioPlayer(articleId, articleContent) {
 
         const data = json.data;
         player.style.display = "";
+
+        // Reveal the phone action-bar play/pause button now that audio exists.
+        const barAudio = document.getElementById("reader-bar-audio");
+        if (barAudio) barAudio.style.display = "";
 
         if (data.fallback) {
             audioState.fallback = true;
@@ -881,17 +963,17 @@ function showAudioControls(articleId, durationSeconds) {
         playBtn.disabled = true;
     });
     audio.addEventListener("playing", () => {
-        playBtn.innerHTML = "&#9646;&#9646;";
+        playBtn.innerHTML = icon("pause", { size: 15 });
         playBtn.disabled = false;
         audioState.playing = true;
     });
     audio.addEventListener("pause", () => {
-        playBtn.innerHTML = "&#9654;";
+        playBtn.innerHTML = icon("play", { size: 15 });
         playBtn.disabled = false;
         audioState.playing = false;
     });
     audio.addEventListener("ended", () => {
-        playBtn.innerHTML = "&#9654;";
+        playBtn.innerHTML = icon("play", { size: 15 });
         playBtn.disabled = false;
         audioState.playing = false;
         progressFill.style.width = "0%";
@@ -1018,7 +1100,7 @@ function startFallbackSpeechFrom(charIndex) {
     const wordCount = fallbackState.cleanText.split(/\s+/).length;
     const estTotalSeconds = (wordCount / 150) * 60 / fallbackState.rate;
 
-    playBtn.innerHTML = "&#9646;&#9646;";
+    playBtn.innerHTML = icon("pause", { size: 15 });
 
     // Track progress via boundary events
     utterance.onboundary = (e) => {
@@ -1033,7 +1115,7 @@ function startFallbackSpeechFrom(charIndex) {
     };
 
     utterance.onend = () => {
-        playBtn.innerHTML = "&#9654;";
+        playBtn.innerHTML = icon("play", { size: 15 });
         audioState.playing = false;
         progressFill.style.width = "100%";
         timeEl.textContent = formatAudioTime(estTotalSeconds) + " / " + formatAudioTime(estTotalSeconds);
@@ -1050,11 +1132,11 @@ function toggleFallbackPlayback() {
 
     if (speechSynthesis.speaking && !speechSynthesis.paused) {
         speechSynthesis.pause();
-        playBtn.innerHTML = "&#9654;";
+        playBtn.innerHTML = icon("play", { size: 15 });
         audioState.playing = false;
     } else if (speechSynthesis.paused) {
         speechSynthesis.resume();
-        playBtn.innerHTML = "&#9646;&#9646;";
+        playBtn.innerHTML = icon("pause", { size: 15 });
         audioState.playing = true;
     }
 }
@@ -1955,7 +2037,7 @@ function renderHighlightRow(hl, { full }) {
         ? `<span class="highlight-anchor-badge">${esc(warningBadgeLabel(hl))}</span>`
         : "";
     const noteIndicator = hasNote
-        ? '<span class="highlight-note-indicator" title="Has a note">&#128221;</span>'
+        ? `<span class="highlight-note-indicator" title="Has a note">${icon("note", { size: 13 })}</span>`
         : "";
     const colorButtons = ANNOTATE_COLORS
         .map(
@@ -1975,7 +2057,7 @@ function renderHighlightRow(hl, { full }) {
             <div class="highlight-row-actions">
                 <div class="highlight-color-picker">${colorButtons}</div>
                 <button type="button" class="highlight-note-btn" data-uid="${uid}">${hasNote ? "Edit note" : "Add note"}</button>
-                <button type="button" class="highlight-delete-btn" data-uid="${uid}" title="Delete highlight" aria-label="Delete highlight">&#128465;</button>
+                <button type="button" class="highlight-delete-btn" data-uid="${uid}" title="Delete highlight" aria-label="Delete highlight">${icon("trash", { size: 14 })}</button>
             </div>
             <div class="highlight-note-editor" id="highlight-note-editor-${uid}" style="display: none;">
                 <textarea class="highlight-note-textarea" data-uid="${uid}">${esc(hl.note_markdown || "")}</textarea>

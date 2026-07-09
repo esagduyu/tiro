@@ -27,7 +27,7 @@
     })();
     </script>
 </head>
-<body{% if insecure_lan_http %} class="has-lan-banner"{% endif %}>
+<body class="{% block body_class %}{% endblock %}{% if insecure_lan_http %} has-lan-banner{% endif %}">
     {% if insecure_lan_http %}
     <div id="lan-http-banner" class="lan-http-banner" role="status">
         {{ icon("alert", size=15) }}

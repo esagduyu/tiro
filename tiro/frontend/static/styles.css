@@ -876,6 +876,27 @@ body.has-lan-banner .content {
     }
 }
 
+/* --- Phone reader action bar (spec §6) ---
+   Same shell/geometry as #tab-bar; replaces the tab bar on the reader page at
+   ≤768px (see the responsive block). Hidden on desktop/tablet, where the reader
+   keeps its in-page header chrome. grid-auto-flow lets the optional play/pause
+   slot come and go (display:none) without leaving a gap. */
+#reader-action-bar {
+    display: none;
+    position: fixed;
+    inset: auto 0 0 0;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--tiro-sidebar-bg);
+    border-top: 1px solid var(--tiro-border);
+    z-index: 60;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    align-items: center;
+}
+
+#reader-action-bar .reader-bar-rate.love:not(.active) .ti-heart { fill: none; }
+
 /* Content area */
 .content {
     margin-left: 240px;
@@ -1352,6 +1373,19 @@ main {
 
 .card-menu-item:hover {
     background: var(--tiro-bg-hover);
+}
+
+/* Reader header overflow menu: items carry a leading icon; align it with the
+   label and give the destructive Delete item crimson intent. */
+.reader-menu .card-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.reader-menu .card-menu-danger {
+    color: var(--tiro-tier-must-read);
 }
 
 /* --- Snooze preset sheet (M3.2 Task 1) ---
@@ -2141,12 +2175,11 @@ main {
 }
 
 .reader-source-link a {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     color: var(--tiro-accent);
     text-decoration: none;
-}
-
-.reader-source-link a::before {
-    content: "\2197\00a0";
 }
 
 .reader-source-link a:hover {
@@ -3004,7 +3037,8 @@ main {
 .analysis-dimension {
     margin-bottom: 0.5rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
+    border-left: 3px solid var(--tiro-secondary);
+    border-radius: 0 var(--tiro-radius-md) var(--tiro-radius-md) 0;
     overflow: hidden;
 }
 
@@ -4679,6 +4713,12 @@ main {
     .sidebar { display: none; }
     #tab-bar { display: grid; }
     .phone-header { display: flex; }
+    /* Reader page: the tab bar yields to the reader action bar (same shell). */
+    body.reader-page #tab-bar { display: none; }
+    body.reader-page #reader-action-bar { display: grid; }
+    /* The in-page reader nav (back link + header icon cluster) collapses into
+       the action bar/overflow sheet on phones. */
+    body.reader-page .reader-nav { display: none; }
     .content {
         margin-left: 0;
         padding-top: calc(52px + env(safe-area-inset-top));
