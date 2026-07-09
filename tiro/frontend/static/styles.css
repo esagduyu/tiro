@@ -2,6 +2,116 @@
    All colors use --tiro-* variables defined in theme files
    (themes/papyrus.css, themes/roman-night.css) */
 
+/* ============ tokens (non-color; colors live in themes/) ============ */
+:root {
+  --tiro-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --tiro-font-serif: Georgia, "Times New Roman", serif;
+  --tiro-radius-sm: 4px; --tiro-radius-md: 6px;
+  --tiro-radius-lg: 10px; --tiro-radius-xl: 12px;
+}
+
+/* ============ primitives (spec §5 — measurements are normative) ===== */
+.btn { display: inline-flex; align-items: center; gap: 6px;
+  font-family: inherit; font-size: 0.85rem; font-weight: 500;
+  padding: 0.5rem 1rem; border-radius: var(--tiro-radius-md);
+  border: 1px solid var(--tiro-border); background: none;
+  color: var(--tiro-fg-secondary); cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out,
+    border-color 120ms ease-out; }
+.btn-primary { background: var(--tiro-accent); border-color: var(--tiro-accent);
+  color: #fff; font-weight: 600; }
+.btn-primary:hover { background: var(--tiro-accent-hover);
+  border-color: var(--tiro-accent-hover); }
+.btn-ghost { color: var(--tiro-muted); }
+.btn-ghost:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-fg-secondary); border-color: var(--tiro-fg-secondary); }
+.btn-gold { border-color: var(--tiro-gold); color: var(--tiro-gold);
+  background: var(--tiro-bg-surface); }
+.btn-gold.active { background: var(--tiro-gold); color: #fff; }
+.btn-danger { border-color: var(--tiro-tier-must-read);
+  color: var(--tiro-tier-must-read); }
+.btn-danger:hover { background: var(--tiro-tier-must-read); color: #fff; }
+.btn-block { display: flex; width: 100%; justify-content: center;
+  padding: 0.75rem 1.5rem; border-radius: var(--tiro-radius-lg);
+  font-size: 0.9rem; font-weight: 600; }
+.icon-btn { width: 32px; height: 28px; display: inline-flex;
+  align-items: center; justify-content: center;
+  border: 1px solid var(--tiro-border); border-radius: var(--tiro-radius-sm);
+  background: transparent; color: var(--tiro-muted); cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out; }
+.icon-btn:hover { background: var(--tiro-bg-hover); }
+.icon-btn.active .ti { transform: scale(1.12);
+  transition: transform 120ms ease-out; }
+.pill { display: inline-block; font-size: 0.65rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem; border-radius: 9px;
+  background: var(--tiro-bg-surface); }
+.pill-tier { font-weight: 700; }
+.tag-chip { display: inline-block; font-size: 0.7rem;
+  background: var(--tiro-bg-surface); color: var(--tiro-fg-secondary);
+  padding: 0.15rem 0.5rem; border-radius: 3px; }
+a.tag-chip:hover, button.tag-chip:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-accent); }
+.filter-pill { display: inline-flex; align-items: center; gap: 5px;
+  padding: 0.2rem 0.5rem; background: var(--tiro-bg-surface);
+  border: 1px solid var(--tiro-border); border-radius: 12px;
+  font-size: 0.72rem; color: var(--tiro-fg-secondary); cursor: pointer; }
+.filter-pill:hover { border-color: var(--tiro-accent);
+  color: var(--tiro-accent); }
+.callout { background: var(--tiro-bg-surface); padding: 0.9rem 1.1rem;
+  border-left: 3px solid var(--tiro-accent);
+  border-radius: 0 var(--tiro-radius-md) var(--tiro-radius-md) 0;
+  font-size: 0.9rem; line-height: 1.6; color: var(--tiro-fg-secondary); }
+.callout-secondary { border-left-color: var(--tiro-secondary); }
+.callout-gold { border-left-color: var(--tiro-gold);
+  color: var(--tiro-gold-hover); }
+.callout-danger { border-left-color: var(--tiro-tier-must-read); }
+.stat-card { text-align: center; padding: 1rem 0.5rem;
+  background: var(--tiro-bg); border: 1px solid var(--tiro-border);
+  border-radius: 8px; }
+.stat-card .stat-value { display: block; font-family: var(--tiro-font-serif);
+  font-size: 1.5rem; font-weight: 700; color: var(--tiro-fg);
+  line-height: 1.2; margin-bottom: 2px; }
+.stat-card .stat-label { font-size: 0.75rem; color: var(--tiro-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
+.stat-card-hero { background: var(--tiro-bg-surface);
+  border-color: var(--tiro-accent); }
+.stat-card-hero .stat-value { color: var(--tiro-accent); }
+.empty-state { text-align: center; padding: 3rem 1rem;
+  color: var(--tiro-muted); }
+.empty-state .ti { width: 40px; height: 40px; margin-bottom: 12px; }
+.empty-state h2 { font-family: var(--tiro-font-serif); font-size: 1.3rem;
+  color: var(--tiro-fg); margin: 0 0 6px; }
+.mode-pill { padding: 0.4rem 0.9rem; border: 1px solid var(--tiro-border);
+  border-radius: var(--tiro-radius-sm); background: none;
+  color: var(--tiro-muted); font-family: inherit; font-size: 0.8rem;
+  font-weight: 500; cursor: pointer; }
+.mode-pill:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-fg-secondary); }
+.mode-pill.active { background: var(--tiro-fg); border-color: var(--tiro-fg);
+  color: var(--tiro-bg); }
+.tabs-underline { display: flex; border-bottom: 2px solid var(--tiro-border); }
+.tabs-underline .tab { padding: 0.6rem 1.25rem; font-size: 0.9rem;
+  font-weight: 500; color: var(--tiro-muted); cursor: pointer;
+  margin-bottom: -2px; border-bottom: 2px solid transparent; }
+.tabs-underline .tab.active { color: var(--tiro-fg);
+  border-bottom-color: var(--tiro-accent); }
+.page-title-serif { font-family: var(--tiro-font-serif); font-weight: 700;
+  letter-spacing: -0.02em; }
+.serif-num { font-family: var(--tiro-font-serif); }
+.ti { flex-shrink: 0; vertical-align: -0.15em; }
+
+/* Input focus contract (spec §5): applies to every bare input/select/
+   textarea in the app. Page-local `.foo-input:focus { border-color: ... }`
+   rules that already point at --tiro-accent are additive/harmless on top
+   of this (same color); none found setting a conflicting border color. */
+input:focus, select:focus, textarea:focus {
+  border-color: var(--tiro-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent) 15%, transparent);
+  outline: none;
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -114,6 +224,8 @@ body.has-lan-banner .content {
         padding-top: calc(60px + var(--tiro-lan-banner-h) * 2);
     }
 }
+
+/* ============ chrome (sidebar, icon rail, tab bar, mobile header, sheets) === */
 
 /* --- Layout: Sidebar --- */
 
@@ -679,6 +791,8 @@ main {
     margin: 0 auto;
     color: var(--tiro-fg-secondary);
 }
+
+/* ============ components (cards, pills, modals, toasts, filter panel, pagination) === */
 
 /* --- Article list --- */
 
@@ -1767,6 +1881,8 @@ main {
     color: var(--tiro-muted);
     padding: 0 0.5rem;
 }
+
+/* ============ pages (per-page sections) ============================= */
 
 /* --- Reader view --- */
 
@@ -4312,6 +4428,8 @@ main {
     color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
 }
+
+/* ============ responsive (media-query consolidation region) ========= */
 
 /* --- Responsive: Sidebar collapse --- */
 
