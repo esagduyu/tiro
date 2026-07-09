@@ -27,6 +27,7 @@
  */
 
 import { esc, num, formatDate, showToast } from "./core.js";
+import { icon } from "./icons.js";
 import {
     showShortcuts, hideShortcuts, openSaveModal, closeSaveModal,
     loadSavedViews as refreshSidebarViews,
@@ -320,7 +321,7 @@ function renderArticle(a, showScore) {
     const date = formatDate(a.published_at || a.ingested_at);
     const summary = a.summary || "";
     const tags = (a.tags || [])
-        .map((t) => `<span class="tag clickable-tag" data-tag="${esc(t)}">${esc(t)}</span>`)
+        .map((t) => `<span class="tag-chip clickable-tag" data-tag="${esc(t)}">${esc(t)}</span>`)
         .join("");
 
     const ratingMap = { "-1": "dislike", 1: "like", 2: "love" };
@@ -328,12 +329,12 @@ function renderArticle(a, showScore) {
 
     const sourceType = a.source_type || "web";
     const sourceTypeLabel = sourceType === "email" ? "email" : sourceType === "rss" ? "rss" : "saved";
-    const sourceTypePill = `<span class="source-type-pill source-type-${sourceType} clickable-tag" data-tag="${esc(sourceTypeLabel)}">${sourceTypeLabel}</span>`;
+    const sourceTypePill = `<span class="pill source-type-pill source-type-${sourceType} clickable-tag" data-tag="${esc(sourceTypeLabel)}">${sourceTypeLabel}</span>`;
 
     const tierBadge = a.ai_tier === "must-read"
-        ? '<span class="tier-badge tier-badge-must-read">Must Read</span>'
+        ? '<span class="pill pill-tier tier-badge tier-badge-must-read">Must Read</span>'
         : a.ai_tier === "summary-enough"
-        ? '<span class="tier-badge tier-badge-summary-enough">Summary</span>'
+        ? '<span class="pill pill-tier tier-badge tier-badge-summary-enough">Summary</span>'
         : "";
 
     const isSelectedForDelete = selectedForDelete.has(Number(a.id));
@@ -354,6 +355,8 @@ function renderArticle(a, showScore) {
 
     return `
     <article class="${classes.join(" ")}" data-id="${a.id}">
+        <span class="swipe-hint-icon swipe-hint-right" aria-hidden="true">${icon("archive", { size: 22 })}</span>
+        <span class="swipe-hint-icon swipe-hint-left" aria-hidden="true">${icon("clock", { size: 22 })}</span>
         <input type="checkbox" class="bulk-select-checkbox" data-id="${a.id}" title="Select for bulk delete" ${checked}>
         <div class="article-main">
             <div class="article-meta">
@@ -362,7 +365,7 @@ function renderArticle(a, showScore) {
                 <span class="source-name">${esc(a.source_name || a.domain || "unknown")}</span>
                 <span class="vip-star ${a.is_vip ? "active" : ""}"
                       data-source-id="${a.source_id}"
-                      title="Toggle VIP">&#9733;</span>
+                      title="Toggle VIP">${icon("star", { size: 12, cls: "vip-star-icon" })}</span>
                 <span class="meta-sep">&middot;</span>
                 <span>${date}</span>
                 <span class="meta-sep">&middot;</span>
@@ -378,22 +381,22 @@ function renderArticle(a, showScore) {
         </div>
         <div class="article-actions">
             <div class="card-menu">
-                <button class="card-menu-btn" data-article-id="${a.id}"
+                <button class="card-menu-btn icon-btn" data-article-id="${a.id}"
                         aria-haspopup="true" aria-expanded="false"
-                        title="More actions">&#8942;</button>
+                        title="More actions">${icon("kebab", { size: 15 })}</button>
                 <div class="card-menu-dropdown" hidden>
                     <button class="card-menu-item card-menu-snooze" data-action="snooze" data-article-id="${a.id}">Snooze&hellip;</button>
                 </div>
             </div>
-            <button class="rate-btn love ${activeRating === "love" ? "active" : ""}"
+            <button class="rate-btn icon-btn love ${activeRating === "love" ? "active" : ""}"
                     data-article-id="${a.id}" data-rating="2"
-                    title="Love">&hearts;</button>
-            <button class="rate-btn like ${activeRating === "like" ? "active" : ""}"
+                    title="Love">${icon("heart", { size: 15 })}</button>
+            <button class="rate-btn icon-btn like ${activeRating === "like" ? "active" : ""}"
                     data-article-id="${a.id}" data-rating="1"
-                    title="Like">&plus;</button>
-            <button class="rate-btn dislike ${activeRating === "dislike" ? "active" : ""}"
+                    title="Like">${icon("thumb-up", { size: 15 })}</button>
+            <button class="rate-btn icon-btn dislike ${activeRating === "dislike" ? "active" : ""}"
                     data-article-id="${a.id}" data-rating="-1"
-                    title="Dislike">&minus;</button>
+                    title="Dislike">${icon("thumb-down", { size: 15 })}</button>
         </div>
     </article>`;
 }
@@ -1204,13 +1207,17 @@ function exitSearch() {
 function renderTriagePill() {
     const pill = document.getElementById("triage-pill");
     if (!pill) return;
+    // Write the counter into a child span so the leading archive icon
+    // (static markup in inbox.html) survives every re-render. Falls back to
+    // the pill itself if the count span is somehow absent.
+    const countEl = pill.querySelector(".triage-pill-count") || pill;
     const count = getUnreadCount();
     if (count === null || count <= 0) {
         pill.style.display = "none";
-        pill.textContent = "";
+        countEl.textContent = "";
         return;
     }
-    pill.textContent = `${num(count)} to zero`;
+    countEl.textContent = `${num(count)} to zero`;
     pill.style.display = "inline-flex";
 }
 
@@ -1250,6 +1257,15 @@ function refreshTriageUI() {
 
 /* ---- Tier toolbar (classify button + discard toggle) ---- */
 
+// Writes the classify button's dynamic label into its `.classify-label`
+// span so the leading zap icon (static markup in inbox.html) is never wiped
+// by a whole-button textContent assignment.
+function setClassifyLabel(btn, text) {
+    const label = btn && btn.querySelector(".classify-label");
+    if (label) label.textContent = text;
+    else if (btn) btn.textContent = text;
+}
+
 function updateToolbar(articles) {
     const toolbar = document.getElementById("inbox-toolbar");
     const classifyBtn = document.getElementById("classify-btn");
@@ -1266,10 +1282,10 @@ function updateToolbar(articles) {
     // Classify button — always visible
     classifyBtn.style.display = "inline-flex";
     if (unclassified > 0) {
-        classifyBtn.textContent = `Classify inbox (${unclassified})`;
+        setClassifyLabel(classifyBtn, `Classify inbox (${unclassified})`);
         classifyBtn.classList.remove("classify-btn-secondary");
     } else {
-        classifyBtn.textContent = "Reclassify";
+        setClassifyLabel(classifyBtn, "Reclassify");
         classifyBtn.classList.add("classify-btn-secondary");
     }
 
@@ -1350,7 +1366,7 @@ async function classifyArticles() {
     const isReclassify = classifyBtn.classList.contains("classify-btn-secondary");
 
     classifyBtn.disabled = true;
-    classifyBtn.textContent = "Classifying...";
+    setClassifyLabel(classifyBtn, "Classifying...");
     classifyInfo.textContent = "Opus 4.6 is learning your preferences — this may take 30–60s";
     classifyInfo.style.display = "inline";
 
@@ -1363,7 +1379,7 @@ async function classifyArticles() {
         if (!json.success) {
             classifyInfo.textContent = json.error || "Classification failed";
             classifyBtn.disabled = false;
-            classifyBtn.textContent = isReclassify ? "Reclassify" : "Classify inbox";
+            setClassifyLabel(classifyBtn, isReclassify ? "Reclassify" : "Classify inbox");
             return;
         }
 
@@ -1378,7 +1394,7 @@ async function classifyArticles() {
         console.error("Classification failed:", err);
         classifyInfo.textContent = "Classification failed — check console";
         classifyBtn.disabled = false;
-        classifyBtn.textContent = isReclassify ? "Reclassify" : "Classify inbox";
+        setClassifyLabel(classifyBtn, isReclassify ? "Reclassify" : "Classify inbox");
     }
 }
 
@@ -1446,6 +1462,13 @@ function setupFilterPanel() {
 
     if (filterTab) {
         filterTab.addEventListener("click", togglePanel);
+    }
+
+    // Phone-only Filters icon-button in the toolbar (the vertical edge tab is
+    // desktop/tablet-only; they never both show at once — see the CSS).
+    const filterIconBtn = document.getElementById("filter-icon-btn");
+    if (filterIconBtn) {
+        filterIconBtn.addEventListener("click", togglePanel);
     }
 
     if (closeBtn) {
@@ -1580,9 +1603,15 @@ function renderFilterPanelContent(data) {
 
     // Ratings
     if (data.ratings?.length) {
-        const ratingLabels = { loved: "♥ Loved", liked: "+ Liked", disliked: "− Disliked", unrated: "Unrated" };
+        const ratingLabels = { loved: "Loved", liked: "Liked", disliked: "Disliked", unrated: "Unrated" };
+        const ratingIcons = {
+            loved: icon("heart", { size: 12 }),
+            liked: icon("thumb-up", { size: 12 }),
+            disliked: icon("thumb-down", { size: 12 }),
+        };
         const ratingItems = data.ratings.map(r => ({
             label: ratingLabels[r.name] || r.name,
+            iconHtml: ratingIcons[r.name] || "",
             value: r.name,
             key: "rating",
             count: r.count,
@@ -1593,7 +1622,8 @@ function renderFilterPanelContent(data) {
     // Sources
     if (data.sources?.length) {
         const sourceItems = data.sources.map(s => ({
-            label: (s.is_vip ? "★ " : "") + s.name,
+            label: s.name,
+            iconHtml: s.is_vip ? icon("star", { size: 12, cls: "vip-star-icon" }) : "",
             value: String(s.id),
             key: "source_id",
             count: s.count,
@@ -1679,7 +1709,7 @@ function renderFilterSection(title, items, scrollable) {
     const optionsHtml = items.map(item =>
         `<button class="filter-option${isActive(item) ? " active" : ""}"
                 data-key="${item.key}" data-value="${esc(item.value)}">
-            <span>${esc(item.label)}</span>
+            <span class="filter-option-label">${item.iconHtml || ""}${esc(item.label)}</span>
             <span class="filter-option-count">${item.count}</span>
         </button>`
     ).join("");
@@ -1760,9 +1790,17 @@ function renderActiveFilters() {
             return `Source #${v}`;
         },
         tag: v => `Tag: ${v}`,
-        rating: v => ({ loved: "♥ Loved", liked: "Liked", disliked: "Disliked", unrated: "Unrated" })[v] || v,
+        rating: v => ({ loved: "Loved", liked: "Liked", disliked: "Disliked", unrated: "Unrated" })[v] || v,
         ingestion_method: v => ({ manual: "Manual", extension: "Extension", email: "Email", imap: "IMAP" })[v] || v,
         has_audio: () => "Has audio",
+    };
+    // Leading icons for pills whose glyph moved into the icon set (rating).
+    const iconMap = {
+        rating: v => ({
+            loved: icon("heart", { size: 12 }),
+            liked: icon("thumb-up", { size: 12 }),
+            disliked: icon("thumb-down", { size: 12 }),
+        })[v] || "",
     };
 
     for (const [key, val] of Object.entries(activeFilters)) {
@@ -1770,8 +1808,9 @@ function renderActiveFilters() {
         // Skip reading time sub-keys, handle as compound
         if (key === "min_reading_time" || key === "max_reading_time") continue;
         const label = labelMap[key] ? labelMap[key](val) : `${key}: ${val}`;
+        const leadIcon = iconMap[key] ? iconMap[key](val) : "";
         pills.push(`<span class="filter-pill" data-key="${key}" title="Click to remove">
-            ${esc(label)} <span class="filter-pill-x">&times;</span>
+            ${leadIcon}${esc(label)} <span class="filter-pill-x">${icon("close", { size: 12 })}</span>
         </span>`);
     }
 
@@ -1782,7 +1821,7 @@ function renderActiveFilters() {
         else if (activeFilters.min_reading_time === "5" && activeFilters.max_reading_time === "15") label = "Medium (5-15 min)";
         else if (activeFilters.min_reading_time === "16") label = "Long (>15 min)";
         pills.push(`<span class="filter-pill" data-key="_reading_time" title="Click to remove">
-            ${esc(label)} <span class="filter-pill-x">&times;</span>
+            ${esc(label)} <span class="filter-pill-x">${icon("close", { size: 12 })}</span>
         </span>`);
     }
 
@@ -1823,7 +1862,7 @@ function renderPagination(pagination) {
     let html = "";
 
     // Previous
-    html += `<button class="page-link${page <= 1 ? " disabled" : ""}" data-page="${page - 1}">&laquo;</button>`;
+    html += `<button class="page-link page-nav${page <= 1 ? " disabled" : ""}" data-page="${page - 1}" aria-label="Previous page">${icon("chevron-left", { size: 15 })}</button>`;
 
     // Page numbers (show max 7, with ellipsis)
     const pages = getPageRange(page, total_pages, 7);
@@ -1831,12 +1870,12 @@ function renderPagination(pagination) {
         if (p === "...") {
             html += `<span class="page-info">…</span>`;
         } else {
-            html += `<button class="page-link${p === page ? " active" : ""}" data-page="${p}">${toRoman(p)}</button>`;
+            html += `<button class="page-link serif-num${p === page ? " active" : ""}" data-page="${p}">${toRoman(p)}</button>`;
         }
     }
 
     // Next
-    html += `<button class="page-link${page >= total_pages ? " disabled" : ""}" data-page="${page + 1}">&raquo;</button>`;
+    html += `<button class="page-link page-nav${page >= total_pages ? " disabled" : ""}" data-page="${page + 1}" aria-label="Next page">${icon("chevron-right", { size: 15 })}</button>`;
 
     // Info
     html += `<span class="page-info">${total} articles</span>`;
@@ -2239,8 +2278,10 @@ function setupBulkDeleteToolbar() {
 
     const btn = document.createElement("button");
     btn.id = "bulk-delete-btn";
-    btn.className = "danger-outline-btn";
+    btn.className = "btn btn-danger";
     btn.style.display = "none";
+    // Trailing label span so the leading trash icon survives count updates.
+    btn.innerHTML = `${icon("trash", { size: 14 })}<span class="bulk-delete-label"></span>`;
     btn.addEventListener("click", showBulkDeleteConfirm);
     toolbar.appendChild(btn);
 }
@@ -2250,7 +2291,8 @@ function updateBulkDeleteToolbar() {
     if (!btn) return;
     const n = selectedForDelete.size;
     if (n > 0) {
-        btn.textContent = `Delete selected (${n})`;
+        const label = btn.querySelector(".bulk-delete-label");
+        if (label) label.textContent = `Delete selected (${n})`;
         btn.style.display = "inline-flex";
     } else {
         btn.style.display = "none";
