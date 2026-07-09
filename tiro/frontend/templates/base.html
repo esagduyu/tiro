@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+{% from "_icons.html" import icon %}<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
@@ -30,6 +30,7 @@
 <body{% if insecure_lan_http %} class="has-lan-banner"{% endif %}>
     {% if insecure_lan_http %}
     <div id="lan-http-banner" class="lan-http-banner" role="status">
+        {{ icon("alert", size=15) }}
         <span class="lan-http-banner-text">Serving unencrypted HTTP on your local network &mdash; use Tailscale Serve or <code>tiro run --cert/--key</code> for HTTPS.</span>
         <button id="lan-http-banner-dismiss" class="lan-http-banner-dismiss" aria-label="Dismiss">&times;</button>
     </div>
@@ -37,63 +38,72 @@
     <!-- Left sidebar navigation -->
     <nav id="sidebar" class="sidebar">
         <div class="sidebar-brand">
-            <a href="/inbox" class="sidebar-logo"><img src="/static/logo-128.png" alt="Tiro" width="28" height="28"></a>
-            <span class="sidebar-title">Tiro</span>
+            <a href="/inbox" class="sidebar-logo"><img src="/static/logo-128.png" alt="Tiro" width="30" height="30"></a>
+            <span class="sidebar-brand-text">
+                <span class="sidebar-brand-overline">Reading OS</span>
+                <span class="sidebar-title">Tiro</span>
+            </span>
         </div>
         <div class="sidebar-nav">
-            <button id="save-btn" class="sidebar-item sidebar-save-btn">
-                <span class="sidebar-icon">&#43;</span>
+            <button id="sidebar-save-btn" class="btn btn-primary sidebar-save" title="Save">
+                {{ icon("bookmark", size=15) }}
                 <span class="sidebar-label">Save</span>
             </button>
-            <a href="/inbox" class="sidebar-item {% block nav_inbox %}{% endblock %}">
-                <span class="sidebar-icon">&#9636;</span>
-                <span class="sidebar-label">Inbox</span>
-                <span id="unread-badge" class="sidebar-badge" style="display:none;"></span>
-            </a>
-            <a href="/digest" class="sidebar-item {% block nav_digest %}{% endblock %}">
-                <span class="sidebar-icon">&#9673;</span>
-                <span class="sidebar-label">Digest</span>
-            </a>
-            <a href="/graph" class="sidebar-item {% block nav_graph %}{% endblock %}">
-                <span class="sidebar-icon">&#9678;</span>
-                <span class="sidebar-label">Graph</span>
-            </a>
-            <a href="/wiki" class="sidebar-item {% block nav_wiki %}{% endblock %}">
-                <span class="sidebar-icon">&#128220;</span>
-                <span class="sidebar-label">Wiki</span>
-            </a>
-            <a href="/highlights" class="sidebar-item {% block nav_highlights %}{% endblock %}">
-                <span class="sidebar-icon">&#128397;</span>
-                <span class="sidebar-label">Highlights</span>
-            </a>
-            <a href="/sources" class="sidebar-item {% block nav_sources %}{% endblock %}">
-                <span class="sidebar-icon">&#128218;</span>
-                <span class="sidebar-label">Sources</span>
-            </a>
-            <a href="/stats" class="sidebar-item {% block nav_stats %}{% endblock %}">
-                <span class="sidebar-icon">&#9637;</span>
-                <span class="sidebar-label">Stats</span>
-            </a>
-            <a href="/settings" class="sidebar-item {% block nav_settings %}{% endblock %}">
-                <span class="sidebar-icon">&#9881;</span>
-                <span class="sidebar-label">Settings</span>
-            </a>
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">Read</div>
+                <a href="/inbox" class="sidebar-item {% block nav_inbox %}{% endblock %}" title="Inbox">
+                    {{ icon("inbox", size=17) }}
+                    <span class="sidebar-label">Inbox</span>
+                    <span id="unread-badge" class="sidebar-badge" style="display:none;"></span>
+                </a>
+                <a href="/digest" class="sidebar-item {% block nav_digest %}{% endblock %}" title="Digest">
+                    {{ icon("layers", size=17) }}
+                    <span class="sidebar-label">Digest</span>
+                </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">Library</div>
+                <a href="/wiki" class="sidebar-item {% block nav_wiki %}{% endblock %}" title="Wiki">
+                    {{ icon("book-open", size=17) }}
+                    <span class="sidebar-label">Wiki</span>
+                </a>
+                <a href="/highlights" class="sidebar-item {% block nav_highlights %}{% endblock %}" title="Highlights">
+                    {{ icon("highlighter", size=17) }}
+                    <span class="sidebar-label">Highlights</span>
+                </a>
+                <a href="/sources" class="sidebar-item {% block nav_sources %}{% endblock %}" title="Sources">
+                    {{ icon("library", size=17) }}
+                    <span class="sidebar-label">Sources</span>
+                </a>
+                <a href="/graph" class="sidebar-item {% block nav_graph %}{% endblock %}" title="Graph">
+                    {{ icon("graph", size=17) }}
+                    <span class="sidebar-label">Graph</span>
+                </a>
+                <a href="/stats" class="sidebar-item {% block nav_stats %}{% endblock %}" title="Stats">
+                    {{ icon("bar-chart", size=17) }}
+                    <span class="sidebar-label">Stats</span>
+                </a>
+            </div>
             <div id="sidebar-views" class="sidebar-views" style="display: none;">
                 <div class="sidebar-views-title">Views</div>
                 <div id="sidebar-views-list" class="sidebar-views-list"></div>
             </div>
         </div>
         <div class="sidebar-footer">
-            <button id="theme-toggle" class="sidebar-theme-toggle" title="Toggle dark mode">
-                <span class="sidebar-icon">&#9728;</span>
+            <button id="theme-toggle" class="sidebar-footer-item sidebar-theme-toggle" title="Toggle dark mode">
+                <span class="sidebar-icon"></span>
                 <span class="sidebar-label" id="theme-label">Light</span>
             </button>
-            <a href="https://github.com/esagduyu/project-tiro" target="_blank" rel="noopener" class="sidebar-about">
-                <span class="sidebar-icon">&#9432;</span>
+            <a href="/settings" title="Settings" class="sidebar-footer-item {% block nav_settings %}{% endblock %}">
+                {{ icon("settings", size=17) }}
+                <span class="sidebar-label">Settings</span>
+            </a>
+            <a href="https://github.com/esagduyu/project-tiro" target="_blank" rel="noopener" title="About Tiro" class="sidebar-footer-item">
+                {{ icon("info", size=17) }}
                 <span class="sidebar-label">About Tiro</span>
             </a>
-            <button id="logout-btn" class="sidebar-logout-btn">
-                <span class="sidebar-icon">&#10143;</span>
+            <button id="logout-btn" title="Log out" class="sidebar-footer-item sidebar-logout-btn">
+                {{ icon("logout", size=17) }}
                 <span class="sidebar-label">Log out</span>
             </button>
         </div>
@@ -122,7 +132,7 @@
         <div class="save-modal">
             <div class="save-modal-header">
                 <h3>Save to Tiro</h3>
-                <button id="save-modal-close" class="shortcuts-close">&times;</button>
+                <button id="save-modal-close" class="modal-close" aria-label="Close">{{ icon("close", size=16) }}</button>
             </div>
             <div class="save-modal-body">
                 <div class="save-tab-row">
@@ -136,7 +146,7 @@
                 <div id="save-queue-indicator" class="save-queue-indicator" style="display: none;"></div>
                 <div id="save-tab-url" class="save-tab-content">
                     <input type="text" id="save-url-input" class="save-url-input" placeholder="Paste a URL..." autocomplete="off">
-                    <button id="save-url-btn" class="save-submit-btn">Save</button>
+                    <button id="save-url-btn" class="btn btn-primary btn-block">Save</button>
                 </div>
                 <div id="save-tab-email" class="save-tab-content" style="display: none;">
                     <div id="save-drop-zone" class="save-drop-zone">
@@ -155,7 +165,7 @@
         <div class="shortcuts-modal">
             <div class="shortcuts-header">
                 <h3>Keyboard Shortcuts</h3>
-                <button id="shortcuts-close" class="shortcuts-close">&times;</button>
+                <button id="shortcuts-close" class="modal-close" aria-label="Close">{{ icon("close", size=16) }}</button>
             </div>
             <div id="shortcuts-body" class="shortcuts-body"></div>
         </div>

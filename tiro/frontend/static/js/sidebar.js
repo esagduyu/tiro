@@ -26,6 +26,7 @@
  */
 
 import { esc, showToast } from "./core.js";
+import { icon } from "./icons.js";
 import { registerServiceWorker } from "./sw-register.js";
 import {
     enqueueSave,
@@ -58,12 +59,15 @@ function applyTheme(mode) {
             themeLink.href = `/static/themes/${themeName}.css${versionSuffix}`;
         }
     }
+    // Show the mode you'd switch TO: sun in dark mode (→ light),
+    // moon in light mode (→ dark).
+    const themeGlyph = icon(mode === 'dark' ? 'sun' : 'moon', { size: 17 });
     document.querySelectorAll('#theme-toggle, #mobile-theme-toggle').forEach(btn => {
-        const icon = btn.querySelector('.sidebar-icon');
-        if (icon) {
-            icon.textContent = mode === 'dark' ? '☽' : '☀';
+        const iconEl = btn.querySelector('.sidebar-icon');
+        if (iconEl) {
+            iconEl.innerHTML = themeGlyph;
         } else {
-            btn.textContent = mode === 'dark' ? '☽' : '☀';
+            btn.innerHTML = themeGlyph;
         }
     });
     const label = document.getElementById('theme-label');
@@ -202,18 +206,18 @@ function renderSavedViews() {
             return `<div class="sidebar-view-row">
                 <input type="text" class="sidebar-view-rename-input" data-id="${view.id}" value="${esc(view.name)}">
                 <span class="sidebar-view-actions sidebar-view-actions-visible">
-                    <button class="sidebar-view-btn sidebar-view-rename-save" data-id="${view.id}" title="Save">&#10003;</button>
-                    <button class="sidebar-view-btn sidebar-view-rename-cancel" title="Cancel">&times;</button>
+                    <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-rename-save" data-id="${view.id}" title="Save">${icon("check", { size: 13 })}</button>
+                    <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-rename-cancel" title="Cancel">${icon("close", { size: 13 })}</button>
                 </span>
             </div>`;
         }
         return `<div class="sidebar-view-row">
             <a href="#" class="sidebar-view-link" data-id="${view.id}">${esc(view.name)}</a>
             <span class="sidebar-view-actions">
-                <button class="sidebar-view-btn sidebar-view-up" data-id="${view.id}" title="Move up" ${idx === 0 ? "disabled" : ""}>&#9650;</button>
-                <button class="sidebar-view-btn sidebar-view-down" data-id="${view.id}" title="Move down" ${idx === savedViews.length - 1 ? "disabled" : ""}>&#9660;</button>
-                <button class="sidebar-view-btn sidebar-view-rename" data-id="${view.id}" title="Rename">&#9998;</button>
-                <button class="sidebar-view-btn sidebar-view-delete" data-id="${view.id}" title="Delete">&times;</button>
+                <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-up" data-id="${view.id}" title="Move up" ${idx === 0 ? "disabled" : ""}>${icon("chevron-up", { size: 13 })}</button>
+                <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-down" data-id="${view.id}" title="Move down" ${idx === savedViews.length - 1 ? "disabled" : ""}>${icon("chevron-down", { size: 13 })}</button>
+                <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-rename" data-id="${view.id}" title="Rename">${icon("pencil", { size: 13 })}</button>
+                <button class="sidebar-view-btn icon-btn icon-btn-sm sidebar-view-delete" data-id="${view.id}" title="Delete">${icon("close", { size: 13 })}</button>
             </span>
         </div>`;
     }).join("");
@@ -564,7 +568,7 @@ function setupSaveModal() {
     if (!overlay) return;
 
     // Open
-    document.getElementById('save-btn')?.addEventListener('click', openSaveModal);
+    document.getElementById('sidebar-save-btn')?.addEventListener('click', openSaveModal);
 
     // Close
     document.getElementById('save-modal-close')?.addEventListener('click', closeSaveModal);
@@ -673,7 +677,7 @@ function showA2HSHint() {
     dismissBtn.id = "a2hs-hint-dismiss";
     dismissBtn.className = "a2hs-hint-dismiss";
     dismissBtn.setAttribute("aria-label", "Dismiss");
-    dismissBtn.textContent = "×";
+    dismissBtn.innerHTML = icon("close", { size: 13 });
     dismissBtn.addEventListener("click", () => {
         localStorage.setItem(A2HS_HINT_DISMISSED_KEY, "1");
         el.remove();

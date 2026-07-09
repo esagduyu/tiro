@@ -43,6 +43,7 @@
 .icon-btn:hover { background: var(--tiro-bg-hover); }
 .icon-btn.active .ti { transform: scale(1.12);
   transition: transform 120ms ease-out; }
+.icon-btn-sm { width: 26px; height: 24px; }
 .pill { display: inline-block; font-size: 0.65rem; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em;
   padding: 0.1rem 0.45rem; border-radius: 9px;
@@ -233,7 +234,7 @@ body.has-lan-banner .content {
     position: fixed;
     top: 0;
     left: 0;
-    width: 220px;
+    width: 240px;
     height: 100vh;
     background: var(--tiro-sidebar-bg);
     border-right: 1px solid var(--tiro-border);
@@ -244,7 +245,7 @@ body.has-lan-banner .content {
 }
 
 .sidebar-brand {
-    padding: 1.25rem 1rem;
+    padding: 1.1rem 1rem;
     display: flex;
     align-items: center;
     gap: 0.6rem;
@@ -258,11 +259,26 @@ body.has-lan-banner .content {
 }
 
 .sidebar-logo img {
-    border-radius: 6px;
+    border-radius: 7px;
+}
+
+.sidebar-brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.1;
+    min-width: 0;
+}
+
+.sidebar-brand-overline {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--tiro-accent);
 }
 
 .sidebar-title {
-    font-size: 1rem;
+    font-size: 0.98rem;
     font-weight: 600;
     color: var(--tiro-fg);
     letter-spacing: -0.01em;
@@ -273,16 +289,29 @@ body.has-lan-banner .content {
     padding: 0.5rem 0;
 }
 
+.sidebar-section {
+    padding: 0.35rem 0 0.5rem;
+}
+
+.sidebar-section-label {
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--tiro-muted);
+    padding: 0.2rem 0.9rem 0.35rem;
+}
+
 .sidebar-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.65rem 1rem;
+    gap: 0.7rem;
+    padding: 0.5rem 1.1rem;
     color: var(--tiro-fg-secondary);
     text-decoration: none;
-    font-size: 0.88rem;
+    font-size: 0.86rem;
     font-weight: 500;
-    transition: background 0.15s, color 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out;
     border-left: 3px solid transparent;
     position: relative;
 }
@@ -299,10 +328,17 @@ body.has-lan-banner .content {
     font-weight: 600;
 }
 
+.sidebar-item .ti {
+    flex-shrink: 0;
+}
+
+/* Theme-toggle icon wrapper (span filled with an SVG by sidebar.js) --
+   sized to line up with the 17px nav icons. */
 .sidebar-icon {
-    font-size: 1.1rem;
-    width: 1.4rem;
-    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
     flex-shrink: 0;
 }
 
@@ -319,101 +355,55 @@ body.has-lan-banner .content {
 }
 
 .sidebar-footer {
-    padding: 0.75rem 1rem;
+    padding: 0.6rem 0.75rem;
     border-top: 1px solid var(--tiro-border);
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.15rem;
 }
 
-.sidebar-theme-toggle {
+.sidebar-footer-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.7rem;
     border: none;
     background: none;
-    font-size: 0.88rem;
+    font-family: inherit;
+    font-size: 0.82rem;
     font-weight: 500;
     cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    border-radius: var(--tiro-radius-md);
     color: var(--tiro-muted);
-    transition: background 0.15s, color 0.15s;
+    text-decoration: none;
+    transition: background 120ms ease-out, color 120ms ease-out;
     text-align: left;
     width: 100%;
 }
-.sidebar-theme-toggle .sidebar-icon {
-    font-size: 1.1rem;
+
+.sidebar-footer-item .ti {
+    flex-shrink: 0;
 }
 
-.sidebar-theme-toggle:hover {
+.sidebar-footer-item:hover {
     background: var(--tiro-bg-hover);
     color: var(--tiro-fg);
 }
 
-.sidebar-about {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem;
-    color: var(--tiro-muted);
-    text-decoration: none;
-    font-size: 0.8rem;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
-}
-
-.sidebar-about:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
-.sidebar-logout-btn {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    border: none;
-    background: none;
-    font-family: inherit;
-    font-size: 0.8rem;
-    cursor: pointer;
-    padding: 0.5rem;
-    color: var(--tiro-muted);
-    text-decoration: none;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
-    text-align: left;
-    width: 100%;
+.sidebar-footer-item.active {
+    color: var(--tiro-accent);
 }
 
 .sidebar-logout-btn:hover {
-    background: var(--tiro-bg-hover);
     color: var(--tiro-accent);
 }
 
 /* --- Save button (sidebar) --- */
 
-.sidebar-save-btn {
-    background: var(--tiro-accent);
-    color: white;
-    border: none;
-    border-left: 3px solid var(--tiro-accent);
-    cursor: pointer;
-    margin: 0.25rem 0.6rem 0.4rem;
-    border-radius: 6px;
-    font-weight: 600;
+.sidebar-save {
+    width: calc(100% - 1.5rem);
+    margin: 0.5rem 0.75rem 0.6rem;
     justify-content: center;
-}
-
-.sidebar-save-btn:hover {
-    opacity: 0.9;
-    background: var(--tiro-accent);
-    color: white;
-}
-
-.sidebar-save-btn .sidebar-icon {
-    font-size: 1.2rem;
-    font-weight: 700;
 }
 
 /* --- Sidebar: Saved views --- */
@@ -486,8 +476,7 @@ body.has-lan-banner .content {
     background: none;
     color: var(--tiro-muted);
     cursor: pointer;
-    font-size: 0.68rem;
-    padding: 0.15rem 0.25rem;
+    padding: 0;
     border-radius: 3px;
     line-height: 1;
 }
@@ -529,7 +518,7 @@ body.has-lan-banner .content {
 .save-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -539,10 +528,30 @@ body.has-lan-banner .content {
 .save-modal {
     background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    width: 420px;
+    border-radius: var(--tiro-radius-lg);
+    width: 340px;
     max-width: 92vw;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+/* Shared modal close icon-button (save + shortcuts headers). */
+.modal-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--tiro-muted);
+    padding: 0.15rem;
+    border-radius: var(--tiro-radius-sm);
+    line-height: 1;
+    transition: background 120ms ease-out, color 120ms ease-out;
+}
+
+.modal-close:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
 }
 
 .save-modal-header {
@@ -567,26 +576,30 @@ body.has-lan-banner .content {
     display: flex;
     gap: 0;
     margin-bottom: 1rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    overflow: hidden;
+    border-bottom: 2px solid var(--tiro-border);
 }
 
 .save-tab {
-    flex: 1;
-    padding: 0.5rem;
+    padding: 0.5rem 1rem;
     border: none;
-    background: var(--tiro-bg);
+    background: none;
     color: var(--tiro-muted);
+    font-family: inherit;
     font-size: 0.85rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    margin-bottom: -2px;
+    border-bottom: 2px solid transparent;
+    transition: color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.save-tab:hover {
+    color: var(--tiro-fg-secondary);
 }
 
 .save-tab.active {
-    background: var(--tiro-accent);
-    color: white;
+    color: var(--tiro-fg);
+    border-bottom-color: var(--tiro-accent);
 }
 
 .save-url-input {
@@ -734,7 +747,7 @@ body.has-lan-banner .content {
 
 /* Content area */
 .content {
-    margin-left: 220px;
+    margin-left: 240px;
     min-height: 100vh;
     background: var(--tiro-bg);
     color: var(--tiro-fg);
@@ -1494,8 +1507,8 @@ main {
 .inbox-main {
     max-width: 700px;
     /* Center relative to viewport, not just the content area after sidebar.
-       110px = half of 220px sidebar width. Clamp to 0 on narrow screens. */
-    margin-left: max(0px, calc(50% - 350px - 110px));
+       120px = half of 240px sidebar width. Clamp to 0 on narrow screens. */
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
 }
 
@@ -1888,7 +1901,7 @@ main {
 
 .reader {
     max-width: 700px;
-    margin-left: max(0px, calc(50% - 350px - 110px));
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
 }
 
@@ -2276,7 +2289,7 @@ main {
 
 .digest-view {
     max-width: 700px;
-    margin-left: max(0px, calc(50% - 350px - 110px));
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
 }
 
@@ -3246,7 +3259,7 @@ main {
 .shortcuts-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -3254,11 +3267,11 @@ main {
 }
 
 .shortcuts-modal {
-    background: var(--tiro-bg);
+    background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
-    width: 380px;
+    border-radius: var(--tiro-radius-lg);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    width: 560px;
     max-width: 90vw;
     max-height: 80vh;
     overflow-y: auto;
@@ -3295,9 +3308,18 @@ main {
 }
 
 .shortcuts-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem 1.5rem;
+    align-content: start;
+}
+
+.shortcut-section {
+    grid-column: 1 / -1;
+}
+
+.shortcut-hint {
+    grid-column: 1 / -1;
 }
 
 .shortcut-row {
@@ -3348,6 +3370,10 @@ main {
     font-style: italic;
     padding-left: calc(80px + 0.75rem);
     margin-top: -0.15rem;
+}
+
+@media (max-width: 560px) {
+    .shortcuts-body { grid-template-columns: 1fr; }
 }
 
 /* --- Nav link --- */
@@ -4431,22 +4457,41 @@ main {
 
 /* ============ responsive (media-query consolidation region) ========= */
 
-/* --- Responsive: Sidebar collapse --- */
+/* --- Responsive: Tablet icon rail (769-1199px, spec §6) ---
+   64px wide, icons only. Scoped with a min-width floor so the <=768px
+   mobile drawer block below (which slides the full-width labelled sidebar
+   in from the hamburger) is driven purely by the desktop defaults it
+   overrides, never by these rail rules. */
 
-@media (max-width: 1200px) {
-    .sidebar { width: 60px; }
-    .sidebar-label, .sidebar-title, .sidebar-badge { display: none; }
-    .sidebar-brand { justify-content: center; }
-    .sidebar-logo { margin: 0; }
-    .sidebar-item { justify-content: center; padding: 0.65rem 0; border-left: none; border-bottom: 3px solid transparent; }
-    .sidebar-item.active { border-bottom-color: var(--tiro-sidebar-active); border-left-color: transparent; }
-    .sidebar-footer { align-items: center; }
-    .sidebar-about .sidebar-label { display: none; }
+@media (min-width: 769px) and (max-width: 1200px) {
+    .sidebar { width: 64px; }
+    .sidebar-label, .sidebar-title, .sidebar-brand-text,
+    .sidebar-brand-overline, .sidebar-section-label,
     .sidebar-views { display: none; }
-    .content { margin-left: 60px; }
-    .inbox-main { margin-left: max(0px, calc(50% - 350px - 30px)); }
-    .reader { margin-left: max(0px, calc(50% - 350px - 30px)); }
-    .digest-view { margin-left: max(0px, calc(50% - 350px - 30px)); }
+    .sidebar-brand { justify-content: center; padding: 1.1rem 0; }
+    .sidebar-logo { margin: 0; }
+    .sidebar-section { padding: 0.25rem 0; }
+    .sidebar-item { justify-content: center; gap: 0; padding: 0.55rem 0;
+        border-left: none; border-bottom: 3px solid transparent; }
+    .sidebar-item.active { background: var(--tiro-bg-surface);
+        border-bottom-color: var(--tiro-sidebar-active);
+        border-left-color: transparent; }
+    .sidebar-item .ti, .sidebar-footer-item .ti, .sidebar-icon .ti {
+        width: 20px; height: 20px; }
+    /* Save button collapses to a 40px accent circle, icon only */
+    .sidebar-save { width: 40px; height: 40px; margin: 0.5rem auto 0.6rem;
+        padding: 0; border-radius: 50%; }
+    /* Unread badge becomes an 8px accent dot on the Inbox icon corner */
+    .sidebar-badge { position: absolute; top: 0.35rem; right: 1.1rem;
+        margin: 0; min-width: 0; width: 8px; height: 8px; padding: 0;
+        font-size: 0; line-height: 0; border-radius: 50%; overflow: hidden; }
+    .sidebar-footer { align-items: center; }
+    .sidebar-footer-item { justify-content: center; width: auto;
+        padding: 0.5rem; gap: 0; }
+    .content { margin-left: 64px; }
+    .inbox-main { margin-left: max(0px, calc(50% - 350px - 32px)); }
+    .reader { margin-left: max(0px, calc(50% - 350px - 32px)); }
+    .digest-view { margin-left: max(0px, calc(50% - 350px - 32px)); }
     /* Inbox toolbar: wrap on narrower screens */
     .inbox-toolbar { flex-wrap: wrap; gap: 0.4rem; }
 }
@@ -4499,6 +4544,7 @@ main {
 }
 
 .tiro-footer-quote {
+    font-family: var(--tiro-font-serif);
     font-style: italic;
 }
 

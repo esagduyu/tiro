@@ -84,12 +84,15 @@ def test_base_html_has_wiki_nav_link(authenticated_client):
     assert 'href="/wiki"' in r.text
 
 
-def test_base_html_wiki_link_between_graph_and_sources():
+def test_base_html_library_nav_order():
+    # Design pass (Task 3) reordered the Library section to
+    # Wiki -> Highlights -> Sources -> Graph -> Stats (spec §6). Wiki now
+    # leads the section and Graph follows Sources.
     base_html = (TEMPLATES_DIR / "base.html").read_text()
-    graph_pos = base_html.index('href="/graph"')
     wiki_pos = base_html.index('href="/wiki"')
     sources_pos = base_html.index('href="/sources"')
-    assert graph_pos < wiki_pos < sources_pos
+    graph_pos = base_html.index('href="/graph"')
+    assert wiki_pos < sources_pos < graph_pos
 
 
 def test_wiki_page_marks_nav_wiki_active(authenticated_client):
