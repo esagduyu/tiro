@@ -35,6 +35,7 @@
 .btn-block { display: flex; width: 100%; justify-content: center;
   padding: 0.75rem 1.5rem; border-radius: var(--tiro-radius-lg);
   font-size: 0.9rem; font-weight: 600; }
+.btn:disabled { opacity: 0.6; cursor: default; }
 .icon-btn { width: 32px; height: 28px; display: inline-flex;
   align-items: center; justify-content: center;
   border: 1px solid var(--tiro-border); border-radius: var(--tiro-radius-sm);
@@ -2792,29 +2793,6 @@ main {
     line-height: 1.4;
 }
 
-/* --- Analysis button --- */
-
-.analysis-btn {
-    width: 32px;
-    height: 28px;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: transparent;
-    cursor: pointer;
-    font-size: 1rem;
-    color: var(--tiro-muted);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.15s;
-}
-
-.analysis-btn:hover {
-    background: var(--tiro-bg-surface);
-    color: var(--tiro-accent);
-    border-color: var(--tiro-accent);
-}
-
 /* --- Analysis overlay --- */
 
 .analysis-overlay {
@@ -4479,37 +4457,14 @@ main {
 
 .sources-row-actions {
     display: flex;
+    align-items: center;
     gap: 0.4rem;
     justify-content: flex-end;
     flex-wrap: wrap;
 }
 
-.sources-row-btn {
-    padding: 0.25rem 0.55rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: none;
-    cursor: pointer;
-    font-size: 0.72rem;
-    color: var(--tiro-muted);
-    transition: all 0.15s;
-    white-space: nowrap;
-}
-
-.sources-row-btn:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
-.sources-row-btn.danger:hover {
-    color: var(--tiro-rate-dislike);
-    border-color: var(--tiro-rate-dislike);
-}
-
-.sources-vip-star {
-    cursor: pointer;
-    font-size: 0.95rem;
-}
+/* VIP toggle reads as gold/filled when active (mirrors reader .vip-btn.active). */
+.sources-vip-btn.active { color: var(--tiro-gold); }
 
 .sources-force-warning {
     margin-top: 0.6rem;
@@ -4521,13 +4476,57 @@ main {
     font-size: 0.8rem;
 }
 
+/* Phones: table rows stack into definition-list cards (spec §7). The <table>
+   markup is unchanged — only its display is restyled here. Each <td> carries a
+   data-label (set in sources.js) surfaced as a leading key via ::before. */
 @media (max-width: 640px) {
-    .sources-table {
-        font-size: 0.78rem;
-    }
-    .sources-table th,
+    .sources-table,
+    .sources-table tbody,
+    .sources-table tr,
     .sources-table td {
-        padding: 0.4rem 0.35rem;
+        display: block;
+        width: 100%;
+    }
+    .sources-table thead {
+        display: none;
+    }
+    .sources-table tr {
+        border: 1px solid var(--tiro-border);
+        border-radius: var(--tiro-radius-md);
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.75rem;
+        background: var(--tiro-bg);
+    }
+    .sources-table tbody tr:hover {
+        background: var(--tiro-bg);
+    }
+    .sources-table td {
+        border: none;
+        padding: 0.3rem 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        text-align: right;
+    }
+    .sources-table td::before {
+        content: attr(data-label);
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--tiro-muted);
+        text-align: left;
+    }
+    .sources-col-count,
+    .sources-col-vip {
+        text-align: right;
+    }
+    .sources-col-actions {
+        text-align: left;
+    }
+    .sources-row-actions {
+        justify-content: flex-end;
     }
 }
 
@@ -4562,17 +4561,26 @@ main {
     cursor: pointer;
 }
 
+.wiki-title-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.wiki-row-icon {
+    color: var(--tiro-muted);
+    flex-shrink: 0;
+}
+
+.wiki-title-text {
+    color: var(--tiro-fg);
+    font-weight: 500;
+}
+
+/* Stale badge rides the .pill primitive; only the gold tint + spacing here. */
 .wiki-stale-badge {
-    display: inline-block;
-    margin-left: 0.4rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 9px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: var(--tiro-bg-surface);
-    color: var(--tiro-tier-summary);
+    margin-left: 0.1rem;
+    color: var(--tiro-gold-hover);
 }
 
 /* --- Wiki page view (/wiki/{slug}) --- */
@@ -4602,6 +4610,45 @@ main {
     border: 1px solid var(--tiro-tier-must-read);
     color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
+}
+
+/* User's pinned note — gold callout riding the .callout .callout-gold
+   primitives; only the layout of the overline label + body added here. */
+.wiki-pinned-note {
+    margin: 0 0 1.5rem;
+    white-space: pre-line;
+}
+
+.wiki-pinned-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tiro-gold);
+    margin-bottom: 0.25rem;
+}
+
+.wiki-pinned-body {
+    color: var(--tiro-fg-secondary);
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
+/* Resolved citation links inside the wiki body render as file-text tag-chips.
+   Scoped to win specificity over the generic .reader-body a link rules. */
+#wiki-page-body a.wiki-citation {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--tiro-fg-secondary);
+    text-decoration: none;
+    vertical-align: baseline;
+}
+
+#wiki-page-body a.wiki-citation:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-accent);
 }
 
 /* ============ responsive (media-query consolidation region) ========= */
@@ -4808,14 +4855,24 @@ main {
 .highlights-groups {
     display: flex;
     flex-direction: column;
-    gap: 1.75rem;
+    gap: 1.25rem;
+}
+
+/* Each article's highlights ride a surface card (card contract, spec §7). */
+.highlights-group {
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-lg);
+    padding: 1rem 1.1rem;
+    background: var(--tiro-bg);
 }
 
 .highlights-group-header {
     display: flex;
     align-items: baseline;
     gap: 0.5rem;
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--tiro-border);
     flex-wrap: wrap;
 }
 
@@ -4839,10 +4896,24 @@ main {
     color: var(--tiro-muted);
 }
 
+/* Inside a group card the rows are flat (no per-row border) — the group is
+   the single card. Separated by hairlines, not nested boxes. */
+.highlights-group .highlights-list {
+    gap: 0;
+}
+
 .hl-list-row {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
+    border: none;
+    border-radius: 0;
+    padding: 0.6rem 0;
+    cursor: pointer;
+}
+
+.hl-list-row + .hl-list-row {
+    border-top: 1px solid var(--tiro-border);
 }
 
 .hl-list-meta {
@@ -4853,8 +4924,8 @@ main {
 
 .hl-list-note {
     display: flex;
-    align-items: baseline;
-    gap: 0.3rem;
+    align-items: flex-start;
+    gap: 0.35rem;
     margin-left: 1.35rem;
     font-size: 0.78rem;
     color: var(--tiro-fg-secondary);
@@ -4862,6 +4933,9 @@ main {
 
 .hl-list-note-icon {
     flex-shrink: 0;
+    display: inline-flex;
+    color: var(--tiro-muted);
+    margin-top: 0.1rem;
 }
 
 .highlights-load-more-wrap {

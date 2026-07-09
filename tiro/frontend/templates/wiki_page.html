@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Wiki{% endblock %}
 {% block page_title %}Wiki{% endblock %}
@@ -13,13 +14,13 @@
     </div>
     <div id="wiki-page-content" style="display: none;">
         <nav class="reader-nav">
-            <a href="/wiki" class="back-link">&larr; Back to wiki</a>
+            <a href="/wiki" class="back-link">{{ icon("chevron-left", size=15) }} Wiki</a>
             <div class="reader-actions">
-                <button id="wiki-regenerate-btn" class="analysis-btn" title="Regenerate this page">&#8635;</button>
+                <button id="wiki-regenerate-btn" class="btn btn-ghost" title="Regenerate this page">{{ icon("refresh", size=15) }}Regenerate</button>
             </div>
         </nav>
         <header class="reader-header">
-            <h1 id="wiki-page-title"></h1>
+            <h1 id="wiki-page-title" class="page-title-serif"></h1>
             <div class="reader-meta">
                 <span id="wiki-page-kind"></span>
                 <span class="meta-sep">&middot;</span>
@@ -31,6 +32,7 @@
             </div>
         </header>
         <div id="wiki-regenerate-error" class="wiki-regenerate-error" style="display: none;"></div>
+        <div id="wiki-page-pinned" class="callout callout-gold wiki-pinned-note" style="display: none;"></div>
         <div id="wiki-page-body" class="reader-body"></div>
     </div>
 </article>

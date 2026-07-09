@@ -38,6 +38,7 @@
  */
 
 import { esc, formatDate } from "./core.js";
+import { icon } from "./icons.js";
 
 const LIMIT = 50;
 
@@ -206,7 +207,7 @@ function highlightRowHtml(h) {
                 <span class="highlight-quote">${esc(quote)}</span>
             </div>
             ${noteExcerpt
-                ? `<div class="hl-list-note"><span class="hl-list-note-icon">&#128221;</span><span>${esc(noteExcerpt)}</span></div>`
+                ? `<div class="hl-list-note"><span class="hl-list-note-icon">${icon("note", { size: 13 })}</span><span>${esc(noteExcerpt)}</span></div>`
                 : ""}
             <div class="hl-list-meta">${esc(formatDate(h.created_at))}</div>
         </div>
