@@ -43,6 +43,9 @@
 .icon-btn:hover { background: var(--tiro-bg-hover); }
 .icon-btn.active .ti { transform: scale(1.12);
   transition: transform 120ms ease-out; }
+/* VIP toggle in the reader header cluster (M3.2 T6) — active reads as gold/filled,
+   mirroring the meta-line .vip-star.active. */
+.vip-btn.active { color: var(--tiro-gold); }
 .icon-btn-sm { width: 26px; height: 24px; }
 .pill { display: inline-block; font-size: 0.65rem; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em;

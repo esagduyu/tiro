@@ -110,7 +110,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadArticle(articleId);
     setupReaderKeyboard(articleId);
     setupReaderKebab();
-    setupReaderActionBar(articleId);
+    setupReaderActionBar();
 });
 
 async function loadArticle(id) {
@@ -139,23 +139,33 @@ async function loadArticle(id) {
         document.getElementById("reader-source").textContent =
             a.source_name || a.domain || "Unknown source";
 
-        // VIP indicator (always show, make clickable)
+        // VIP indicator (always show, make clickable). The meta-line star is the
+        // single source of VIP state; the desktop header cluster's `star` icon-btn
+        // (M3.2 T6 review) just mirrors it and delegates its click through
+        // readerToggleVip → the meta star's click — no duplicated fetch/state logic.
         const vip = document.getElementById("reader-vip");
+        const vipBtn = document.getElementById("reader-vip-btn");
+        const syncVipBtn = () => {
+            if (vipBtn) vipBtn.classList.toggle("active", vip.classList.contains("active"));
+        };
         if (a.source_id) {
             vip.style.display = "inline";
             vip.dataset.sourceId = a.source_id;
             if (a.is_vip) vip.classList.add("active");
+            syncVipBtn();
             vip.addEventListener("click", async () => {
                 try {
                     const res = await fetch(`/api/sources/${a.source_id}/vip`, { method: "PATCH" });
                     const json = await res.json();
                     if (json.success) {
                         vip.classList.toggle("active");
+                        syncVipBtn();
                     }
                 } catch (err) {
                     console.error("VIP toggle failed:", err);
                 }
             });
+            if (vipBtn) vipBtn.addEventListener("click", readerToggleVip);
         }
 
         // Author
@@ -709,6 +719,20 @@ function setupReaderKeyboard(articleId) {
         const annotateToolbar = document.getElementById("annotate-toolbar");
         if (annotateToolbar && annotateToolbar.classList.contains("open") && e.key === "Escape") {
             hideAnnotationToolbar(annotateToolbar);
+            e.preventDefault();
+            return;
+        }
+
+        // If the desktop kebab dropdown is open, Escape closes it instead of
+        // navigating back to /inbox (M3.2 T6 review) — same guard pattern as the
+        // panels above, and matching the inbox card-menu convention where an open
+        // menu swallows keys except Escape. Toggling the button closes it;
+        // setupReaderKebab's own Escape listener then no-ops (dropdown already
+        // hidden), so no double-handling results.
+        const kebabBtn = document.getElementById("reader-kebab-btn");
+        const kebabDropdown = kebabBtn?.nextElementSibling;
+        if (kebabDropdown && !kebabDropdown.hidden && e.key === "Escape") {
+            kebabBtn.click();
             e.preventDefault();
             return;
         }
