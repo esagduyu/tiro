@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Remote Access{% endblock %}
 {% block page_title %}Remote Access{% endblock %}
@@ -11,53 +12,70 @@
     </div>
 </section>
 
-<div class="settings-section">
-    <h3 class="settings-section-title">Tailscale</h3>
-    <p class="settings-section-desc">
-        Reach your Tiro library from anywhere over your own private network
-        &mdash; no port forwarding, no public server.
-    </p>
+<p class="settings-section-desc" style="margin-bottom: 1.5rem;">
+    Reach your Tiro library from anywhere over your own private network
+    &mdash; no port forwarding, no public server.
+</p>
 
-    <div id="remote-tailscale-status" class="settings-status">
-        <div class="settings-loading">
-            <div class="digest-spinner"></div>
-            <p>Checking for Tailscale...</p>
+<div class="wizard-step">
+    <div class="wizard-step-num">1</div>
+    <div class="wizard-step-body">
+        <h3 class="settings-section-title">
+            <span class="settings-section-icon">{{ icon("globe", size=18) }}</span>Set up Tailscale
+        </h3>
+        <p class="settings-section-desc">
+            Install Tailscale and run it on this machine so Tiro can be reached
+            over your private tailnet.
+        </p>
+        <div id="remote-tailscale-status" class="settings-status">
+            <div class="settings-loading">
+                <div class="digest-spinner"></div>
+                <p>Checking for Tailscale...</p>
+            </div>
         </div>
     </div>
 </div>
 
-<div class="settings-section">
-    <h3 class="settings-section-title">Remote URL</h3>
-    <p class="settings-section-desc">
-        The address you'll use to reach Tiro remotely &mdash; your Tailscale
-        MagicDNS name, or another reverse-proxy hostname.
-    </p>
+<div class="wizard-step">
+    <div class="wizard-step-num">2</div>
+    <div class="wizard-step-body">
+        <h3 class="settings-section-title">
+            <span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Remote URL
+        </h3>
+        <p class="settings-section-desc">
+            The address you'll use to reach Tiro remotely &mdash; your Tailscale
+            MagicDNS name, or another reverse-proxy hostname.
+        </p>
 
-    <form id="remote-url-form">
-        <div class="settings-field">
-            <label for="remote-url-input">Remote URL</label>
-            <input type="text" id="remote-url-input" placeholder="https://my-machine.tailnet-name.ts.net">
-        </div>
-        <label class="remote-url-checkbox-row">
-            <input type="checkbox" id="remote-url-allow-hostname">
-            Also allow this hostname to connect
-        </label>
+        <form id="remote-url-form">
+            <div class="settings-field">
+                <label for="remote-url-input">Remote URL</label>
+                <input type="text" id="remote-url-input" placeholder="https://my-machine.tailnet-name.ts.net">
+            </div>
+            <label class="remote-url-checkbox-row">
+                <input type="checkbox" id="remote-url-allow-hostname">
+                Also allow this hostname to connect
+            </label>
 
-        <div class="remote-url-actions">
-            <button type="submit" class="settings-configure-btn" id="btn-save-remote-url">Save</button>
-            <button type="button" class="settings-configure-btn settings-configure-btn-secondary" id="btn-test-remote-url">Test connection</button>
-        </div>
+            <div class="remote-url-actions">
+                <button type="submit" class="btn btn-primary" id="btn-save-remote-url">Save</button>
+                <button type="button" class="btn btn-ghost" id="btn-test-remote-url">Test connection</button>
+            </div>
 
-        <div id="remote-test-result" class="settings-status" style="display: none;"></div>
-    </form>
+            <div id="remote-test-result" class="settings-status" style="display: none;"></div>
+        </form>
+    </div>
 </div>
 
-<div class="settings-section">
-    <h3 class="settings-section-title">More</h3>
-    <p class="settings-section-desc">
-        <a href="/setup/qr">Set up mobile login &rarr;</a><br>
-        See the README's HTTPS section for TLS and reverse-proxy details.
-    </p>
+<div class="wizard-step">
+    <div class="wizard-step-num">3</div>
+    <div class="wizard-step-body">
+        <h3 class="settings-section-title">More</h3>
+        <div class="callout">
+            <a href="/setup/qr">Set up mobile login &rarr;</a><br>
+            See the README's HTTPS section for TLS and reverse-proxy details.
+        </div>
+    </div>
 </div>
 
 <style>

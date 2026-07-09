@@ -3949,10 +3949,20 @@ main {
 }
 
 .settings-section-title {
-    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
     font-weight: 600;
     color: var(--tiro-fg);
     margin-bottom: 0.25rem;
+}
+
+/* Leading card icon (spec §7 settings) — muted line icon before the heading. */
+.settings-section-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--tiro-accent);
 }
 
 .settings-section-desc {
@@ -4020,31 +4030,67 @@ main {
     padding: 0.15rem 0.6rem;
 }
 
+/* Remote-access wizard (remote_setup.html): numbered serif step circles. */
+.wizard-step {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.wizard-step-num {
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--tiro-border);
+    border-radius: 50%;
+    background: var(--tiro-bg-surface);
+    font-family: var(--tiro-font-serif);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--tiro-accent);
+}
+.wizard-step-body {
+    flex: 1;
+    min-width: 0;
+}
+.wizard-step-body .settings-section-title {
+    margin-top: 0.15rem;
+}
+
 .settings-actions {
     display: flex;
     gap: 0.5rem;
     margin-bottom: 1.5rem;
 }
 
+/* Settings buttons ride the primitive language (spec §5): ghost/outline by
+   default with accent reserved for modal primaries (.settings-save-btn). */
 .settings-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 0.5rem 1rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    color: white;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: none;
+    color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
     font-family: inherit;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-action-btn:hover {
-    background: var(--tiro-accent-hover);
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-fg-secondary);
 }
 
 .settings-action-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.6;
     cursor: not-allowed;
 }
 
@@ -4053,20 +4099,26 @@ main {
 }
 
 .settings-configure-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 0.5rem 1.25rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    color: white;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: none;
+    color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
     font-family: inherit;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-configure-btn:hover {
-    background: var(--tiro-accent-hover);
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-fg-secondary);
+    color: var(--tiro-fg-secondary);
 }
 
 .settings-configure-btn-secondary {
@@ -4101,7 +4153,7 @@ main {
 .settings-modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -4109,10 +4161,10 @@ main {
 }
 
 .settings-modal {
-    background: var(--tiro-bg);
+    background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+    border-radius: var(--tiro-radius-lg);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
     width: 440px;
     max-width: 90vw;
     padding: 1.5rem;
@@ -4140,9 +4192,12 @@ main {
     color: var(--tiro-muted);
     padding: 0 0.25rem;
     line-height: 1;
+    border-radius: var(--tiro-radius-sm);
+    transition: background 120ms ease-out, color 120ms ease-out;
 }
 
 .settings-modal-close:hover {
+    background: var(--tiro-bg-hover);
     color: var(--tiro-fg);
 }
 
@@ -4183,19 +4238,21 @@ main {
 .settings-field input[type="text"],
 .settings-field select {
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.6rem 0.75rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    font-size: 0.88rem;
+    border-radius: var(--tiro-radius-md);
+    font-size: 0.9rem;
     font-family: inherit;
     color: var(--tiro-fg);
     background: var(--tiro-bg);
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.settings-field input:focus {
+.settings-field input:focus,
+.settings-field select:focus {
     border-color: var(--tiro-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent) 15%, transparent);
 }
 
 /* --- Token reveal (copyable code block) --- */
@@ -4247,41 +4304,44 @@ main {
 }
 
 .settings-cancel-btn {
-    padding: 0.45rem 1rem;
+    padding: 0.5rem 1rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    background: var(--tiro-bg);
+    border-radius: var(--tiro-radius-md);
+    background: none;
     font-size: 0.85rem;
     font-family: inherit;
-    color: var(--tiro-fg-secondary);
+    color: var(--tiro-muted);
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-cancel-btn:hover {
     background: var(--tiro-bg-hover);
+    color: var(--tiro-fg-secondary);
     border-color: var(--tiro-fg-secondary);
 }
 
 .settings-save-btn {
-    padding: 0.45rem 1rem;
+    padding: 0.5rem 1rem;
     border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
+    border-radius: var(--tiro-radius-md);
     background: var(--tiro-accent);
     font-size: 0.85rem;
     font-family: inherit;
-    font-weight: 500;
-    color: white;
+    font-weight: 600;
+    color: #fff;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, border-color 120ms ease-out;
 }
 
 .settings-save-btn:hover {
     background: var(--tiro-accent-hover);
+    border-color: var(--tiro-accent-hover);
 }
 
 .settings-save-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.6;
     cursor: not-allowed;
 }
 

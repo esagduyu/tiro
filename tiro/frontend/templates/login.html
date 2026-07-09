@@ -30,69 +30,84 @@
       color: var(--tiro-fg, #2C2520);
     }
     .login-card {
-      width: min(90vw, 380px); padding: 2.25rem 2rem;
+      width: min(90vw, 380px); padding: 2.5rem 2rem 2.25rem;
       background: var(--tiro-bg-surface, #F5EDE3);
       border: 1px solid var(--tiro-border, #DDD5CA);
-      border-radius: 14px;
+      border-radius: 12px;
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+      text-align: center;
     }
     .login-mark {
-      display: flex; align-items: center; gap: 0.65rem; margin-bottom: 1.5rem;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 3rem; line-height: 1;
+      color: var(--tiro-accent, #C45B3E);
+      margin-bottom: 0.5rem;
     }
-    .login-mark img { width: 32px; height: 32px; border-radius: 7px; }
     .login-card h1 {
-      margin: 0; font-size: 1.5rem; font-weight: 700;
+      margin: 0 0 0.35rem; font-size: 1.75rem; font-weight: 700;
+      letter-spacing: -0.02em;
       font-family: Georgia, 'Times New Roman', serif;
       color: var(--tiro-fg, #2C2520);
     }
     .login-card p.sub {
-      margin: 0 0 1.5rem; font-size: 0.9rem; line-height: 1.5;
+      margin: 0 0 1.75rem; font-size: 0.9rem; line-height: 1.5;
       color: var(--tiro-fg-secondary, #5C534A);
     }
     .login-card p.sub.setup-mode {
       color: var(--tiro-accent, #C45B3E);
       font-weight: 600;
     }
+    .login-card form { text-align: left; }
     .field-label {
-      display: block; font-size: 0.78rem; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.04em;
+      display: block; font-size: 0.7rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.05em;
       color: var(--tiro-muted, #9C9389);
       margin-bottom: 0.35rem;
     }
     .login-card input {
-      width: 100%; padding: 0.65rem 0.8rem;
+      width: 100%; padding: 0.6rem 0.75rem;
       margin-bottom: 1rem; border: 1px solid var(--tiro-border, #DDD5CA);
-      border-radius: 8px; font-size: 0.95rem; font-family: inherit;
+      border-radius: 6px; font-size: 0.9rem; font-family: inherit;
       background: var(--tiro-bg, #FAF6F0);
       color: var(--tiro-fg, #2C2520);
       outline: none;
-      transition: border-color 0.15s;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
     .login-card input:focus {
       border-color: var(--tiro-accent, #C45B3E);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent, #C45B3E) 15%, transparent);
     }
     .login-card input::placeholder {
       color: var(--tiro-muted, #9C9389);
     }
+    /* .btn-block .btn-primary equivalent (login is standalone, no styles.css) */
     .login-card button {
-      width: 100%; padding: 0.7rem; border: none; border-radius: 8px;
+      display: flex; width: 100%; justify-content: center;
+      padding: 0.75rem 1.5rem; border: 1px solid var(--tiro-accent, #C45B3E);
+      border-radius: 10px;
       background: var(--tiro-accent, #C45B3E); color: #fff;
-      font-size: 0.95rem; font-weight: 600; font-family: inherit;
+      font-size: 0.9rem; font-weight: 600; font-family: inherit;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: background 0.15s, border-color 0.15s;
     }
     .login-card button:hover {
       background: var(--tiro-accent-hover, #A84A30);
+      border-color: var(--tiro-accent-hover, #A84A30);
     }
     .login-card button:focus-visible {
       outline: 2px solid var(--tiro-accent, #C45B3E);
       outline-offset: 2px;
     }
+    /* Error rendered as a crimson callout; hidden while empty (JS clears via textContent="") */
     .error {
+      background: var(--tiro-bg, #FAF6F0);
+      border-left: 3px solid var(--tiro-tier-must-read, #B5334D);
+      border-radius: 0 6px 6px 0;
       color: var(--tiro-tier-must-read, #B5334D);
       font-size: 0.85rem; line-height: 1.4;
-      min-height: 1.2em; margin: -0.4rem 0 0.85rem;
+      padding: 0.6rem 0.8rem; margin: 0 0 1rem;
     }
+    .error:empty { display: none; }
     .hidden { display: none; }
     .login-footer {
       margin-top: 1.5rem; text-align: center;
@@ -103,10 +118,8 @@
 </head>
 <body>
   <div class="login-card">
-    <div class="login-mark">
-      <img src="/static/logo-128.png" alt="Tiro">
-      <h1>Tiro ⁊</h1>
-    </div>
+    <div class="login-mark" aria-hidden="true">⁊</div>
+    <h1>Tiro</h1>
     <p class="sub" id="subtitle">Sign in to your library</p>
     <p class="error" id="error"></p>
     <form id="auth-form">

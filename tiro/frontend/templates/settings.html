@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Settings{% endblock %}
 {% block page_title %}Settings{% endblock %}
@@ -13,14 +14,14 @@
 
 <!-- Network Access (only visible in LAN mode) -->
 <div id="network-section" class="settings-section" style="display: none;">
-    <h3 class="settings-section-title">Network Access</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("globe", size=18) }}</span>Network Access</h3>
     <p class="settings-section-desc">Tiro is accessible on your local network.</p>
     <div id="network-status" class="settings-status"></div>
 </div>
 
 <!-- Appearance -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Appearance</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("zap", size=18) }}</span>Appearance</h3>
     <p class="settings-section-desc">Customize themes and display preferences.</p>
 
     <div id="appearance-status" class="settings-status">
@@ -42,7 +43,7 @@
 
 <!-- Reading Telemetry (M2.3) -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Reading Telemetry</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("message", size=18) }}</span>Reading Telemetry</h3>
     <p class="settings-section-desc">
         Records how much of each article you read (scroll depth, active time,
         per-section dwell) to improve future ranking and wiki features.
@@ -63,7 +64,7 @@
 
 <!-- Email Status -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Email Integration</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("mail", size=18) }}</span>Email Integration</h3>
     <p class="settings-section-desc">Send digest emails and receive newsletters via Gmail.</p>
 
     <div id="email-status" class="settings-status">
@@ -91,7 +92,7 @@
 
 <!-- TTS Status -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Text-to-Speech</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("headphones", size=18) }}</span>Text-to-Speech</h3>
     <p class="settings-section-desc">Read articles aloud using OpenAI's text-to-speech API.</p>
 
     <div id="tts-status" class="settings-status">
@@ -109,7 +110,7 @@
 
 <!-- API Tokens -->
 <div class="settings-section">
-    <h3 class="settings-section-title">API Tokens</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("copy", size=18) }}</span>API Tokens</h3>
     <p class="settings-section-desc">Tokens let the Chrome extension, MCP server, and scripts access your library. Treat them like passwords.</p>
 
     <div id="tokens-status" class="settings-status">
@@ -128,11 +129,18 @@
     </div>
 
     <div id="token-reveal" style="display: none; margin-top: 1rem;"></div>
+
+    <!-- Icon SVG sources for the token copy/revoke .icon-btns. The inline
+         script (classic <script>, can't import icons.js) clones these
+         Jinja-rendered spans into buttons it builds via direct DOM, so the
+         SVG markup stays out of JS source. Hidden; aria-hidden. -->
+    <span id="tok-icon-copy" hidden aria-hidden="true">{{ icon("copy", size=15) }}</span>
+    <span id="tok-icon-trash" hidden aria-hidden="true">{{ icon("trash", size=15) }}</span>
 </div>
 
 <!-- Mobile Access (M3.0 Task 2: QR login) -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Mobile Access</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Mobile Access</h3>
     <p class="settings-section-desc">Sign in on your phone by scanning a QR code &mdash; no password to type.</p>
 </div>
 
@@ -142,7 +150,7 @@
 
 <!-- Remote Access (M3.1 Task 4: Tailscale/reverse-proxy wizard) -->
 <div class="settings-section">
-    <h3 class="settings-section-title">Remote Access</h3>
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Remote Access</h3>
     <p class="settings-section-desc">Reach your library from outside your home network via Tailscale or a reverse proxy.</p>
 </div>
 
@@ -977,8 +985,12 @@
             line.textContent = t.name + ' · created ' + created + ' · last used ' + lastUsed;
 
             var revokeBtn = document.createElement('button');
-            revokeBtn.className = 'settings-configure-btn settings-configure-btn-secondary';
-            revokeBtn.textContent = 'Revoke';
+            revokeBtn.className = 'icon-btn';
+            revokeBtn.title = 'Revoke token';
+            revokeBtn.setAttribute('aria-label', 'Revoke token');
+            // Icon SVG cloned from the Jinja-rendered #tok-icon-trash holder
+            // (see markup) — trusted static content, no user data.
+            revokeBtn.innerHTML = document.getElementById('tok-icon-trash').innerHTML;
             revokeBtn.addEventListener('click', function() { revokeToken(t.id, t.name); });
 
             row.appendChild(line);
@@ -1072,8 +1084,14 @@
         });
 
         var copyBtn = document.createElement('button');
-        copyBtn.className = 'settings-configure-btn settings-configure-btn-secondary';
-        copyBtn.textContent = 'Copy';
+        copyBtn.className = 'icon-btn';
+        copyBtn.title = 'Copy token';
+        copyBtn.setAttribute('aria-label', 'Copy token');
+        // Icon SVG cloned from the Jinja-rendered #tok-icon-copy holder — the
+        // token VALUE itself (rawToken) never passes through innerHTML; it
+        // stays on the direct-DOM path (code.textContent / clipboard) per the
+        // Phase 0 invariant.
+        copyBtn.innerHTML = document.getElementById('tok-icon-copy').innerHTML;
         copyBtn.addEventListener('click', function() {
             navigator.clipboard.writeText(rawToken).then(function() {
                 showToast('Token copied to clipboard', 'success');
