@@ -58,7 +58,7 @@ def test_wiki_page_view_loads_wiki_js(authenticated_client):
     assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
-def test_static_version_is_65():
+def test_static_version_is_66():
     from tiro.app import STATIC_VERSION
 
     # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout), then
@@ -69,10 +69,15 @@ def test_static_version_is_65():
     # banner: sidebar.js/base.html/styles.css), then 63 -> 64 in M3.1
     # Task 5 (PWA + remote-wizard closeout), then 64 -> 65 in M3.2 Task 5
     # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage
-    # pill, inbox-zero, logout SW-cache hardening) — see
-    # tests/test_static_version.py for the import-map pin that owns the
-    # details of what changed at the 60 bump specifically.
-    assert STATIC_VERSION == "65"
+    # pill, inbox-zero, logout SW-cache hardening), then 65 -> 66 in the
+    # design-pass Task 11 closeout sweep (glyph sweep: graph.html node-panel
+    # close button, base.html LAN-banner dismiss, reader.html analysis/
+    # highlights panel close buttons all switched from literal &times; to
+    # the icons.js/_icons.html "close" glyph; orphaned .shortcuts-close and
+    # .graph-node-panel-close CSS removed) — see tests/test_static_version.py
+    # for the import-map pin that owns the details of what changed at the
+    # 60 bump specifically.
+    assert STATIC_VERSION == "66"
 
 
 # --- Sidebar nav link ----------------------------------------------------------

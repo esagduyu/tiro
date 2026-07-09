@@ -40,6 +40,7 @@ def test_pages_render_with_current_version(authenticated_client):
     # a stale unversioned import would leave open).
     assert 'type="importmap"' in resp.text
     assert f'"/static/js/core.js": "/static/js/core.js?v={STATIC_VERSION}"' in resp.text
+    assert f'"/static/js/icons.js": "/static/js/icons.js?v={STATIC_VERSION}"' in resp.text
     assert f'"/static/js/sidebar.js": "/static/js/sidebar.js?v={STATIC_VERSION}"' in resp.text
     assert f'"/static/js/annotate.js": "/static/js/annotate.js?v={STATIC_VERSION}"' in resp.text
     assert "?v=56" not in resp.text or STATIC_VERSION == "56"

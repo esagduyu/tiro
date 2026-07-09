@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}Tiro ⁊ Knowledge Graph{% endblock %}
 {% block page_title %}Graph{% endblock %}
 {% block nav_graph %}active{% endblock %}
@@ -95,17 +96,6 @@
     .graph-node-panel-header h3 {
         font-size: 1rem;
         font-weight: 600;
-    }
-    .graph-node-panel-close {
-        background: none;
-        border: none;
-        font-size: 1.4rem;
-        cursor: pointer;
-        color: var(--tiro-muted);
-        padding: 0 0.25rem;
-    }
-    .graph-node-panel-close:hover {
-        color: var(--tiro-fg);
     }
     .graph-node-panel-list {
         display: flex;
@@ -248,7 +238,7 @@
 <div id="node-panel" class="graph-node-panel" style="display: none;">
     <div class="graph-node-panel-header">
         <h3 id="node-panel-title"></h3>
-        <button id="node-panel-close" class="graph-node-panel-close">&times;</button>
+        <button id="node-panel-close" class="modal-close" aria-label="Close">{{ icon("close", size=16) }}</button>
     </div>
     <div id="node-panel-page-section" class="graph-node-panel-page-section"></div>
     <div id="node-panel-list" class="graph-node-panel-list"></div>

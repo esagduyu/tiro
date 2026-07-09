@@ -32,7 +32,7 @@
     <div id="lan-http-banner" class="lan-http-banner" role="status">
         {{ icon("alert", size=15) }}
         <span class="lan-http-banner-text">Serving unencrypted HTTP on your local network &mdash; use Tailscale Serve or <code>tiro run --cert/--key</code> for HTTPS.</span>
-        <button id="lan-http-banner-dismiss" class="lan-http-banner-dismiss" aria-label="Dismiss">&times;</button>
+        <button id="lan-http-banner-dismiss" class="lan-http-banner-dismiss" aria-label="Dismiss">{{ icon("close", size=15) }}</button>
     </div>
     {% endif %}
     <!-- Left sidebar navigation -->
