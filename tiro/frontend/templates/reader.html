@@ -6,6 +6,13 @@
 {% block body_class %}reader-page{% endblock %}
 
 {% block content %}
+<!-- Reading progress bar (owner UX wave 1): fixed hairline track at the very
+     top of the viewport; its inner fill tracks scroll through #reader-body
+     (0→100%). Zero layout shift (position: fixed). Width driven by reader.js's
+     rAF-throttled scroll handler. -->
+<div id="reading-progress" class="reading-progress" aria-hidden="true">
+    <div id="reading-progress-bar" class="reading-progress-bar"></div>
+</div>
 <article id="reader" class="reader" data-article-id="{{ article_id }}" data-telemetry="{{ 'on' if reading_telemetry_enabled else 'off' }}">
     <div id="reader-loading" class="reader-loading">Loading article...</div>
     <div id="reader-error" class="reader-error" style="display: none;">

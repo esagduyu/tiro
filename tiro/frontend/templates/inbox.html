@@ -29,6 +29,7 @@
         <div class="inbox-zero-mark" aria-hidden="true">{{ icon("check", size=40) }}</div>
         <h2>Inbox zero &mdash; the oracle rests.</h2>
         <p>Every article you kept has been read, archived, or snoozed. Tiro will wake you when there&rsquo;s more.</p>
+        <a id="inbox-zero-library-btn" class="btn btn-ghost inbox-zero-library-btn" href="/inbox?view=library">Browse your library &rarr;</a>
     </div>
     <div id="inbox-toolbar" class="inbox-toolbar" style="display: none;">
         <button id="classify-btn" class="btn btn-primary classify-btn">{{ icon("zap", size=14) }}<span class="classify-label">Classify inbox</span></button>
@@ -37,6 +38,7 @@
         <button id="discard-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show discarded (0)</button>
         <button id="archived-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show archived</button>
         <button id="snoozed-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show snoozed</button>
+        <button id="library-toggle" class="btn btn-ghost discard-toggle" title="Browse read + unread">Library</button>
         <button id="filter-icon-btn" class="icon-btn" title="Filters" aria-label="Filters">{{ icon("filter", size=16) }}</button>
         <span id="classify-info" class="classify-info"></span>
         <select id="sort-select" class="sort-select">

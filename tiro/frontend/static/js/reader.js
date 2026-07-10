@@ -103,6 +103,7 @@ import {
     findQuoteInPlain,
     findQuoteInPlainFallback,
 } from "./annotate.js";
+import { computeReadingProgress } from "./reading-progress.js";
 
 document.addEventListener("DOMContentLoaded", () => {
     const reader = document.getElementById("reader");
@@ -246,6 +247,10 @@ async function loadArticle(id) {
         // innerHTML is set (dwell tracking walks #reader-body's H2/H3s). No-ops
         // entirely when the server rendered data-telemetry="off".
         setupTelemetry(a.id);
+
+        // Reading progress bar (owner UX wave 1) — must run AFTER the body's
+        // innerHTML is set so the first paint measures the real body height.
+        setupReadingProgress();
 
         // Annotations (highlights + selection toolbar) — must run AFTER the
         // body's innerHTML is set (buildTextIndex walks the rendered DOM).
@@ -1188,6 +1193,49 @@ function formatAudioTime(seconds) {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* --- Reading progress bar (owner UX wave 1) ---
+ *
+ * A thin fixed bar whose fill width tracks scroll through #reader-body via
+ * the pure computeReadingProgress() (see reading-progress.js). rAF-throttled
+ * passive scroll + resize listeners; a single ticking guard coalesces bursts
+ * of scroll events into at most one measurement per frame. Deliberately its
+ * own listener set — NOT piggybacked on setupTelemetry's scroll handler,
+ * which (a) only runs when telemetry is opted in and (b) measures against the
+ * full-document scrollHeight, a different denominator (see reading-progress.js
+ * for the rationale). prefers-reduced-motion needs no special handling: the
+ * fill is a direct width write with no CSS transition, so there's nothing to
+ * suppress. */
+function setupReadingProgress() {
+    const bar = document.getElementById("reading-progress-bar");
+    const bodyEl = document.getElementById("reader-body");
+    if (!bar || !bodyEl) return;
+
+    let ticking = false;
+
+    function measure() {
+        ticking = false;
+        const rect = bodyEl.getBoundingClientRect();
+        const bodyTop = rect.top + window.scrollY;
+        const frac = computeReadingProgress(
+            window.scrollY,
+            window.innerHeight || document.documentElement.clientHeight || 0,
+            bodyTop,
+            rect.height,
+        );
+        bar.style.width = (frac * 100).toFixed(2) + "%";
+    }
+
+    function onScrollOrResize() {
+        if (ticking) return;
+        ticking = true;
+        window.requestAnimationFrame(measure);
+    }
+
+    window.addEventListener("scroll", onScrollOrResize, { passive: true });
+    window.addEventListener("resize", onScrollOrResize, { passive: true });
+    measure(); // initial fill (short articles start at 100%)
 }
 
 /* --- Reading-session telemetry (M2.3 Task 2) ---

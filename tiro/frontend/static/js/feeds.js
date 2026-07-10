@@ -10,7 +10,7 @@
  * are never interpolated raw. Numbers go through num().
  */
 
-import { esc, num, showToast, timeAgo, confirmDialog } from "./core.js";
+import { esc, num, showToast, timeAgo, confirmDialog, isSafeHref } from "./core.js";
 import { icon } from "./icons.js";
 
 let feedsData = [];
@@ -134,9 +134,14 @@ function intervalSelectHtml(f) {
 
 function feedCardHtml(f) {
     const title = esc(f.title || f.url || "Untitled feed");
-    const site = f.site_url
+    // site_url comes from the feed's own channel <link> and is NOT scheme-
+    // validated at ingestion (unlike article URLs, which pass pydantic
+    // HttpUrl) — so a hostile feed could carry a `javascript:` site_url that
+    // esc() would happily leave clickable. Only render it as a real link when
+    // it's an absolute http/https URL; otherwise show it as inert text.
+    const site = f.site_url && isSafeHref(f.site_url)
         ? `<a class="feeds-site-link" href="${esc(f.site_url)}" target="_blank" rel="noopener">${esc(f.site_url)}</a>`
-        : `<span class="feeds-site-link muted">${esc(f.url || "")}</span>`;
+        : `<span class="feeds-site-link muted">${esc(f.site_url || f.url || "")}</span>`;
     const paused = f.status === "paused";
     const toggleLabel = paused ? "Resume" : "Pause";
     const toggleIcon = paused ? "play" : "pause";

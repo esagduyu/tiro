@@ -2239,6 +2239,27 @@ main {
     color: var(--tiro-fg);
 }
 
+/* Reading progress bar (owner UX wave 1). Fixed hairline track at the top of
+   the viewport; accent fill tracks scroll through #reader-body. position:
+   fixed → zero layout shift. Theme-aware via --tiro-accent (works in both
+   papyrus + roman-night). No transition on the fill: width is written every
+   frame by reader.js, so an animation would only lag the scroll. */
+.reading-progress {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: transparent;
+    z-index: 1200;
+    pointer-events: none;
+}
+.reading-progress-bar {
+    height: 100%;
+    width: 0;
+    background: var(--tiro-accent);
+}
+
 .reader-body h1,
 .reader-body h2,
 .reader-body h3,

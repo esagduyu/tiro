@@ -774,6 +774,7 @@ const INBOX_SHORTCUTS = [
     { keys: ["v"], desc: "Go to knowledge graph" },
     { keys: ["h"], desc: "Go to highlights" },
     { keys: ["Shift", "F"], desc: "Go to feeds" },
+    { keys: ["a"], desc: "Toggle Library view (read + unread)" },
     { section: "Actions" },
     { keys: ["s"], desc: "Toggle VIP on selected source" },
     { keys: ["1"], desc: "Rate dislike" },
