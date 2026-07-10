@@ -205,7 +205,8 @@ def test_setup_qr_page_renders_qr_svg_and_countdown_and_regenerate(authenticated
     assert "<svg" in body
     assert "qr-countdown" in body
     assert "Generate new code" in body
-    assert 'action="/setup/qr"' in body
+    # Forms now carry a `mode` query param (browser vs device panel, M-iOS T1).
+    assert 'action="/setup/qr?mode=browser"' in body
     assert 'method="post"' in body
 
 

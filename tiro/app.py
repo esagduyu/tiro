@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,6 +105,15 @@ def _login_qr_target(request: Request, token: str) -> str:
     proxy hostnames) — trusting a client-suppliable Forwarded-Host would
     reopen exactly the DNS-rebinding hole that middleware exists to close.
     """
+    host = request.headers.get("host", "")
+    return f"{_request_scheme(request)}://{host}/login/qr?token={token}"
+
+
+def _request_scheme(request: Request) -> str:
+    """The scheme a phone's browser actually reached this server through —
+    `request.url.scheme` by default, corrected from the first
+    `X-Forwarded-Proto` value only when `trust_proxy_headers` is on (see
+    _login_qr_target's docstring for the full reverse-proxy rationale)."""
     config = request.app.state.config
     scheme = request.url.scheme
     if config.trust_proxy_headers:
@@ -111,8 +121,21 @@ def _login_qr_target(request: Request, token: str) -> str:
         first = forwarded_proto.split(",")[0].strip().lower()
         if first in ("http", "https"):
             scheme = first
+    return scheme
+
+
+def _external_base(request: Request) -> str:
+    """Base URL the native iOS client should target, for the tiro://pair QR
+    (M-iOS Task 1). `config.remote_url` wins when configured (the operator's
+    canonical externally-reachable address, e.g. a Tailscale MagicDNS name);
+    otherwise it falls back to whatever host+scheme the USER'S browser reached
+    this server through — the same Host-header logic _login_qr_target uses for
+    the browser QR (already validated by the Host allowlist middleware)."""
+    config = request.app.state.config
+    if config.remote_url:
+        return config.remote_url.rstrip("/")
     host = request.headers.get("host", "")
-    return f"{scheme}://{host}/login/qr?token={token}"
+    return f"{_request_scheme(request)}://{host}"
 
 
 _DIR_SIZE_CACHE_TTL = 30  # seconds
@@ -831,44 +854,57 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     async def sources_page(request: Request):
         return templates.TemplateResponse(request, "sources.html", _theme_context(request))
 
-    async def _qr_setup_response(request: Request) -> HTMLResponse:
+    async def _qr_setup_response(request: Request, mode: str = "browser") -> HTMLResponse:
         config = request.app.state.config
-        token = auth.create_login_token(config)
-        qr_url = _login_qr_target(request, token)
+        if mode == "device":
+            # Device pairing panel (M-iOS Task 1): mint a one-time pair code
+            # and encode a `tiro://pair?url=<external base>&code=<code>` URI —
+            # only the app's in-app scanner can route the custom scheme (the
+            # phone Camera app can't), so this QR is useless to a browser and
+            # the browser-login QR (below) is useless to the app.
+            code = auth.create_pair_code(config.db_path)
+            qr_url = f"tiro://pair?url={quote(_external_base(request), safe='')}&code={code}"
+        else:
+            # Browser login panel: mint a one-time QR-login token (unchanged).
+            token = auth.create_login_token(config)
+            qr_url = _login_qr_target(request, token)
         response = templates.TemplateResponse(
             request,
             "qr_setup.html",
             {
+                "mode": mode,
                 "qr_svg": _qr_svg(qr_url),
                 "qr_url": qr_url,
                 "qr_ttl_minutes": auth.LOGIN_TOKEN_TTL_MINUTES,
                 **_theme_context(request),
             },
         )
-        # A fresh single-use login token is embedded in this page's markup on
+        # A fresh single-use code/token is embedded in this page's markup on
         # every render (GET or POST) — a cached copy served back to the
         # browser (bfcache, a shared proxy, browser history) would leak a
-        # token whose QR image a bystander could still scan. no-store is
-        # unconditional, not just no-cache, for exactly that reason.
+        # code whose QR image a bystander could still scan. no-store is
+        # unconditional, not just no-cache, for exactly that reason (applies
+        # to both panels).
         response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.get("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
-    async def qr_setup_page(request: Request):
-        """Every render mints a fresh login token (simplest correct option —
+    async def qr_setup_page(request: Request, mode: str = "browser"):
+        """Every render mints a fresh code/token (simplest correct option —
         old ones just expire naturally via their own 15-minute TTL, no
-        cleanup needed here)."""
-        return await _qr_setup_response(request)
+        cleanup needed here). `?mode=device` renders the app-pairing panel;
+        default is the browser sign-in panel."""
+        return await _qr_setup_response(request, "device" if mode == "device" else "browser")
 
     @app.post("/setup/qr", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
-    async def qr_setup_regenerate(request: Request):
+    async def qr_setup_regenerate(request: Request, mode: str = "browser"):
         """'Generate new code' button: a same-origin form POST (CSRF-checked
         like any other authenticated mutation) that re-renders the whole
-        page with a fresh token — a full reload is the simplest correct
+        page with a fresh code/token — a full reload is the simplest correct
         shape here (no separate JSON+SVG-fragment endpoint to keep in
-        sync)."""
+        sync). Each panel's regenerate form posts its own `mode`."""
         auth._check_csrf(request)
-        return await _qr_setup_response(request)
+        return await _qr_setup_response(request, "device" if mode == "device" else "browser")
 
     @app.get("/setup/remote", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def remote_setup_page(request: Request):

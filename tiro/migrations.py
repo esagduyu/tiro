@@ -398,6 +398,32 @@ def _m011_snooze_and_login_tokens(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m012_device_pair_codes(conn: sqlite3.Connection) -> None:
+    """device_pair_codes table (M-iOS Task 1): one-time codes the native iOS
+    client exchanges for a long-lived API token via POST /api/auth/pair.
+
+    Mirrors login_tokens (migration 011) exactly — same one-time-code shape
+    (sha256-only storage, 15-min TTL, atomic single-use consume in
+    tiro/auth.py), differing only in what redemption mints: login_tokens mint
+    a *session cookie* for a browser, device_pair_codes mint an *api_tokens*
+    row for the app. No backfill (a fresh 012 DB has no pair codes yet), same
+    as 011's login_tokens create."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_pair_codes (
+            id INTEGER PRIMARY KEY,
+            code_hash TEXT NOT NULL UNIQUE,
+            label TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_pair_codes_expires "
+        "ON device_pair_codes(expires_at)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -410,6 +436,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (9, "highlights + notes tables", _m009_highlights_notes),
     (10, "reading_sessions telemetry table", _m010_reading_sessions),
     (11, "snooze_and_login_tokens", _m011_snooze_and_login_tokens),
+    (12, "device_pair_codes table", _m012_device_pair_codes),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

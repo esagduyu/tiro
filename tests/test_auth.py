@@ -336,6 +336,14 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         # auth.consume_login_token (atomic single-use, short TTL, generic
         # failure) rather than in a gate here; see tests/test_qr_login.py.
         "/login/qr",
+        # M-iOS Task 1: device pairing redemption is deliberately
+        # unauthenticated -- it's how the native iOS client, which has NO
+        # session and NO token yet, mints its first long-lived API token, via
+        # a one-time pair code in the request body instead of ambient cookie
+        # auth. Exactly the same rationale as /login/qr above: security lives
+        # in auth.consume_pair_code (atomic single-use, short TTL, generic
+        # failure) rather than a gate here; see tests/test_device_pairing.py.
+        "/api/auth/pair",
         # M3.1 Task 1: PWA manifest is deliberately unauthenticated -- a
         # browser/OS evaluating installability (or a phone's "Add to Home
         # Screen" prompt) fetches this before the user necessarily has a

@@ -1,27 +1,37 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 
-{% block title %}Tiro ⁊ Mobile Login{% endblock %}
-{% block page_title %}Mobile Login{% endblock %}
+{% block title %}Tiro ⁊ Mobile Login &amp; Pairing{% endblock %}
+{% block page_title %}Mobile Login &amp; Pairing{% endblock %}
 {% block nav_settings %}active{% endblock %}
 
 {% block content %}
 <section class="settings-header">
     <div class="settings-title-row">
-        <h2>Mobile Login</h2>
+        <h2>Mobile Login &amp; Pairing</h2>
     </div>
 </section>
 
+{#- Two parallel auth lanes, both first-class (see ios-app-spec §6):
+    the browser panel encodes an https://…/login/qr?token=… code the phone's
+    Camera app opens in Safari (session cookie); the device panel encodes a
+    tiro://pair?… code only the native Tiro app's in-app scanner can route.
+    Only the active panel (matching `mode`) mints + shows a live code; the
+    other offers a button to switch to it (so only one single-use code is
+    minted per render, and no-store still covers it). -#}
+
+{#- Browser sign-in panel -#}
 <div class="settings-section">
     <h3 class="settings-section-title">
-        <span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Scan to sign in
+        <span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Sign in on this phone's browser
     </h3>
     <p class="settings-section-desc">
-        Scan this code with your phone's camera to open Tiro there, already
-        signed in &mdash; no password to type. The code is single-use and
-        expires in {{ qr_ttl_minutes }} minutes.
+        Scan this code with your phone's <strong>Camera app</strong> to open Tiro
+        in the browser, already signed in &mdash; no password to type. The code
+        is single-use and expires in {{ qr_ttl_minutes }} minutes.
     </p>
 
+    {% if mode == "browser" %}
     <div class="qr-setup-card">
         <p class="qr-setup-overline">Point your camera here</p>
         <div class="qr-setup-svg">{{ qr_svg | safe }}</div>
@@ -30,13 +40,54 @@
             Expires in <span id="qr-countdown-value">{{ qr_ttl_minutes }}:00</span>
         </p>
     </div>
+    <form method="post" action="/setup/qr?mode=browser" class="settings-configure">
+        <button type="submit" class="btn btn-ghost">
+            {{ icon("refresh", size=15) }}<span>Generate new code</span>
+        </button>
+    </form>
+    {% else %}
+    <form method="post" action="/setup/qr?mode=browser" class="settings-configure">
+        <button type="submit" class="btn btn-ghost">
+            {{ icon("phone", size=15) }}<span>Show browser sign-in code</span>
+        </button>
+    </form>
+    {% endif %}
 </div>
 
-<form method="post" action="/setup/qr" class="settings-configure">
-    <button type="submit" class="btn btn-ghost">
-        {{ icon("refresh", size=15) }}<span>Generate new code</span>
-    </button>
-</form>
+{#- Native-app pairing panel -#}
+<div class="settings-section">
+    <h3 class="settings-section-title">
+        <span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Pair the Tiro app
+    </h3>
+    <p class="settings-section-desc">
+        Have the native Tiro app installed? Open it and scan this code
+        <strong>from within the app</strong> (your Camera app can't open it) to
+        pair the device &mdash; it stores a long-lived access token, no password
+        to type. The code is single-use and expires in {{ qr_ttl_minutes }} minutes.
+    </p>
+
+    {% if mode == "device" %}
+    <div class="qr-setup-card">
+        <p class="qr-setup-overline">Scan from inside the Tiro app</p>
+        <div class="qr-setup-svg">{{ qr_svg | safe }}</div>
+        <p class="qr-setup-url">{{ qr_url }}</p>
+        <p class="qr-setup-countdown" id="qr-countdown" data-ttl-seconds="{{ qr_ttl_minutes * 60 }}">
+            Expires in <span id="qr-countdown-value">{{ qr_ttl_minutes }}:00</span>
+        </p>
+    </div>
+    <form method="post" action="/setup/qr?mode=device" class="settings-configure">
+        <button type="submit" class="btn btn-ghost">
+            {{ icon("refresh", size=15) }}<span>Generate new code</span>
+        </button>
+    </form>
+    {% else %}
+    <form method="post" action="/setup/qr?mode=device" class="settings-configure">
+        <button type="submit" class="btn btn-ghost">
+            {{ icon("phone", size=15) }}<span>Show app pairing code</span>
+        </button>
+    </form>
+    {% endif %}
+</div>
 
 <style>
 .qr-setup-card {
@@ -97,7 +148,8 @@
     // static/js/ — this page is self-contained (one countdown, no shared
     // state with any other view), so a full ES module + STATIC_VERSION
     // cache-bust entry would be pure overhead. See M3.0 Task 2 report for
-    // the judgment call.
+    // the judgment call. Only the active panel renders a #qr-countdown, so
+    // this drives whichever code (browser or device) is currently shown.
     var el = document.getElementById('qr-countdown');
     var valueEl = document.getElementById('qr-countdown-value');
     if (!el || !valueEl) return;
