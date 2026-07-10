@@ -915,6 +915,10 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     async def sources_page(request: Request):
         return templates.TemplateResponse(request, "sources.html", _theme_context(request))
 
+    @app.get("/feeds", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def feeds_page(request: Request):
+        return templates.TemplateResponse(request, "feeds.html", _theme_context(request))
+
     async def _qr_setup_response(request: Request, mode: str = "browser") -> HTMLResponse:
         config = request.app.state.config
         if mode == "device":

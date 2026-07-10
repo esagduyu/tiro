@@ -803,6 +803,12 @@ function setupReaderKeyboard(articleId) {
                 e.preventDefault();
                 window.location.href = "/highlights";
                 break;
+            case "F":
+                // Shift+F -> feeds (matches the inbox keymap; `n` is taken by
+                // "save new item" there, so both pages use Shift+F for feeds).
+                e.preventDefault();
+                window.location.href = "/feeds";
+                break;
             case "?":
                 e.preventDefault();
                 showShortcuts("reader");

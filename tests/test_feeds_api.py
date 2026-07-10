@@ -139,6 +139,26 @@ def test_patch_missing_feed_404(authenticated_client):
     assert authenticated_client.patch("/api/feeds/999", json={"title": "x"}).status_code == 404
 
 
+def test_patch_rejects_nonpositive_interval(authenticated_client, monkeypatch):
+    """Fold-in 3 (T2 fable review): PATCH validates fetch_interval_minutes,
+    rejecting <= 0 with a 400 rather than persisting an interval that would
+    make the feed perpetually 'due' (a busy-loop poll)."""
+    url = "https://example.com/rss.xml"
+    _mock_fetch(monkeypatch, {url: (url, RSS_BYTES)})
+    feed_id = authenticated_client.post("/api/feeds", json={"url": url}).json()["data"]["id"]
+
+    assert authenticated_client.patch(
+        f"/api/feeds/{feed_id}", json={"fetch_interval_minutes": 0}
+    ).status_code == 400
+    assert authenticated_client.patch(
+        f"/api/feeds/{feed_id}", json={"fetch_interval_minutes": -5}
+    ).status_code == 400
+    # A positive value still succeeds.
+    assert authenticated_client.patch(
+        f"/api/feeds/{feed_id}", json={"fetch_interval_minutes": 30}
+    ).status_code == 200
+
+
 def _ingest_one_article_for_feed(config, feed_id, monkeypatch_ctx):
     """Ingest a real article (markdown + vector + row) attributed to a feed's
     source via the rss pipeline, so cascade-delete has coordinator effects to

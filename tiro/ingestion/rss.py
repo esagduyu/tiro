@@ -50,6 +50,13 @@ FETCH_TIMEOUT = 30.0  # seconds
 MAX_REDIRECTS = 5
 BACKOFF_CAP = 5  # per-feed backoff exponent cap (2**5 = 32x the interval)
 ERROR_STATUS_THRESHOLD = 5  # error_count at/above this flips status to 'error'
+# Fold-in 1b (T2 fable review): each entry triggers a full-page re-fetch, so an
+# unbounded entry list is a work-amplification vector. Process at most this many
+# entries per feed per cycle, NEWEST-FIRST — a feed dumping thousands of items
+# can't stall the cycle; the oldest overflow is picked up on later cycles once
+# the newest are ledgered (or simply stays unfetched, which is acceptable for a
+# firehose feed).
+MAX_ENTRIES_PER_CYCLE = 200
 
 
 class FeedTooLarge(Exception):
@@ -356,6 +363,14 @@ def _process_feed(conn, config: TiroConfig, client: httpx.Client, feed_row, resu
     # the fetch (per-entry ingestion is individually guarded below anyway).
     _record_feed_success(conn, feed_id, headers.get("etag"), headers.get("last-modified"), now)
 
+    # Cap the entries processed this cycle, newest-first (Fold-in 1b).
+    if len(entries) > MAX_ENTRIES_PER_CYCLE:
+        entries = sorted(
+            entries,
+            key=lambda e: _published_datetime(e) or datetime.min,
+            reverse=True,
+        )[:MAX_ENTRIES_PER_CYCLE]
+
     for entry in entries:
         result["entries_seen"] += 1
         try:
@@ -399,6 +414,13 @@ def check_feeds(config: TiroConfig, feed_id: int | None = None) -> dict:
             feeds = conn.execute("SELECT * FROM feeds WHERE id = ?", (feed_id,)).fetchall()
         else:
             feeds = conn.execute("SELECT * FROM feeds").fetchall()
+
+        # Fold-in 4: an empty feeds table (the common case when RSS is enabled
+        # but nothing is subscribed yet) must not write a no-op audit line every
+        # scheduler cycle. Return before both the fetch client AND the audit
+        # log below.
+        if not feeds:
+            return result
 
         client = httpx.Client(
             follow_redirects=True,

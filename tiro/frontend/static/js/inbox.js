@@ -2015,6 +2015,12 @@ function handleInboxKeydown(e) {
             e.preventDefault();
             openSaveModal();
             break;
+        case "F":
+            // Shift+F -> feeds. `n` (the spec's suggested key) is already the
+            // "save new item" shortcut here, so feeds nav falls back to Shift+F.
+            e.preventDefault();
+            window.location.href = "/feeds";
+            break;
         case "j":
             e.preventDefault();
             moveSelection(cards, 1);

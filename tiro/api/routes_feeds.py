@@ -20,13 +20,13 @@ from urllib.parse import urljoin, urlparse
 
 import feedparser
 import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 from lxml import etree
 from lxml.html import fromstring
 from pydantic import BaseModel
 
-from tiro import __version__
+from tiro import __version__, opml
 from tiro.database import get_connection
 from tiro.ingestion.rss import MAX_FEED_BYTES, check_feeds
 from tiro.migrations import new_ulid
@@ -38,6 +38,28 @@ router = APIRouter(prefix="/api/feeds", tags=["feeds"])
 _DISCOVER_TIMEOUT = 30.0
 _DISCOVER_MAX_REDIRECTS = 5
 _FEED_ALTERNATE_TYPES = ("application/rss+xml", "application/atom+xml")
+_MAX_OPML_BYTES = 5 * 1024 * 1024  # reject OPML uploads over 5 MB (spec D5)
+
+
+def _insert_feed(conn, *, feed_url: str, title: str, site_url: str,
+                 folder: str | None, interval: int) -> int:
+    """Create the feed's `sources` row (source_type='rss') + the `feeds` row.
+
+    Shared by the add-by-URL route and the OPML import route (import skips the
+    network autodiscovery around it). Returns the new feed id. Caller commits.
+    """
+    domain = urlparse(site_url).netloc or urlparse(feed_url).netloc
+    cur = conn.execute(
+        "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, ?)",
+        (title, domain, "rss"),
+    )
+    source_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO feeds (uid, url, title, site_url, folder, source_id, "
+        "fetch_interval_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (new_ulid(), feed_url, title, site_url, folder, source_id, interval),
+    )
+    return cur.lastrowid
 
 
 def _looks_like_feed(parsed) -> bool:
@@ -190,24 +212,18 @@ async def add_feed(body: FeedCreate, request: Request):
 
         title = discovered["title"]
         site_url = discovered["site_url"]
-        domain = urlparse(site_url).netloc or urlparse(feed_url).netloc
+        interval = body.fetch_interval_minutes or config.rss_default_interval_minutes
+        folder = body.folder.strip() if body.folder and body.folder.strip() else None
 
         # The feed's source row (source_type='rss') created at subscribe time;
         # entry ingestion forces every article's source to this row.
-        cur = conn.execute(
-            "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, ?)",
-            (title, domain, "rss"),
+        feed_id = _insert_feed(
+            conn, feed_url=feed_url, title=title, site_url=site_url,
+            folder=folder, interval=interval,
         )
-        source_id = cur.lastrowid
-
-        interval = body.fetch_interval_minutes or config.rss_default_interval_minutes
-        folder = body.folder.strip() if body.folder and body.folder.strip() else None
-        cur = conn.execute(
-            "INSERT INTO feeds (uid, url, title, site_url, folder, source_id, "
-            "fetch_interval_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (new_ulid(), feed_url, title, site_url, folder, source_id, interval),
-        )
-        feed_id = cur.lastrowid
+        source_id = conn.execute(
+            "SELECT source_id FROM feeds WHERE id = ?", (feed_id,)
+        ).fetchone()["source_id"]
         conn.commit()
     finally:
         conn.close()
@@ -238,6 +254,16 @@ async def update_feed(feed_id: int, body: FeedUpdate, request: Request):
 
     if "status" in updates and updates["status"] not in ("active", "paused"):
         raise HTTPException(status_code=400, detail="status must be 'active' or 'paused'")
+
+    # Fold-in 3 (T2 fable review): a non-positive interval would make the feed
+    # perpetually "due" (a busy-loop poll) — reject it rather than persist it.
+    if "fetch_interval_minutes" in updates:
+        interval = updates["fetch_interval_minutes"]
+        if interval is None or interval <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="fetch_interval_minutes must be a positive integer",
+            )
 
     conn = get_connection(config.db_path)
     try:
@@ -363,3 +389,87 @@ async def check_all_feeds(request: Request):
     config = request.app.state.config
     result = await asyncio.to_thread(check_feeds, config)
     return {"success": True, "data": result}
+
+
+@router.post("/import")
+async def import_opml(file: UploadFile, request: Request):
+    """Import an OPML upload of subscriptions (spec D5).
+
+    Recursively flattens nested outlines into a `folder` label, dedupes by feed
+    URL against existing rows, and creates a feed + its rss source row per new
+    URL WITHOUT network autodiscovery (the OPML already carries the feed URL;
+    the first poll validates it). Returns `{added, skipped, errors}`. 400 on an
+    upload over 5 MB or unparseable OPML.
+    """
+    config = request.app.state.config
+    raw = await file.read()
+    if len(raw) > _MAX_OPML_BYTES:
+        raise HTTPException(status_code=400, detail="OPML upload exceeds 5 MB")
+
+    try:
+        parsed = opml.parse_opml(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse OPML: {e}") from e
+
+    added = 0
+    skipped = 0
+    errors: list[str] = []
+    conn = get_connection(config.db_path)
+    try:
+        existing = {r["url"] for r in conn.execute("SELECT url FROM feeds").fetchall()}
+        for entry in parsed:
+            feed_url = (entry.get("url") or "").strip()
+            if not feed_url:
+                continue
+            if feed_url in existing:
+                skipped += 1
+                continue
+            folder = entry.get("folder")
+            folder = folder.strip() if folder and folder.strip() else None
+            try:
+                _insert_feed(
+                    conn,
+                    feed_url=feed_url,
+                    title=entry.get("title") or feed_url,
+                    site_url=entry.get("site_url") or "",
+                    folder=folder,
+                    interval=config.rss_default_interval_minutes,
+                )
+                conn.commit()
+                existing.add(feed_url)
+                added += 1
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the import
+                conn.rollback()
+                logger.warning("OPML import: failed to add %r: %s", feed_url, e)
+                errors.append(f"{feed_url}: {e}")
+    finally:
+        conn.close()
+
+    return {"success": True, "data": {"added": added, "skipped": skipped, "errors": errors}}
+
+
+@router.get("/export")
+async def export_feeds_opml(request: Request):
+    """Export subscriptions as a standalone OPML 2.0 document (spec D5): one
+    `type="rss"` outline per feed (xmlUrl + htmlUrl), nested one level by
+    folder."""
+    config = request.app.state.config
+    conn = get_connection(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT url, title, site_url, folder FROM feeds "
+            "ORDER BY folder IS NULL, folder ASC, title ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    feeds = [
+        {"url": r["url"], "title": r["title"], "site_url": r["site_url"], "folder": r["folder"]}
+        for r in rows
+    ]
+    document = opml.build_opml(feeds)
+    return Response(
+        content=document,
+        media_type="text/x-opml+xml",
+        headers={"Content-Disposition": 'attachment; filename="tiro-feeds.opml"'},
+    )

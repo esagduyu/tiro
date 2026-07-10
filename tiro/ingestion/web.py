@@ -17,6 +17,51 @@ logger = logging.getLogger(__name__)
 # render them as markdown tables (common on old sites like paulgraham.com)
 _LAYOUT_TAGS = {"table", "tbody", "thead", "tfoot", "tr", "td", "th"}
 
+# Streamed byte cap for a single page fetch (Fold-in 1a, T2 fable review): the
+# RSS pipeline re-fetches the full page for EVERY entry, so an unbounded body
+# was a memory-exhaustion vector. Both fetchers stream and raise PageTooLarge
+# the moment the accumulated body crosses this, mirroring `_fetch_feed`'s
+# 10 MB feed cap. 5 MB comfortably covers real articles.
+MAX_PAGE_BYTES = 5 * 1024 * 1024
+
+
+class PageTooLarge(Exception):
+    """A page body exceeded MAX_PAGE_BYTES mid-stream."""
+
+
+def _decode_capped_sync(response) -> str:
+    """Stream a sync httpx response under MAX_PAGE_BYTES, returning decoded text."""
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes():
+        total += len(chunk)
+        if total > MAX_PAGE_BYTES:
+            raise PageTooLarge(f"page body exceeded {MAX_PAGE_BYTES} bytes")
+        chunks.append(chunk)
+    return _decode(b"".join(chunks), response)
+
+
+async def _decode_capped_async(response) -> str:
+    """Stream an async httpx response under MAX_PAGE_BYTES, returning decoded text."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_PAGE_BYTES:
+            raise PageTooLarge(f"page body exceeded {MAX_PAGE_BYTES} bytes")
+        chunks.append(chunk)
+    return _decode(b"".join(chunks), response)
+
+
+def _decode(body: bytes, response) -> str:
+    """Decode fetched bytes using the response's declared charset, falling back
+    to a lenient UTF-8 (readability/lxml tolerate imperfect input)."""
+    encoding = response.charset_encoding or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
 
 def _collect_content_images(html: str) -> list[dict]:
     """Extract content images with their surrounding text context.
@@ -272,12 +317,13 @@ async def fetch_and_extract(url: str) -> dict:
         timeout=30.0,
         headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
     ) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            html = await _decode_capped_async(response)
+            # Use the final URL after redirects (e.g. substack.com/home/post/...
+            # -> author.substack.com/p/...)
+            final_url = str(response.url)
 
-    # Use the final URL after redirects (e.g. substack.com/home/post/... -> author.substack.com/p/...)
-    final_url = str(response.url)
     return extract_from_html(html, final_url)
 
 
@@ -297,9 +343,9 @@ def fetch_and_extract_sync(url: str) -> dict:
         timeout=30.0,
         headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
     ) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        html = response.text
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            html = _decode_capped_sync(response)
+            final_url = str(response.url)
 
-    final_url = str(response.url)
     return extract_from_html(html, final_url)

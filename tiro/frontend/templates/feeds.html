@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+
+{% block title %}Tiro ⁊ Feeds{% endblock %}
+{% block page_title %}Feeds{% endblock %}
+{% block nav_feeds %}active{% endblock %}
+
+{% block content %}
+<section class="feeds-view" id="feeds-root">
+    <div class="feeds-header">
+        <h2>Feeds</h2>
+        <div class="feeds-toolbar">
+            <input type="file" id="feeds-import-input"
+                   accept=".opml,.xml,text/x-opml+xml,application/xml" hidden>
+            <button type="button" class="btn btn-ghost" id="feeds-import-btn">
+                {{ icon("download", size=15) }} Import OPML
+            </button>
+            <a class="btn btn-ghost" id="feeds-export-btn" href="/api/feeds/export">
+                {{ icon("download", size=15) }} Export OPML
+            </a>
+        </div>
+    </div>
+
+    <form class="feeds-add-row" id="feeds-add-form" autocomplete="off">
+        <input type="url" id="feed-url-input" class="feeds-add-input"
+               placeholder="Paste a feed or page URL…" spellcheck="false">
+        <button type="submit" class="btn btn-primary" id="feed-add-btn">
+            {{ icon("plus", size=15) }} Add feed
+        </button>
+    </form>
+
+    <div id="feeds-status" class="settings-status">
+        <div class="settings-loading">
+            <div class="digest-spinner"></div>
+            <p>Loading feeds…</p>
+        </div>
+    </div>
+
+    <div id="feeds-groups" class="feeds-groups" style="display: none;"></div>
+
+    <div id="feeds-empty" class="empty-state" style="display: none;">
+        {{ icon("rss", size=40) }}
+        <h2>No feeds yet.</h2>
+        <p>Subscribe to an RSS or Atom feed and your library fills itself overnight.</p>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/feeds.js?v={{ static_v }}"></script>
+{% endblock %}

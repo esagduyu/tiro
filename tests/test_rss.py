@@ -563,6 +563,116 @@ def test_manual_check_audits_endpoint_check(initialized_library, no_fullpage, mo
 # Integration: local fixture feed -> poll -> article appears
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Fold-in 1b: MAX_ENTRIES_PER_CYCLE cap (newest-first)
+# --------------------------------------------------------------------------
+
+def _many_item_feed(n: int) -> bytes:
+    items = []
+    for i in range(n):
+        # Ascending day so item i is newer than item i-1; the cap must keep the
+        # NEWEST entries (highest i).
+        day = 1 + i
+        items.append(
+            f"<item><title>Item {i:03d}</title>"
+            f"<link>https://example.com/p/{i}</link>"
+            f"<guid>guid-{i:03d}</guid>"
+            f"<pubDate>{day:02d} Jul 2026 00:00:00 +0000</pubDate>"
+            f"<description><![CDATA[<p>Body number {i} with enough words to ingest.</p>]]></description>"
+            "</item>"
+        )
+    return (
+        b'<?xml version="1.0"?><rss version="2.0"><channel><title>Many</title>'
+        + "".join(items).encode()
+        + b"</channel></rss>"
+    )
+
+
+def test_max_entries_per_cycle_keeps_newest(initialized_library, no_fullpage, monkeypatch):
+    config = initialized_library
+    url = "https://example.com/rss"
+    _subscribe_feed(config, url)
+    monkeypatch.setattr(rss, "MAX_ENTRIES_PER_CYCLE", 2)
+    monkeypatch.setattr(rss, "_fetch_feed", FakeFetch({url: (200, _many_item_feed(5), {})}))
+
+    result = rss.check_feeds(config, feed_id=1)
+    # Only the cap's worth of entries ingested (the two newest: item 3 & 4).
+    assert result["ingested"] == 2
+    titles = {a["title"] for a in _articles(config)}
+    assert titles == {"Item 003", "Item 004"}
+
+
+# --------------------------------------------------------------------------
+# Fold-in 2: real _fetch_feed via httpx.MockTransport (closes the FakeFetch
+# seam-fidelity gap — exercises header construction, 304, and the stream cap).
+# --------------------------------------------------------------------------
+
+def test_real_fetch_feed_conditional_headers_and_304():
+    import httpx
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["inm"] = request.headers.get("if-none-match")
+        seen["ims"] = request.headers.get("if-modified-since")
+        return httpx.Response(304, headers={"ETag": '"new"'})
+
+    row = {
+        "url": "https://example.com/rss",
+        "last_etag": '"stored"',
+        "last_modified": "Mon, 01 Jan 2001 00:00:00 GMT",
+    }
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        status, body, headers = rss._fetch_feed(client, row)
+
+    assert status == 304
+    assert body == b""
+    assert seen["inm"] == '"stored"'
+    assert seen["ims"] == "Mon, 01 Jan 2001 00:00:00 GMT"
+
+
+def test_real_fetch_feed_streams_200_body():
+    import httpx
+
+    payload = b"<rss>ok</rss>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload, headers={"ETag": '"e"'})
+
+    row = {"url": "https://example.com/rss", "last_etag": None, "last_modified": None}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        status, body, headers = rss._fetch_feed(client, row)
+    assert status == 200
+    assert body == payload
+    assert headers["etag"] == '"e"'
+
+
+def test_real_fetch_feed_enforces_size_cap(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(rss, "MAX_FEED_BYTES", 16)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 4096)
+
+    row = {"url": "https://example.com/rss", "last_etag": None, "last_modified": None}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(rss.FeedTooLarge):
+            rss._fetch_feed(client, row)
+
+
+# --------------------------------------------------------------------------
+# Fold-in 4: no audit line when there are zero feeds (a scheduler cycle with
+# an empty feeds table must not write ~24 no-op JSONL lines/day).
+# --------------------------------------------------------------------------
+
+def test_no_audit_line_when_feeds_table_empty(initialized_library):
+    config = initialized_library
+    result = rss.check_feeds(config)  # zero feeds subscribed
+    assert result["feeds_checked"] == 0
+    assert _audit_lines(config, service="rss") == []
+
+
 def test_integration_poll_produces_article(initialized_library, no_fullpage, monkeypatch):
     config = initialized_library
     url = "https://example.com/rss"

@@ -4608,6 +4608,179 @@ main {
     }
 }
 
+/* --- Feeds page (Phase 4 M4.1) — built on primitives + a thin page layer --- */
+.feeds-view {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.feeds-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.feeds-header h2 {
+    margin: 0;
+}
+
+.feeds-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.feeds-add-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.feeds-add-input {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: var(--tiro-bg);
+    color: var(--tiro-fg);
+    font-size: 0.9rem;
+}
+
+.feeds-add-input:focus {
+    outline: none;
+    border-color: var(--tiro-accent);
+}
+
+.feeds-group {
+    margin-bottom: 1.5rem;
+}
+
+.feeds-group-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--tiro-muted);
+    margin: 0 0 0.5rem;
+}
+
+.feeds-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: var(--tiro-bg-surface);
+    margin-bottom: 0.6rem;
+}
+
+.feeds-card-main {
+    min-width: 0;
+    flex: 1;
+}
+
+.feeds-card-title {
+    font-weight: 600;
+    color: var(--tiro-fg);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.feeds-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.25rem;
+    font-size: 0.78rem;
+    color: var(--tiro-muted);
+}
+
+.feeds-site-link {
+    color: var(--tiro-gold);
+    text-decoration: none;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.feeds-site-link.muted {
+    color: var(--tiro-muted);
+}
+
+.feeds-site-link:hover {
+    text-decoration: underline;
+}
+
+.feeds-dot {
+    color: var(--tiro-border);
+}
+
+.feeds-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.feeds-interval {
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 4px;
+    background: var(--tiro-bg);
+    color: var(--tiro-fg-secondary);
+    font-size: 0.78rem;
+}
+
+.feeds-pill-active {
+    background: var(--tiro-secondary);
+    color: #fff;
+}
+
+.feeds-pill-paused {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-muted);
+}
+
+.feeds-pill-error {
+    background: var(--tiro-tier-must-read);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.feeds-delete-choice {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+    font-size: 0.85rem;
+    color: var(--tiro-fg-secondary);
+}
+
+@media (max-width: 640px) {
+    .feeds-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .feeds-card {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .feeds-card-actions {
+        justify-content: flex-start;
+    }
+}
+
 /* --- Wiki view (/wiki) --- */
 
 .wiki-view {
