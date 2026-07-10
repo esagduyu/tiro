@@ -67,6 +67,14 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.20",
 ]
+# Desktop packaging tooling (Phase 5, M5.0). PyInstaller is GPL-2.0-with-a-
+# bootloader-exception that explicitly permits bundling any-license apps, so
+# it is fine as a *build* tool and never a runtime dependency — it lives in
+# this dedicated group, installed only when building the desktop binary
+# (`uv sync --group packaging`), never in `dependencies`.
+packaging = [
+    "pyinstaller>=6.11.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
