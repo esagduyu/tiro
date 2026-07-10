@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tiro import auth
 
@@ -17,6 +17,11 @@ MIN_PASSWORD_LENGTH = 8
 
 class PasswordBody(BaseModel):
     password: str
+
+
+class PairBody(BaseModel):
+    code: str = Field(..., max_length=128)
+    device_name: str = Field("iPhone", max_length=128)
 
 
 def _session_response(request: Request, payload: dict) -> JSONResponse:
@@ -77,6 +82,30 @@ async def logout(request: Request):
     response = JSONResponse({"success": True, "data": {"logged_out": True}})
     response.delete_cookie(auth.SESSION_COOKIE)
     return response
+
+
+@router.post("/pair")
+async def pair(body: PairBody, request: Request):
+    """Exchange a one-time device-pairing code for a long-lived API token
+    (M-iOS Task 1). Deliberately UNAUTHENTICATED (route-walk allowlist entry
+    in tests/test_auth.py): the native iOS client has no session and no token
+    yet — the single-use pair code IS the auth boundary, exactly as the
+    one-time token is for GET /login/qr.
+
+    auth._check_csrf is deliberately NOT called: this is a non-browser native
+    client that presents its own bearer of proof (the pair code in the body)
+    rather than riding ambient cookie auth, so there is no cross-site-with-
+    someone-else's-cookie threat for CSRF to defend against (same reasoning as
+    /login/qr, which also skips _check_csrf).
+
+    Every failure mode (garbage / expired / already-used) returns the
+    identical generic 400 — consume_pair_code's docstring covers why (no
+    oracle)."""
+    config = request.app.state.config
+    token = auth.consume_pair_code(config.db_path, body.code, body.device_name)
+    if token is None:
+        raise HTTPException(status_code=400, detail="invalid or expired code")
+    return {"success": True, "data": {"token": token, "name": f"ios:{body.device_name}"}}
 
 
 @router.get("/status")

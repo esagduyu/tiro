@@ -144,6 +144,20 @@ CREATE TABLE IF NOT EXISTS login_tokens (
     used_at TEXT
 );
 
+-- One-time device pairing codes (M-iOS): issued by the desktop app's
+-- /setup/qr?mode=device panel, exchanged once by the native iOS client for a
+-- long-lived api_tokens row via POST /api/auth/pair, then marked used_at so a
+-- screenshot/replay of the same code can't mint a second token. Mirrors
+-- login_tokens exactly (differs only in what redemption mints).
+CREATE TABLE IF NOT EXISTS device_pair_codes (
+    id INTEGER PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    label TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+
 -- Authors (deduped by canonical_key across article.author spellings)
 CREATE TABLE IF NOT EXISTS authors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -261,6 +275,7 @@ CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id);
 CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id);
 CREATE INDEX IF NOT EXISTS idx_reading_sessions_article ON reading_sessions(article_id);
 CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_pair_codes_expires ON device_pair_codes(expires_at);
 """
 
 

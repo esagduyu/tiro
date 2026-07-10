@@ -41,8 +41,15 @@ def scan(config: TiroConfig) -> dict:
         # design (see tiro/auth.py create_login_token/consume_login_token);
         # once used or expired they're pure housekeeping, same bucket as
         # expired sessions above -- not a structural inconsistency.
+        # M-iOS Task 1: device_pair_codes are the same one-time-code shape as
+        # login_tokens (single-use, short TTL); expired/used rows are pure
+        # housekeeping, folded into the same bucket/purge as expired sessions
+        # and login tokens above -- not a structural inconsistency.
         expired_login_tokens = conn.execute(
             "SELECT COUNT(*) AS n FROM login_tokens "
+            "WHERE expires_at < datetime('now') OR used_at IS NOT NULL"
+        ).fetchone()["n"] + conn.execute(
+            "SELECT COUNT(*) AS n FROM device_pair_codes "
             "WHERE expires_at < datetime('now') OR used_at IS NOT NULL"
         ).fetchone()["n"]
         unreferenced_tags = conn.execute(
@@ -375,6 +382,12 @@ def fix(config: TiroConfig) -> dict:
         )
         if cur.rowcount:
             actions.append(f"purged {cur.rowcount} expired/used login token(s)")
+        cur = conn.execute(
+            "DELETE FROM device_pair_codes "
+            "WHERE expires_at < datetime('now') OR used_at IS NOT NULL"
+        )
+        if cur.rowcount:
+            actions.append(f"purged {cur.rowcount} expired/used device pair code(s)")
         conn.commit()
     finally:
         conn.close()

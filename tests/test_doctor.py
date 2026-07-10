@@ -789,9 +789,11 @@ def test_fix_respects_annotations_widened_guard(initialized_library):
 
 
 def test_login_tokens_purge(initialized_library):
-    """M3.0 Task 2: expired AND used login_tokens are purged the same step
-    expired sessions are (housekeeping, not a structural inconsistency);
-    a live (unexpired, unused) token must survive the purge."""
+    """M3.0 Task 2 + M-iOS Task 1: expired AND used login_tokens *and*
+    device_pair_codes are purged the same step expired sessions are
+    (housekeeping, not a structural inconsistency), and both fold into the
+    same `expired_login_tokens` bucket; a live (unexpired, unused) row of
+    either kind must survive the purge."""
     from tiro.doctor import fix, scan
 
     config = initialized_library
@@ -809,6 +811,18 @@ def test_login_tokens_purge(initialized_library):
             "INSERT INTO login_tokens (token_hash, created_at, expires_at, used_at) "
             "VALUES ('live', datetime('now'), datetime('now', '+15 minutes'), NULL)"
         )
+        conn.execute(
+            "INSERT INTO device_pair_codes (code_hash, created_at, expires_at, used_at) "
+            "VALUES ('pc-expired', datetime('now', '-1 hour'), datetime('now', '-45 minutes'), NULL)"
+        )
+        conn.execute(
+            "INSERT INTO device_pair_codes (code_hash, created_at, expires_at, used_at) "
+            "VALUES ('pc-used', datetime('now', '-1 hour'), datetime('now', '+1 hour'), datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO device_pair_codes (code_hash, created_at, expires_at, used_at) "
+            "VALUES ('pc-live', datetime('now'), datetime('now', '+15 minutes'), NULL)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -816,19 +830,25 @@ def test_login_tokens_purge(initialized_library):
     report = scan(config)
     assert report["structurally_consistent"] is True
     assert report["clean"] is False
-    assert report["expired_login_tokens"] == 2  # expired + used, not live
+    # 2 login tokens (expired + used) + 2 pair codes (expired + used), not the live ones
+    assert report["expired_login_tokens"] == 4
 
     result = fix(config)
     assert any("login token" in a for a in result["actions"]), result["actions"]
+    assert any("pair code" in a for a in result["actions"]), result["actions"]
 
     conn = get_connection(config.db_path)
     try:
-        remaining = {
+        remaining_tokens = {
             r["token_hash"] for r in conn.execute("SELECT token_hash FROM login_tokens").fetchall()
+        }
+        remaining_codes = {
+            r["code_hash"] for r in conn.execute("SELECT code_hash FROM device_pair_codes").fetchall()
         }
     finally:
         conn.close()
-    assert remaining == {"live"}
+    assert remaining_tokens == {"live"}
+    assert remaining_codes == {"pc-live"}
 
     report = scan(config)
     assert report["expired_login_tokens"] == 0

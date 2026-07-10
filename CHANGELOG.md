@@ -10,6 +10,18 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+### Added
+
+- **Device pairing for the iOS client** (`/setup/qr?mode=device`,
+  `POST /api/auth/pair`). The `/setup/qr` page becomes two labeled panels —
+  browser sign-in (unchanged `login/qr` QR) and app pairing — the latter
+  encoding a `tiro://pair?url=…&code=…` QR the native app scans in-app to
+  exchange a one-time code for a long-lived `ios:<device_name>` API token.
+  Mirrors the QR-login token machinery exactly (sha256-only storage,
+  15-minute TTL, atomic single-use consume, generic-400 failures, no-store);
+  new `device_pair_codes` table (migration 012); doctor purges expired/used
+  codes in the same housekeeping bucket as login tokens.
+
 ### Design pass — full frontend redesign (`design/codex-pass`, `STATIC_VERSION` 66)
 
 Whole-app visual and interaction redesign, landed as a sequence of

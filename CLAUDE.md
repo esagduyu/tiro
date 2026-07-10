@@ -146,7 +146,8 @@ lsof -ti :8000 | xargs kill -9
 | POST | /api/settings/telemetry | Update reading-telemetry opt-in status (local-only, `persist_config`) |
 | PATCH | /api/articles/{id}/snooze | Snooze/unsnooze an article (`{preset}` one of tonight/tomorrow/weekend/next_week, or `{until}` ISO datetime, or `{}`/`{until: null}` to unsnooze) |
 | GET | /login/qr | Redeem a one-time QR-login token (`?token=...`) into a session cookie; deliberately auth-allowlisted (no page-auth gate) — see the Remote access backend (M3.0) bullet |
-| GET/POST | /setup/qr | `require_page_auth`-gated page: renders a QR code encoding a fresh one-time `/login/qr` link for phone sign-in; POST re-renders with a new token ("Generate new code") |
+| GET/POST | /setup/qr | `require_page_auth`-gated page, two labeled panels: default (`?mode=browser`) renders a QR encoding a fresh one-time `/login/qr` link for browser sign-in; `?mode=device` (M-iOS) renders a `tiro://pair?url=…&code=…` QR the native iOS app scans in-app to pair; POST re-renders the given panel with a fresh code ("Generate new code") |
+| POST | /api/auth/pair | Exchange a one-time device-pairing `{code, device_name}` for a long-lived `ios:<device_name>` API token → `{success, data:{token, name}}`; unauthenticated allowlist entry (the single-use code is the boundary, like `/login/qr`); every failure mode → identical generic 400 `{"detail": "invalid or expired code"}` (M-iOS) |
 | GET | /manifest.webmanifest | PWA manifest (name/icons/theme+background color/start_url); unauthenticated by construction — see PWA & remote wizard (M3.1) bullet |
 | GET | /sw.js | Service worker script, version-injecting (`__STATIC_VERSION__` → `STATIC_VERSION`); unauthenticated, `Cache-Control: no-cache` |
 | GET | /offline | Standalone offline fallback page the SW serves for a failed navigation; unauthenticated |

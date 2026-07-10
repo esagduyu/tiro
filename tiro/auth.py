@@ -159,6 +159,64 @@ def consume_login_token(config: TiroConfig, token: str) -> bool:
         conn.close()
 
 
+def create_pair_code(db_path: Path, label: str | None = None) -> str:
+    """Issue a one-time device-pairing code (M-iOS Task 1).
+
+    Structurally identical to create_login_token: `secrets.token_urlsafe(32)`
+    (>=128 bits, brute force infeasible even against the short 15-minute TTL —
+    same LOGIN_TOKEN_TTL_MINUTES constant), only the SHA-256 hash is ever
+    persisted, and the raw code is returned exactly once (to be embedded in the
+    tiro://pair QR) and is never recoverable from the database afterward. The
+    one difference from login_tokens: what redemption *mints* — a login token
+    yields a session cookie for a browser, a pair code yields a long-lived
+    api_tokens row for the native client (see consume_pair_code)."""
+    code = secrets.token_urlsafe(32)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO device_pair_codes (code_hash, label, created_at, expires_at) "
+            "VALUES (?, ?, datetime('now'), datetime('now', ?))",
+            (_sha256(code), label, f"+{LOGIN_TOKEN_TTL_MINUTES} minutes"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return code
+
+
+def consume_pair_code(db_path: Path, code: str, device_name: str) -> str | None:
+    """Atomically redeem a one-time pairing code into a fresh API token.
+
+    Same atomic single-use discipline as consume_login_token: one
+    UPDATE ... WHERE code_hash=? AND used_at IS NULL AND expires_at > now,
+    gated on rowcount == 1, is the only safe implementation — a
+    SELECT-then-UPDATE has a TOCTOU window where two concurrent redemptions of
+    the same code (a screenshot scanned twice at once) could both observe it
+    unused and both mint a token.
+
+    Returns None uniformly for "no such code", "already used", and "expired" —
+    the caller (POST /api/auth/pair) must not distinguish these (no oracle).
+    Only on a winning UPDATE does it mint and return the raw API token named
+    `ios:<device_name>` (mirroring the login-token path, which only creates a
+    session after a winning consume)."""
+    if not code:
+        return None
+    code_hash = _sha256(code)
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE device_pair_codes SET used_at = datetime('now') "
+            "WHERE code_hash = ? AND used_at IS NULL AND expires_at > datetime('now')",
+            (code_hash,),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return None
+    finally:
+        conn.close()
+    return create_api_token(db_path, f"ios:{device_name}")
+
+
 def create_api_token(db_path: Path, name: str) -> str:
     token = secrets.token_urlsafe(32)
     conn = get_connection(db_path)
