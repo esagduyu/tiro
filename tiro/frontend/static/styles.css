@@ -272,6 +272,54 @@ body.has-lan-banner .content {
     opacity: 1;
 }
 
+/* --- Notify-only update banner (Phase 5 D5) ---
+   Same non-fixed, in-flow strip as the libmove banner (scrolls with the page,
+   no body-offset math, can never collide with the fixed LAN banner). A warm
+   gold "an update is available" tone (the link/VIP accent), distinct from the
+   olive one-time nudge and the crimson security warning. Dismissal is
+   per-version (localStorage `tiro-update-dismissed-<version>`), so a new
+   release re-banners. */
+.update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    position: relative;
+    padding: 0.5rem 2.75rem;
+    background: var(--tiro-gold, #B8943E);
+    color: #fff;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    text-align: center;
+}
+
+.update-banner-text a {
+    color: #fff;
+    font-weight: 600;
+    text-decoration: underline;
+}
+
+.update-banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #fff;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    opacity: 0.85;
+}
+
+.update-banner-dismiss:hover {
+    opacity: 1;
+}
+
 /* ============ chrome (sidebar, icon rail, tab bar, mobile header, sheets) === */
 
 /* --- Layout: Sidebar --- */

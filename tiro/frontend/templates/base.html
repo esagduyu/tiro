@@ -42,6 +42,13 @@
         <button id="libmove-banner-dismiss" class="libmove-banner-dismiss" aria-label="Dismiss">{{ icon("close", size=15) }}</button>
     </div>
     {% endif %}
+    {% if update_available %}
+    <div id="update-banner" class="update-banner" role="status" data-update-version="{{ update_version }}">
+        {{ icon("info", size=15) }}
+        <span class="update-banner-text">Tiro {{ update_version }} is available &mdash; <a href="{{ update_url }}" target="_blank" rel="noopener">Download</a></span>
+        <button id="update-banner-dismiss" class="update-banner-dismiss" aria-label="Dismiss">{{ icon("close", size=15) }}</button>
+    </div>
+    {% endif %}
     <!-- Left sidebar navigation -->
     <nav id="sidebar" class="sidebar">
         <div class="sidebar-brand">

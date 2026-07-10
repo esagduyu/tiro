@@ -116,6 +116,11 @@ class TiroConfig:
     # deployment's behavior untouched.
     extra_allowed_hosts: list[str] = field(default_factory=list)
     trust_proxy_headers: bool = False
+    # Notify-only update check (Phase 5 D5): once-a-day GET to GitHub Releases,
+    # surfaced as a dismissible banner. The ONLY phone-home in Tiro (a
+    # version-string-free request; nothing about the library is sent). Default
+    # True; this flag is the kill switch. Env override: TIRO_UPDATE_CHECK_ENABLED.
+    update_check_enabled: bool = True
     auth_password_hash: str | None = None
     config_path: str | None = None  # set by load_config; never persisted to YAML
 

@@ -88,7 +88,7 @@ def test_happy_path_copies_and_repoints(scratch, tmp_path):
     before = _tree_sizes(src, exclude_top={"backups"})
     dest = tmp_path / "dest-library"
 
-    report = migrate_library(config, dest, assume_yes=True)
+    report = migrate_library(config, dest)
 
     assert report["status"] == "migrated"
     # every source content file present at dest with identical size
@@ -111,7 +111,7 @@ def test_happy_path_copies_and_repoints(scratch, tmp_path):
 def test_source_never_removed(scratch, tmp_path):
     config, src = scratch
     dest = tmp_path / "dest-library"
-    migrate_library(config, dest, assume_yes=True)
+    migrate_library(config, dest)
     assert src.exists()
     assert (src / "tiro.db").exists()
     assert (src / "articles" / "hello.md").exists()
@@ -128,7 +128,7 @@ def test_backup_failure_aborts_untouched(scratch, tmp_path, monkeypatch):
     monkeypatch.setattr("tiro.library_move.auto_backup", lambda *a, **k: None)
 
     with pytest.raises(MigrationError):
-        migrate_library(config, dest, assume_yes=True)
+        migrate_library(config, dest)
 
     assert not dest.exists()  # dest absent/untouched
     assert load_config(config.config_path).library == src.resolve()  # config unchanged
@@ -149,7 +149,7 @@ def test_interrupted_run_reruns_clean(scratch, tmp_path):
     (dest / "articles" / "partial.md").write_text("half written")
     (dest / "stray.tmp").write_text("garbage")
 
-    report = migrate_library(config, dest, assume_yes=True)
+    report = migrate_library(config, dest)
 
     assert report["status"] == "migrated"
     assert not (dest / "stray.tmp").exists()  # stale partial cleared
@@ -170,7 +170,7 @@ def test_foreign_dest_aborts(scratch, tmp_path):
     (dest / "important-user-file.txt").write_text("do not touch")
 
     with pytest.raises(MigrationError):
-        migrate_library(config, dest, assume_yes=True)
+        migrate_library(config, dest)
 
     assert (dest / "important-user-file.txt").read_text() == "do not touch"
     assert load_config(config.config_path).library == src.resolve()
@@ -190,14 +190,14 @@ def test_verify_mismatch_aborts_with_marker(scratch, tmp_path):
         (dest_path / "articles" / "hello.md").write_text("CORRUPTED-DIFFERENT-LENGTH")
 
     with pytest.raises(MigrationError):
-        migrate_library(config, dest, assume_yes=True, _pre_verify_hook=corrupt)
+        migrate_library(config, dest, _pre_verify_hook=corrupt)
 
     assert (dest / MARKER_NAME).exists()  # marker retained → clean re-run
     assert load_config(config.config_path).library == src.resolve()  # unchanged
     assert (src / "articles" / "hello.md").read_text() == "# Hello\n\nbody\n"  # source intact
 
     # re-run (without the sabotage) recovers from scratch
-    report = migrate_library(config, dest, assume_yes=True)
+    report = migrate_library(config, dest)
     assert report["status"] == "migrated"
     assert not (dest / MARKER_NAME).exists()
 
@@ -210,11 +210,11 @@ def test_verify_mismatch_aborts_with_marker(scratch, tmp_path):
 def test_rerun_after_success_is_noop(scratch, tmp_path):
     config, src = scratch
     dest = tmp_path / "dest-library"
-    migrate_library(config, dest, assume_yes=True)
+    migrate_library(config, dest)
 
     # config now points at dest; re-running to the same dest is a no-op
     config2 = load_config(config.config_path)
-    report = migrate_library(config2, dest, assume_yes=True)
+    report = migrate_library(config2, dest)
     assert report["status"] == "already_at_destination"
     assert report["files_copied"] == 0
 
@@ -226,7 +226,7 @@ def test_rerun_after_success_is_noop(scratch, tmp_path):
 
 def test_dest_equals_source_refused(scratch):
     config, src = scratch
-    report = migrate_library(config, src, assume_yes=True)
+    report = migrate_library(config, src)
     assert report["status"] == "already_at_destination"
     assert report["files_copied"] == 0
 
@@ -240,14 +240,14 @@ def test_dest_inside_source_refused(scratch):
     config, src = scratch
     inside = src / "articles" / "nested-dest"
     with pytest.raises(MigrationError):
-        migrate_library(config, inside, assume_yes=True)
+        migrate_library(config, inside)
 
 
 def test_source_inside_dest_refused(scratch, tmp_path):
     config, src = scratch
     # dest is an ancestor of source
     with pytest.raises(MigrationError):
-        migrate_library(config, src.parent, assume_yes=True)
+        migrate_library(config, src.parent)
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +261,78 @@ def test_inside_library_config_excluded(scratch, tmp_path):
     (src / "config.yaml").write_text("library_path: /wherever\n")
     dest = tmp_path / "dest-library"
 
-    migrate_library(config, dest, assume_yes=True)
+    migrate_library(config, dest)
 
     assert not (dest / "config.yaml").exists()  # excluded doppelgänger
     assert (src / "config.yaml").exists()  # source copy untouched
+
+
+# ---------------------------------------------------------------------------
+# Fold-in: the LIVE config inside the library is RELOCATED (spec D7 layout)
+# ---------------------------------------------------------------------------
+
+
+def test_live_config_inside_library_relocated(tmp_path):
+    lib = _make_library(tmp_path)
+    # Platform-default layout (spec D7): the live config lives at
+    # <library>/config.yaml. Migrating away then deleting the old library would
+    # otherwise take the live config with it — so it must be relocated.
+    cfg_file = lib / "config.yaml"
+    cfg_file.write_text(f'library_path: "{lib}"\nbackup_auto_keep: 3\n')
+    config = load_config(cfg_file)
+    dest = tmp_path / "dest-library"
+
+    report = migrate_library(config, dest)
+
+    assert report["status"] == "migrated"
+    new_cfg = dest / "config.yaml"
+    assert report["config_relocated_to"] == str(new_cfg)
+    assert new_cfg.exists()
+    assert config.config_path == str(new_cfg)  # live config repointed
+    # the relocated config points at the NEW library
+    assert load_config(new_cfg).library == dest.resolve()
+    # source config still intact (source is never removed) and updated in place
+    assert cfg_file.exists()
+    assert load_config(cfg_file).library == dest.resolve()
+    # 0600 on the relocated secret-bearing file
+    assert (new_cfg.stat().st_mode & 0o777) == 0o600
+
+
+def test_outside_config_not_flagged_relocated(scratch, tmp_path):
+    # The scratch fixture keeps config.yaml OUTSIDE the library — never relocated.
+    config, src = scratch
+    dest = tmp_path / "dest-library"
+    report = migrate_library(config, dest)
+    assert report["config_relocated_to"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fold-in: internal DIRECTORY symlinks are refused up front (verify would
+# fail permanently otherwise — copytree follows, rglob does not descend)
+# ---------------------------------------------------------------------------
+
+
+def test_internal_dir_symlink_refused(scratch, tmp_path):
+    config, src = scratch
+    (src / "linkdir").symlink_to(src / "articles", target_is_directory=True)
+    dest = tmp_path / "dest-library"
+
+    with pytest.raises(MigrationError, match="symlink"):
+        migrate_library(config, dest)
+
+    # Refused before any copy or snapshot: dest untouched, config unchanged.
+    assert not dest.exists()
+    assert load_config(config.config_path).library == src.resolve()
+
+
+def test_internal_file_symlink_allowed(scratch, tmp_path):
+    # File symlinks are safe (copytree and rglob both resolve to the target).
+    config, src = scratch
+    (src / "articles" / "linked.md").symlink_to(src / "articles" / "hello.md")
+    dest = tmp_path / "dest-library"
+
+    report = migrate_library(config, dest)
+    assert report["status"] == "migrated"
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +348,7 @@ def test_symlinked_source_resolves(scratch, tmp_path):
     config.library_path = str(link)
     dest = tmp_path / "dest-library"
 
-    report = migrate_library(config, dest, assume_yes=True)
+    report = migrate_library(config, dest)
     assert report["status"] == "migrated"
     assert (dest / "articles" / "hello.md").exists()
 
@@ -299,7 +367,7 @@ def test_permission_denied_target(scratch, tmp_path):
     dest = locked / "dest-library"
     try:
         with pytest.raises((MigrationError, PermissionError, OSError)):
-            migrate_library(config, dest, assume_yes=True)
+            migrate_library(config, dest)
     finally:
         os.chmod(locked, 0o700)
     assert load_config(config.config_path).library == src.resolve()

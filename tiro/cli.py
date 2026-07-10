@@ -716,7 +716,7 @@ def cmd_migrate_library(args):
             sys.exit(1)
 
     try:
-        report = migrate_library(config, dest, assume_yes=args.yes)
+        report = migrate_library(config, dest)
     except MigrationError as e:
         print(f"Migration aborted: {e}")
         sys.exit(1)
@@ -729,6 +729,11 @@ def cmd_migrate_library(args):
         f"Copied {report['files_copied']} files ({report['bytes_copied']} bytes) "
         f"to {dest}."
     )
+    if report.get("config_relocated_to"):
+        print(
+            f"Your config lived inside the library and was relocated to "
+            f"{report['config_relocated_to']} — it is safe to remove the old library."
+        )
     print(
         f"Old library preserved at {report['source']} — verify the new "
         "location, then remove the old copy yourself."
@@ -739,13 +744,19 @@ def cmd_migrate_library(args):
 def cmd_migrate(args):
     """Apply pending database migrations."""
     from tiro.config import load_config
-    from tiro.migrations import run_migrations
+    from tiro.migrations import pre_migrate_snapshot, run_migrations
 
     config = getattr(args, "_config_override", None) or load_config(args.config)
     if not config.db_path.exists():
         print("No Tiro library found. Run `uv run tiro init` first.")
         sys.exit(1)
 
+    # Symmetry with server-start (spec D4): full snapshot before a
+    # version-crossing migration. Best-effort; prints the snapshot path when one
+    # was taken so the user knows the rollback point.
+    snapshot = pre_migrate_snapshot(config)
+    if snapshot:
+        print(f"Pre-migrate snapshot: {snapshot}")
     applied = run_migrations(config.db_path)
     if applied:
         for line in applied:
@@ -837,7 +848,8 @@ def cmd_status(args):
           f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
     mdns_status = f"on ({config.mdns_hostname}.local)" if config.mdns_enabled else "disabled"
     remote_status = config.remote_url if config.remote_url else "not set"
-    print(f"mDNS: {mdns_status} | Remote URL: {remote_status}")
+    update_status = "on" if config.update_check_enabled else "off"
+    print(f"mDNS: {mdns_status} | Remote URL: {remote_status} | Update check: {update_status}")
 
     from tiro.llm import resolve_tier
     from tiro.llm_cli import check_cli_backend
