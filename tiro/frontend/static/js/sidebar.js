@@ -60,13 +60,17 @@ function applyTheme(mode) {
         }
     }
     // Show the mode you'd switch TO: sun in dark mode (→ light),
-    // moon in light mode (→ dark).
-    const themeGlyph = icon(mode === 'dark' ? 'sun' : 'moon', { size: 17 });
+    // moon in light mode (→ dark). Each target keeps its own icon size: the
+    // sidebar footer toggle renders at 17px, the phone More-sheet toggle at
+    // 22px (matching its sheet siblings) — a single hardcoded size shrinks the
+    // sheet icon after the first theme toggle.
+    const glyphName = mode === 'dark' ? 'sun' : 'moon';
     // Sidebar footer toggle wraps its icon in a `.sidebar-icon` span (empty
     // in markup, filled here); the phone More-sheet toggle (#sheet-theme-toggle)
     // instead has a bare `.ti` icon followed by its own `<span>Theme</span>`
     // label — swap just the `.ti` there so the label survives.
     document.querySelectorAll('#theme-toggle, #sheet-theme-toggle').forEach(btn => {
+        const themeGlyph = icon(glyphName, { size: btn.id === 'sheet-theme-toggle' ? 22 : 17 });
         const iconEl = btn.querySelector('.sidebar-icon');
         if (iconEl) {
             iconEl.innerHTML = themeGlyph;

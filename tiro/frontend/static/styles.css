@@ -742,7 +742,7 @@ body.has-lan-banner .content {
     color: var(--tiro-accent);
 }
 
-.page-title-serif {
+.phone-header .page-title-serif {
     font-family: var(--tiro-font-serif);
     font-size: 1.05rem;
     font-weight: 600;
@@ -956,19 +956,8 @@ main {
 }
 
 /* --- Empty state --- */
-
-.empty-state {
-    text-align: center;
-    padding: 4rem 1rem;
-    color: var(--tiro-muted);
-}
-
-.empty-state h2 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--tiro-fg-secondary);
-    margin-bottom: 0.5rem;
-}
+/* .empty-state / .empty-state h2 are the spec-normative primitives (top of
+   this file); only the onboarding-specific p/code descendants live here. */
 
 .empty-state p {
     margin-bottom: 1rem;

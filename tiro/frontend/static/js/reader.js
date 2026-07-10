@@ -737,6 +737,18 @@ function setupReaderKeyboard(articleId) {
             return;
         }
 
+        // If the phone overflow sheet is showing, let sidebar.js's generic
+        // Escape handler close it and swallow this event here — otherwise the
+        // "Escape" case below would ALSO fire and navigate back to /inbox in
+        // the same keydown (same guard pattern as the kebab dropdown above).
+        // sidebar.js registers its keydown listener first, so by the time this
+        // handler runs it has already stripped the sheet's `.open` class; the
+        // sheet stays non-`[hidden]` through its 220ms slide-out, so match on
+        // that instead of `.open` to stay correct regardless of listener order.
+        if (document.querySelector(".sheet:not([hidden])") && e.key === "Escape") {
+            return;
+        }
+
         switch (e.key) {
             case "b":
             case "Escape":
