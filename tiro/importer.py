@@ -64,6 +64,7 @@ from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import canonical_key, new_ulid
+from tiro.tags import ensure_tag
 from tiro.wiki import mark_pages_stale
 
 logger = logging.getLogger(__name__)
@@ -319,11 +320,9 @@ def _ensure_source(conn: sqlite3.Connection, src: dict) -> int:
 
 
 def _ensure_tag(conn: sqlite3.Connection, name: str) -> int:
-    row = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
-    if row is not None:
-        return row["id"]
-    cur = conn.execute("INSERT INTO tags (uid, name) VALUES (?, ?)", (new_ulid(), name))
-    return cur.lastrowid
+    # Thin wrapper over the shared helper (tiro/tags.py) — single home for the
+    # ensure-tag pattern that processor/rss/importer all needed (M4.2).
+    return ensure_tag(conn, name)
 
 
 def _ensure_entity(conn: sqlite3.Connection, name: str, entity_type: str) -> int:
