@@ -276,6 +276,29 @@ const testFileVectors = [
         "line one\n\n\nline two   has   extra   spaces",
         [{ quote: "has extra spaces", assert: "found" }]
     ),
+
+    // Boundary-condition searches from annotate.test.mjs flagged by pre-freeze
+    // review (task-2-report.md addendum). Mirror three findQuoteInPlain cases
+    // not yet represented above: equal-context duplicates with NO approxPos
+    // (the frozen schema never passes approxPos at all, so this is exactly the
+    // call shape every search here already uses — first-candidate-wins pins
+    // the FIRST occurrence), a quote at position 0, and a quote at the very
+    // end of the document.
+    makeVector(
+        "equal-context-duplicates-no-approx-first-wins",
+        "cat here. cat here.",
+        [{ quote: "cat", assert: "found" }]
+    ),
+    makeVector(
+        "quote-at-start-of-document",
+        "start of the document",
+        [{ quote: "start", suffix: " of", assert: "found" }]
+    ),
+    makeVector(
+        "quote-at-end-of-document",
+        "the document ends here",
+        [{ quote: "here", prefix: "ends ", assert: "found" }]
+    ),
 ];
 
 // ---------------------------------------------------------------------

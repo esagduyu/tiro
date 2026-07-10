@@ -1674,6 +1674,116 @@
     ]
   },
   {
+    "name": "equal-context-duplicates-no-approx-first-wins",
+    "markdown": "cat here. cat here.",
+    "plain": "cat here. cat here.",
+    "map": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+    ],
+    "searches": [
+      {
+        "quote": "cat",
+        "prefix": "",
+        "suffix": "",
+        "expect_start": 0,
+        "expect_end": 3
+      }
+    ]
+  },
+  {
+    "name": "quote-at-start-of-document",
+    "markdown": "start of the document",
+    "plain": "start of the document",
+    "map": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "searches": [
+      {
+        "quote": "start",
+        "prefix": "",
+        "suffix": " of",
+        "expect_start": 0,
+        "expect_end": 5
+      }
+    ]
+  },
+  {
+    "name": "quote-at-end-of-document",
+    "markdown": "the document ends here",
+    "plain": "the document ends here",
+    "map": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21
+    ],
+    "searches": [
+      {
+        "quote": "here",
+        "prefix": "ends ",
+        "suffix": "",
+        "expect_start": 18,
+        "expect_end": 22
+      }
+    ]
+  },
+  {
     "name": "adv-heading-bold-link-dense",
     "markdown": "## The **Rise** of [Local-First](https://tiro.app) Software\n\nWe think **local-first** apps with _real_ ownership and `no cloud` lock-in are the [future](https://example.com/future).",
     "plain": "The Rise of Local-First Software\n\nWe think local-first apps with real ownership and no cloud lock-in are the future.",
