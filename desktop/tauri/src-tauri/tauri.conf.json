@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tiro",
+  "version": "0.7.0",
+  "identifier": "app.tiro.desktop",
+  "build": {
+    "frontendDist": "../dist-placeholder"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tiro",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 480,
+        "minHeight": 600,
+        "resizable": true,
+        "visible": true,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Productivity",
+    "shortDescription": "Local-first reading OS",
+    "longDescription": "Tiro is a local-first, model-agnostic reading OS: it saves web pages and newsletters as clean markdown and enriches them with AI.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../../pyinstaller/dist/tiro-server": "tiro-server"
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

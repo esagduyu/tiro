@@ -45,3 +45,7 @@ Tiro Design System.html
 # Phase 5 desktop build artifacts (M5.0) — root build//dist/ already covered above
 desktop/pyinstaller/build/
 desktop/pyinstaller/dist/
+# Tauri shell build artifacts (M5.1) — sources tracked, build output not
+desktop/tauri/node_modules/
+desktop/tauri/src-tauri/target/
+desktop/tauri/src-tauri/gen/

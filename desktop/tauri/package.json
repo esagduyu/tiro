@@ -1,0 +1,12 @@
+{
+  "name": "tiro-desktop",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Tauri desktop shell for Tiro (wraps the PyInstaller-frozen server as a sidecar).",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
