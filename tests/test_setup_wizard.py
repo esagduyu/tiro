@@ -35,32 +35,51 @@ def test_welcome_redirects_configured_anonymous(auth_client):
 
 # --- /api/setup/* three-way gate ---------------------------------------------
 
-SETUP_POSTS = [
-    ("/api/setup/library-path", {"path": "/tmp/tiro-gate-probe-xyz"}),
-    ("/api/setup/ai", {"provider": "skip"}),
-    ("/api/setup/samples", {}),
-]
+# Parametrized (not a shared list) so each case gets a FRESH fixture + tmp_path:
+# the library-path handler repoints the live library at its dest, which would
+# invalidate a session shared across routes in one test (the new DB has no
+# session row). The probe path is derived from tmp_path — NOT a fixed
+# /tmp/tiro-gate-probe-* path, which would (a) leave a library outside tmp_path
+# across runs and (b) rebind the process-global vectorstore to it.
+SETUP_ROUTE_KEYS = ["library-path", "ai", "samples"]
 
 
-@pytest.mark.parametrize("path,body", SETUP_POSTS)
-def test_setup_routes_reject_configured_anonymous(auth_client, path, body):
+def _setup_post(key, tmp_path):
+    return {
+        "library-path": ("/api/setup/library-path", {"path": str(tmp_path / "gate-probe-lib")}),
+        "ai": ("/api/setup/ai", {"provider": "skip"}),
+        "samples": ("/api/setup/samples", {}),
+    }[key]
+
+
+# Gate-open means the handler ran: not an auth rejection (401), not a page-auth
+# redirect (302), and not an unhandled server error (500) masquerading as "open".
+def _assert_gate_open(status):
+    assert status not in (401, 302, 500), f"gate did not open cleanly: {status}"
+
+
+@pytest.mark.parametrize("key", SETUP_ROUTE_KEYS)
+def test_setup_routes_reject_configured_anonymous(auth_client, tmp_path, key):
+    path, body = _setup_post(key, tmp_path)
     r = auth_client.request("POST", path, json=body)
     assert r.status_code == 401
 
 
-@pytest.mark.parametrize("path,body", SETUP_POSTS)
-def test_setup_routes_accept_authenticated(authenticated_client, path, body):
+@pytest.mark.parametrize("key", SETUP_ROUTE_KEYS)
+def test_setup_routes_accept_authenticated(authenticated_client, tmp_path, key):
+    path, body = _setup_post(key, tmp_path)
     r = authenticated_client.request("POST", path, json=body)
-    assert r.status_code != 401 and r.status_code != 302
+    _assert_gate_open(r.status_code)
 
 
-@pytest.mark.parametrize("path,body", SETUP_POSTS)
-def test_setup_routes_accept_unconfigured(client, path, body):
+@pytest.mark.parametrize("key", SETUP_ROUTE_KEYS)
+def test_setup_routes_accept_unconfigured(client, tmp_path, key):
     # Pre-password steps (1-2) must work with no session; the same conditional
     # the /welcome page uses. Reaching the handler (any non-auth status) proves
     # the gate opened.
+    path, body = _setup_post(key, tmp_path)
     r = client.request("POST", path, json=body)
-    assert r.status_code != 401 and r.status_code != 302
+    _assert_gate_open(r.status_code)
 
 
 # --- library-path ------------------------------------------------------------

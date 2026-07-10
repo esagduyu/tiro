@@ -5315,7 +5315,7 @@ main {
 /* ============================================================================
    First-run onboarding wizard (welcome.html / welcome.js — Phase 5 M5.1).
    Standalone page layer (no sidebar chrome), built on the shared primitives
-   (.btn / .field-label) + the --tiro-* theme tokens. Namespaced `onb-` to
+   (.btn / .onb-field-label) + the --tiro-* theme tokens. Namespaced `onb-` to
    avoid the remote-access `.wizard-*` classes.
    ============================================================================ */
 .onb-body {
@@ -5396,7 +5396,7 @@ main {
     line-height: 1.55;
     color: var(--tiro-fg-secondary);
 }
-.field-label {
+.onb-field-label {
     display: block;
     font-size: 0.7rem;
     font-weight: 700;

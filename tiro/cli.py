@@ -766,6 +766,22 @@ def cmd_migrate(args):
     sys.exit(0)
 
 
+def cmd_service(args):
+    """Install/manage Tiro as a background service (launchd / systemd user unit).
+
+    Targets the CLI/uv install — the Tauri desktop app manages its own sidecar
+    and must not also be run as a service (install one or the other).
+    """
+    from tiro import service
+    from tiro.config import load_config
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    rc = service.dispatch(
+        args.service_command, config, follow=getattr(args, "follow", False)
+    )
+    sys.exit(rc)
+
+
 def cmd_audit(args):
     """Show the external-API audit log (calls, tokens, cost estimates)."""
     import json as _json
@@ -1023,6 +1039,17 @@ def main():
         "--yes", action="store_true", help="Skip the confirmation prompt",
     )
 
+    service_parser = subparsers.add_parser(
+        "service",
+        help="Run Tiro at login as a background service (launchd / systemd)",
+    )
+    service_sub = service_parser.add_subparsers(dest="service_command", required=True)
+    service_sub.add_parser("install", help="Install + start the service (survives reboot)")
+    service_sub.add_parser("uninstall", help="Stop + remove the service")
+    service_sub.add_parser("status", help="Show service state + /healthz probe")
+    service_logs = service_sub.add_parser("logs", help="Show the service log")
+    service_logs.add_argument("--follow", "-f", action="store_true", help="Stream new log lines")
+
     audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
     audit_group = audit_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
@@ -1092,6 +1119,8 @@ def main():
         cmd_migrate(args)
     elif args.command == "migrate-library":
         cmd_migrate_library(args)
+    elif args.command == "service":
+        cmd_service(args)
     else:
         parser.print_help()
         sys.exit(1)

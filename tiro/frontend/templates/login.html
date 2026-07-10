@@ -53,12 +53,8 @@
       margin: 0 0 1.75rem; font-size: 0.9rem; line-height: 1.5;
       color: var(--tiro-fg-secondary, #5C534A);
     }
-    .login-card p.sub.setup-mode {
-      color: var(--tiro-accent, #C45B3E);
-      font-weight: 600;
-    }
     .login-card form { text-align: left; }
-    .field-label {
+    .onb-field-label {
       display: block; font-size: 0.7rem; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.05em;
       color: var(--tiro-muted, #9C9389);
@@ -123,7 +119,7 @@
     <p class="sub" id="subtitle">Sign in to your library</p>
     <p class="error" id="error"></p>
     <form id="auth-form">
-      <label class="field-label" for="password">Password</label>
+      <label class="onb-field-label" for="password">Password</label>
       <input type="password" id="password" placeholder="Enter your password" autofocus autocomplete="current-password">
       <button type="submit" id="submit">Sign in</button>
     </form>

@@ -281,6 +281,35 @@ Storage Layer (all local)
 | `uv run tiro audit [--date\|--month] [--service] [--json]` | Show the external-API audit log and cost estimates |
 | `uv run tiro status` | Library status and store sizes — works without a running server |
 | `uv run tiro delete <id>` | Delete an article by id from all stores |
+| `uv run tiro migrate-library [dest]` | Copy the library to a new location (old copy is never deleted; stop the server first) |
+| `tiro service install\|uninstall\|status\|logs` | Run Tiro at login as a background service (see below) |
+
+### Run at login (`tiro service`)
+
+For the `uv`/`pip` CLI install (not the desktop app, which manages its own
+process), `tiro service` installs Tiro as a background service that starts at
+login and restarts if it crashes. It targets the resolved absolute `tiro`
+executable with an absolute `--config` path, so it works regardless of the
+working directory it was launched from.
+
+- **macOS** — a launchd user agent at `~/Library/LaunchAgents/com.tiro.app.plist`,
+  logging to `~/Library/Logs/Tiro/tiro.log`.
+- **Linux** — a systemd **user** unit at `~/.config/systemd/user/tiro.service`
+  (on a headless box run `loginctl enable-linger $USER` so it survives logout);
+  logs go to the journal.
+- **Windows** — not built in. `tiro service install` prints a ready-to-run
+  [nssm](https://nssm.cc) recipe (install the executable with `--config … run
+  --no-browser`, set auto-restart, start) and exits 1.
+
+```bash
+tiro service install      # write the service file, load/enable + start it
+tiro service status       # service-manager state + a /healthz probe
+tiro service logs [-f]    # tail the service log (‑f to follow)
+tiro service uninstall    # stop + remove (safe to run when nothing is installed)
+```
+
+Do not run the desktop app and `tiro service` at the same time — install one or
+the other.
 
 ---
 
