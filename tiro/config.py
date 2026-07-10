@@ -48,6 +48,13 @@ class TiroConfig:
     decay_threshold: float = DEFAULTS["decay_threshold"]
     backup_auto_keep: int = 10  # auto-backup retention (0 = keep none)
     vector_retry_interval: int = 5  # minutes, 0 = disabled
+    # RSS/Atom recurring ingestion (Phase 4 M4.0). rss_enabled is the kill
+    # switch: the poll loop registers whenever it's true (zero subscribed
+    # feeds just means cheap no-op cycles); per-feed intervals live on the
+    # `feeds` row, rss_default_interval_minutes is the loop's wake cadence
+    # and the default for newly-subscribed feeds.
+    rss_enabled: bool = True
+    rss_default_interval_minutes: int = 60
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"

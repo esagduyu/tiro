@@ -234,6 +234,36 @@ def _make_vector_retry_task(config: TiroConfig) -> PeriodicTask:
     return PeriodicTask("vector_retry", run_once, next_delay)
 
 
+def _make_rss_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the RSS/Atom poll loop (Phase 4 M4.0).
+
+    The loop just wakes every `rss_default_interval_minutes`; per-feed due-ness
+    and backoff are enforced inside `check_feeds`, so `next_delay` is a plain
+    constant (trivially honoring the must-not-throw contract). Registers even
+    with zero feeds — cheap no-op cycles — with `rss_enabled: False` the kill
+    switch. Keeps interval-loop backoff (a full-cycle failure backs off)."""
+    from tiro.ingestion.rss import check_feeds
+
+    def next_delay() -> float:
+        interval = config.rss_default_interval_minutes
+        if interval <= 0:
+            interval = 60
+        return interval * 60
+
+    async def run_once() -> None:
+        result = await asyncio.to_thread(check_feeds, config)
+        if result["ingested"] or result["failed_feeds"]:
+            logger.info(
+                "RSS poll: %d checked, %d ingested, %d skipped, %d failed feed(s)",
+                result["feeds_checked"], result["ingested"],
+                result["skipped"], result["failed_feeds"],
+            )
+        else:
+            logger.debug("RSS poll: no new entries")
+
+    return PeriodicTask("rss", run_once, next_delay)
+
+
 def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     """Compute seconds until next occurrence of HH:MM in user's timezone.
 
@@ -307,7 +337,12 @@ def _make_digest_task(config: TiroConfig) -> PeriodicTask:
                 except Exception as e:
                     logger.error("Scheduled digest email failed: %s", e)
 
-    return PeriodicTask("digest", run_once, next_delay)
+    # backoff=False (M4.0 T2 fold-in #1): next_delay is a time-of-day target
+    # (seconds until the next HH:MM), so a run_once failure must NOT multiply
+    # the sleep by 2**failures — that would overshoot the target and silently
+    # skip a scheduled day. Failures are still tracked; only the sleep
+    # multiplier is pinned to 1 for this loop. Interval loops keep backoff.
+    return PeriodicTask("digest", run_once, next_delay, backoff=False)
 
 
 @asynccontextmanager
@@ -365,6 +400,7 @@ async def lifespan(app: FastAPI):
     app.state.imap_task = None
     app.state.digest_task = None
     app.state.vector_retry_task = None
+    app.state.rss_task = None
 
     # Start IMAP sync background task if configured
     if config.imap_enabled and config.imap_sync_interval > 0:
@@ -380,6 +416,14 @@ async def lifespan(app: FastAPI):
     if config.vector_retry_interval > 0:
         scheduler.start_periodic("vector_retry", _make_vector_retry_task(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
+
+    # Start RSS/Atom poll background task (Phase 4 M4.0). Registers whenever
+    # rss_enabled is true, even with zero subscribed feeds (cheap no-op
+    # cycles); rss_enabled: False is the kill switch. Per-feed due-ness/backoff
+    # live inside check_feeds — the loop just wakes on the interval.
+    if config.rss_enabled:
+        scheduler.start_periodic("rss", _make_rss_task(config))
+        logger.info("RSS poll started: every %d minutes", config.rss_default_interval_minutes)
 
     # mDNS/Bonjour advertisement (Phase 3 M3.0): opt-in, and only meaningful
     # when the server is actually reachable from other devices on the LAN
@@ -616,6 +660,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_digest import router as digest_router
     from tiro.api.routes_digest_email import router as digest_email_router
     from tiro.api.routes_export import router as export_router
+    from tiro.api.routes_feeds import router as feeds_router
     from tiro.api.routes_filters import router as filters_router
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_ingest import router as ingest_router
@@ -636,7 +681,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         stats_router, export_router, settings_router, audio_router,
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
-        sessions_router, remote_router,
+        sessions_router, remote_router, feeds_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -783,6 +828,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
             "imap": _running("imap_task"),
             "digest": _running("digest_task"),
             "vector_retry": _running("vector_retry_task"),
+            "rss": _running("rss_task"),
         }
         # Additive (M4.0): richer per-loop introspection from the PeriodicTask
         # registry (last_run/last_success/last_error/consecutive_failures).

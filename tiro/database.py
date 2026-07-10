@@ -252,6 +252,38 @@ CREATE TABLE IF NOT EXISTS reading_sessions (
     dwell_json TEXT
 );
 
+-- Feeds + feed_entries (Phase 4 M4.0): recurring RSS/Atom ingestion. `feeds`
+-- holds subscriptions + per-feed conditional-GET/backoff fetch state;
+-- `feed_entries` is a dedup LEDGER (not a content store) — a row survives its
+-- article's deletion (article_id nulled by lifecycle.delete_article) so a
+-- deleted article is never resurrected by the next poll.
+CREATE TABLE IF NOT EXISTS feeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE,
+    url TEXT UNIQUE NOT NULL,
+    title TEXT,
+    site_url TEXT,
+    folder TEXT,
+    source_id INTEGER REFERENCES sources(id),
+    fetch_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    status TEXT NOT NULL DEFAULT 'active',
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_fetched_at TEXT,
+    last_etag TEXT,
+    last_modified TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS feed_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feed_id INTEGER NOT NULL REFERENCES feeds(id),
+    guid TEXT NOT NULL,
+    article_id INTEGER,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (feed_id, guid)
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -276,6 +308,7 @@ CREATE INDEX IF NOT EXISTS idx_notes_article ON notes(article_id);
 CREATE INDEX IF NOT EXISTS idx_reading_sessions_article ON reading_sessions(article_id);
 CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_device_pair_codes_expires ON device_pair_codes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_feed_entries_article ON feed_entries(article_id);
 """
 
 

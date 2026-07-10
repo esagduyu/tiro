@@ -42,6 +42,7 @@ dependencies = [
     "zstandard>=0.25.0",
     "segno>=1.6.6",
     "zeroconf>=0.150.0",
+    "feedparser>=6.0.12,<7",
 ]
 
 [project.urls]

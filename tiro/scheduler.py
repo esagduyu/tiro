@@ -38,7 +38,29 @@ class PeriodicTask:
       `last_error` + increments `consecutive_failures`, and backs the NEXT sleep
       off by `2 ** min(consecutive_failures, 5)`. A successful cycle resets the
       counter. `asyncio.CancelledError` always propagates (clean shutdown).
+
+    Fold-ins from M4.0 T1 review (Phase 4 T2):
+    - `backoff=False` (M4.0 T2 fold-in #1) disables the loop-level backoff
+      MULTIPLIER for THIS task, without touching the interval-loop backoff every
+      other loop keeps. The digest loop needs this: its `next_delay_seconds` is
+      a TIME-OF-DAY target (`_compute_sleep_until` -> seconds until the next
+      HH:MM), so multiplying that by `2**failures` overshoots the target and
+      silently skips a scheduled day. Failures are still recorded
+      (`consecutive_failures`/`last_error`) for introspection; only the sleep
+      multiplier is pinned to 1. Interval loops (imap/vector/rss) keep
+      `backoff=True` so a broken feed/inbox/embedder still backs off.
+    - `next_delay_seconds()` MUST NOT throw (M4.0 T2 fold-in #2). It's called
+      inside `_sleep_next` under the SAME isolation as `run_once`: a raised
+      exception is caught, recorded as a failure, and the loop retries after a
+      fixed fallback delay rather than dying silently. RSS's `next_delay`
+      honors the contract trivially (a constant from config); the guard exists
+      so a future buggy `next_delay` can never take a background loop down.
     """
+
+    # Fallback sleep when next_delay_seconds() itself raises (fold-in #2) — a
+    # bounded retry cadence so a transiently-throwing next_delay keeps looping
+    # instead of hard-stopping or hot-spinning.
+    _NEXT_DELAY_FALLBACK_SECONDS = 60.0
 
     def __init__(
         self,
@@ -46,11 +68,13 @@ class PeriodicTask:
         run_once: Callable[[], Awaitable[None]],
         next_delay_seconds: Callable[[], float],
         first_delay: bool = True,
+        backoff: bool = True,
     ):
         self.name = name
         self._run_once = run_once
         self._next_delay_seconds = next_delay_seconds
         self._first_delay = first_delay
+        self._backoff = backoff
         self.running = False
         self.last_run_at: str | None = None
         self.last_success_at: str | None = None
@@ -68,12 +92,31 @@ class PeriodicTask:
         }
 
     async def _sleep_next(self) -> bool:
-        """Sleep until the next cycle. Returns False if the loop should stop."""
-        delay = self._next_delay_seconds()
+        """Sleep until the next cycle. Returns False if the loop should stop.
+
+        `next_delay_seconds()` is invoked under the same isolation as
+        `run_once` (fold-in #2): if it raises, the exception is recorded as a
+        failure and the loop retries after a bounded fallback rather than
+        crashing. The backoff MULTIPLIER is skipped when `backoff=False`
+        (fold-in #1 — the digest time-of-day case)."""
+        try:
+            delay = self._next_delay_seconds()
+        except Exception as e:
+            self.consecutive_failures += 1
+            self.last_error = f"next_delay_seconds raised: {e}"
+            logger.error(
+                "Periodic task %r next_delay_seconds failed (%d consecutive): %s",
+                self.name, self.consecutive_failures, e,
+            )
+            # Sleep the fixed fallback DIRECTLY (no backoff multiplier): it's
+            # already a deliberate bounded-retry value, and multiplying it by
+            # the just-incremented failure count only muddies the cadence.
+            await asyncio.sleep(self._NEXT_DELAY_FALLBACK_SECONDS)
+            return True
         if delay <= 0:
             return False
-        backoff = 2 ** min(self.consecutive_failures, 5)
-        await asyncio.sleep(delay * backoff)
+        multiplier = 2 ** min(self.consecutive_failures, 5) if self._backoff else 1
+        await asyncio.sleep(delay * multiplier)
         return True
 
     async def _run_cycle(self) -> None:

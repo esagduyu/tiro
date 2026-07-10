@@ -239,6 +239,86 @@ async def test_run_first_mode_runs_before_sleeping():
             pass
 
 
+async def test_backoff_false_does_not_multiply_delay(monkeypatch):
+    """Fold-in #1 (digest clamp): backoff=False keeps the sleep at the raw
+    next_delay even across failures — a time-of-day target must not overshoot.
+    Failures are still tracked for introspection."""
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(secs, *a, **k):
+        slept.append(secs)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def run_once():
+        raise RuntimeError("boom")
+
+    task = PeriodicTask("digest", run_once, lambda: 100.0, backoff=False)
+    handle = asyncio.create_task(task.loop())
+    try:
+        for _ in range(500):
+            if len(slept) >= 3:
+                break
+            await real_sleep(0)
+    finally:
+        handle.cancel()
+        try:
+            await handle
+        except asyncio.CancelledError:
+            pass
+    # Every sleep stays at the raw 100.0 despite repeated failures.
+    assert slept[0] == 100.0
+    assert slept[1] == 100.0
+    assert slept[2] == 100.0
+    # But the failures ARE recorded (introspection unaffected by the clamp).
+    assert task.status()["consecutive_failures"] >= 2
+    assert "boom" in task.status()["last_error"]
+
+
+async def test_next_delay_that_raises_is_isolated_not_fatal(monkeypatch):
+    """Fold-in #2 (next_delay contract): a throwing next_delay_seconds is
+    caught, recorded as a failure, and the loop retries after the fixed
+    fallback delay instead of dying."""
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(secs, *a, **k):
+        slept.append(secs)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    ran = []
+
+    async def run_once():
+        ran.append(1)
+
+    def next_delay():
+        raise ValueError("bad delay")
+
+    task = PeriodicTask("t", run_once, next_delay)
+    handle = asyncio.create_task(task.loop())
+    try:
+        for _ in range(500):
+            if len(slept) >= 2:
+                break
+            await real_sleep(0)
+        # Loop is still alive (running), not crashed.
+        assert task.status()["running"] is True
+        assert "bad delay" in task.status()["last_error"]
+        assert task.status()["consecutive_failures"] >= 1
+        # It slept the fallback rather than propagating the exception.
+        assert slept[0] == PeriodicTask._NEXT_DELAY_FALLBACK_SECONDS
+    finally:
+        handle.cancel()
+        try:
+            await handle
+        except asyncio.CancelledError:
+            pass
+
+
 async def test_start_periodic_mirrors_state_like_start():
     """(f) start_periodic mirrors app.state.{name}_task and retains the instance."""
     state = FakeState()

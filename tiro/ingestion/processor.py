@@ -110,13 +110,21 @@ def process_article(
     published_at: datetime | None = None,
     email_sender: str | None = None,
     ingestion_method: str = "manual",
+    source_id: int | None = None,
 ) -> dict:
     """Run the full storage pipeline: save markdown, insert SQLite, embed in ChromaDB.
 
     Args:
         published_at: Override published date (used by email connector for Date header).
         email_sender: Sender email address (used by email connector for source matching).
-        ingestion_method: How the article was saved (manual/extension/email/imap).
+        ingestion_method: How the article was saved (manual/extension/email/imap/rss).
+        source_id: Pre-resolved source row id (Phase 4 M4.0, RSS). When given,
+            skip domain/email source matching entirely and attribute the
+            article to this exact source (the feed's `sources` row, created at
+            subscribe time) — the source-forcing mechanism the RSS pipeline
+            uses, parallel to how email matches on sender. `email_sender` is
+            ignored when `source_id` is passed. Keyword-only, default None, so
+            no existing caller changes.
 
     Returns a dict of the created article metadata.
     """
@@ -134,7 +142,14 @@ def process_article(
     md_path = config.articles_dir / md_filename
 
     # --- Source detection ---
-    if email_sender:
+    # A pre-resolved source_id (RSS, Phase 4) wins: skip domain/email matching
+    # and attribute to that exact source. source_name is read back from the row
+    # below for frontmatter/ChromaDB metadata.
+    forced_source_id = source_id
+    if forced_source_id is not None:
+        source_name = None  # filled from the sources row below
+        domain = None
+    elif email_sender:
         source_name = author or email_sender.split("@")[0]
         domain = None
     else:
@@ -143,16 +158,21 @@ def process_article(
 
     conn = get_connection(config.db_path)
     try:
-        if email_sender:
+        if forced_source_id is not None:
+            source_id = forced_source_id
+        elif email_sender:
             source_id = _get_or_create_email_source(conn, source_name, email_sender)
         else:
             source_id = _get_or_create_source(conn, domain)
 
-        # Check VIP status for ChromaDB metadata
+        # Check VIP status for ChromaDB metadata (and, for a forced source_id,
+        # the display name to stamp into frontmatter/vectors).
         source_row = conn.execute(
-            "SELECT is_vip FROM sources WHERE id = ?", (source_id,)
+            "SELECT name, is_vip FROM sources WHERE id = ?", (source_id,)
         ).fetchone()
         is_vip = bool(source_row["is_vip"]) if source_row else False
+        if forced_source_id is not None:
+            source_name = source_row["name"] if source_row else (author or "")
 
         # --- Save markdown file with YAML frontmatter ---
         post = frontmatter.Post(content_md)

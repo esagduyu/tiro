@@ -64,6 +64,21 @@ def scan(config: TiroConfig) -> dict:
             "SELECT COUNT(*) AS n FROM authors WHERE id NOT IN "
             "(SELECT author_id FROM article_authors WHERE author_id IS NOT NULL)"
         ).fetchone()["n"]
+        # Feed dedup-ledger housekeeping (Phase 4 M4.0, spec D2): a
+        # feed_entries row still pointing at a since-vanished article row
+        # (should never happen — lifecycle.delete_article nulls the pointer —
+        # but a hand-edit or crash could leave one), and a feed whose source_id
+        # dangles. Both are pure housekeeping (no exit-code impact), same
+        # bucket as unreferenced tags/entities/authors above; --fix nulls the
+        # pointer. NOT a structural inconsistency.
+        feed_entries_dangling = conn.execute(
+            "SELECT COUNT(*) AS n FROM feed_entries WHERE article_id IS NOT NULL "
+            "AND article_id NOT IN (SELECT id FROM articles)"
+        ).fetchone()["n"]
+        feeds_dangling_source = conn.execute(
+            "SELECT COUNT(*) AS n FROM feeds WHERE source_id IS NOT NULL "
+            "AND source_id NOT IN (SELECT id FROM sources)"
+        ).fetchone()["n"]
         wiki_page_slugs = {
             row["slug"] for row in conn.execute("SELECT slug FROM wiki_pages").fetchall()
         }
@@ -188,6 +203,8 @@ def scan(config: TiroConfig) -> dict:
         "unreferenced_authors": unreferenced_authors,
         "expired_sessions": expired_sessions,
         "expired_login_tokens": expired_login_tokens,
+        "feed_entries_dangling": feed_entries_dangling,
+        "feeds_dangling_source": feeds_dangling_source,
         "wiki_index_drift": wiki_index_drift,
         "annotations_index_drift": annotations_index_drift,
         "annotations_guarded": annotations_guarded,
@@ -209,6 +226,7 @@ def scan(config: TiroConfig) -> dict:
         unreferenced_tags == 0 and unreferenced_entities == 0 and \
         unreferenced_authors == 0 and expired_sessions == 0 and \
         expired_login_tokens == 0 and \
+        feed_entries_dangling == 0 and feeds_dangling_source == 0 and \
         wiki_index_drift == 0 and annotations_index_drift == 0
     return report
 
@@ -374,6 +392,22 @@ def fix(config: TiroConfig) -> dict:
         )
         if cur.rowcount:
             actions.append(f"vacuumed {cur.rowcount} unreferenced author(s)")
+        # Feed housekeeping (Phase 4 M4.0): NULL dangling ledger pointers and
+        # dangling feed source pointers. Never deletes the ledger row itself
+        # (its (feed_id, guid) must survive so a deleted article is never
+        # resurrected) or the feed row.
+        cur = conn.execute(
+            "UPDATE feed_entries SET article_id = NULL WHERE article_id IS NOT NULL "
+            "AND article_id NOT IN (SELECT id FROM articles)"
+        )
+        if cur.rowcount:
+            actions.append(f"nulled {cur.rowcount} dangling feed_entries pointer(s)")
+        cur = conn.execute(
+            "UPDATE feeds SET source_id = NULL WHERE source_id IS NOT NULL "
+            "AND source_id NOT IN (SELECT id FROM sources)"
+        )
+        if cur.rowcount:
+            actions.append(f"nulled {cur.rowcount} dangling feed source pointer(s)")
         cur = conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')")
         if cur.rowcount:
             actions.append(f"purged {cur.rowcount} expired session(s)")

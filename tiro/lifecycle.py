@@ -105,6 +105,16 @@ def delete_article(config: TiroConfig, article_id: int) -> bool:
         # deleted below or the DELETE FROM articles raises IntegrityError.
         conn.execute("DELETE FROM reading_sessions WHERE article_id = ?", (article_id,))
 
+        # Feed dedup ledger (Phase 4 M4.0): NULL the pointer rather than delete
+        # the row. feed_entries is a dedup LEDGER, not a content store — the
+        # (feed_id, guid) row must SURVIVE the article's deletion so the next
+        # poll sees the guid as already-seen and never resurrects a deleted
+        # article. Not an eighth store (no sidecar; never doctor-reconciled as
+        # an orphan class — just this one pointer-null). No FK from articles to
+        # feed_entries, so this isn't required for the DELETE FROM articles
+        # below to succeed; it's required for the "never resurrect" invariant.
+        conn.execute("UPDATE feed_entries SET article_id = NULL WHERE article_id = ?", (article_id,))
+
         # Wiki (Phase 1b): wiki_page_articles.article_id REFERENCES articles(id)
         # with foreign_keys=ON, so any page citing this article would make the
         # DELETE FROM articles below raise IntegrityError unless the junction

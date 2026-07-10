@@ -210,23 +210,18 @@ def _extract_author(html: str) -> str | None:
     return None
 
 
-async def fetch_and_extract(url: str) -> dict:
-    """Fetch a web page and extract its main content as clean markdown.
+def extract_from_html(html: str, final_url: str) -> dict:
+    """Shared extraction+sanitize core for both the async and sync fetchers.
+
+    Given raw page HTML and the final (post-redirect) URL, produce the clean
+    markdown dict. This is the SINGLE place the sanitize invariant
+    (`sanitize_html` before markdownify) lives for web pages — both
+    `fetch_and_extract` (async) and `fetch_and_extract_sync` (sync, used by
+    the RSS pipeline from its worker thread) call it, so the sanitize call
+    chain is never duplicated (Phase 4 M4.0 refactor).
 
     Returns dict with keys: title, author, content_md, url
     """
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=30.0,
-        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
-    ) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
-
-    # Use the final URL after redirects (e.g. substack.com/home/post/... -> author.substack.com/p/...)
-    final_url = str(response.url)
-
     # Collect content images before readability strips them
     content_images = _collect_content_images(html)
 
@@ -265,3 +260,46 @@ async def fetch_and_extract(url: str) -> dict:
         "content_md": content_md,
         "url": final_url,
     }
+
+
+async def fetch_and_extract(url: str) -> dict:
+    """Fetch a web page and extract its main content as clean markdown.
+
+    Returns dict with keys: title, author, content_md, url
+    """
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        html = response.text
+
+    # Use the final URL after redirects (e.g. substack.com/home/post/... -> author.substack.com/p/...)
+    final_url = str(response.url)
+    return extract_from_html(html, final_url)
+
+
+def fetch_and_extract_sync(url: str) -> dict:
+    """Synchronous twin of `fetch_and_extract` (Phase 4 M4.0).
+
+    The RSS pipeline (`tiro/ingestion/rss.py::check_feeds`) runs entirely on a
+    worker thread (via `asyncio.to_thread`), so it needs a blocking fetch. This
+    shares the exact extraction/sanitize core (`extract_from_html`) with the
+    async path — only the HTTP client differs (sync `httpx.Client`). Same 30s
+    timeout, redirect following, and User-Agent as the async twin.
+
+    Returns dict with keys: title, author, content_md, url
+    """
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        html = response.text
+
+    final_url = str(response.url)
+    return extract_from_html(html, final_url)
