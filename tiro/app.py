@@ -742,6 +742,8 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_search import router as search_router
     from tiro.api.routes_sessions import router as sessions_router
     from tiro.api.routes_settings import router as settings_router
+    from tiro.api.routes_setup import require_setup_access
+    from tiro.api.routes_setup import router as setup_router
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
     from tiro.api.routes_tokens import router as tokens_router
@@ -759,6 +761,13 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
+
+    # First-run onboarding setup routes (Phase 5 M5.1): gated
+    # unconfigured-OR-authenticated (see routes_setup.require_setup_access) —
+    # the pre-password steps must work with no session, exactly the trust
+    # window POST /api/auth/setup already accepts, and the surface closes the
+    # moment a password exists.
+    app.include_router(setup_router, dependencies=[Depends(require_setup_access)])
 
     # Static files and templates
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
@@ -951,10 +960,42 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/welcome", response_class=HTMLResponse)
+    async def welcome_page(request: Request):
+        """First-run onboarding wizard (Phase 5 M5.1, spec D6). Three-way gate,
+        a DELIBERATE allowlist entry in tests/test_auth.py (documented like
+        /login/qr):
+          - unconfigured  -> serve to anyone (the wizard IS how the password
+            gets set; the server is loopback-bound and passwordless-by-
+            definition at this moment — the same trust window POST
+            /api/auth/setup already accepts);
+          - configured + authenticated -> serve (revisitable; later steps stay
+            useful post-setup);
+          - configured + no session -> 302 /login (the wizard is not a bypass).
+        The password step posts to the existing POST /api/auth/setup unchanged,
+        which mints the session every step after it rides."""
+        from fastapi.responses import RedirectResponse
+
+        config = request.app.state.config
+        if config.auth_password_hash and not auth._cookie_authenticated(request):
+            return RedirectResponse(url="/login", status_code=302)
+        return templates.TemplateResponse(
+            request,
+            "welcome.html",
+            {"library_path": str(config.library), **_theme_context(request)},
+        )
+
     @app.exception_handler(auth.NotAuthenticated)
     async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
+        """Page-auth redirect. Phase 5 D6: an UNCONFIGURED visitor (no password
+        set yet) lands in the first-run wizard at /welcome rather than /login —
+        a login page would only bounce them, since there's no password to enter.
+        Once a password exists, the normal /login redirect applies."""
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/login", status_code=302)
+
+        config = request.app.state.config
+        target = "/login" if config.auth_password_hash else "/welcome"
+        return RedirectResponse(url=target, status_code=302)
 
     @app.get("/", response_class=HTMLResponse)
     async def index_redirect():

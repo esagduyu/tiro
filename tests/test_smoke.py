@@ -15,17 +15,23 @@ def test_root_redirects_to_inbox(client):
 
 
 def test_html_pages_redirect_unauthenticated(client):
+    # `client` is UNCONFIGURED (no password). Phase 5 D6 flips the unconfigured
+    # page-auth redirect target to /welcome — an unconfigured visitor to /inbox
+    # lands in the first-run wizard, not on a login page that would bounce them.
+    # (The configured+anonymous case still redirects to /login — see the
+    # auth_client-based page tests.)
     for path in ["/inbox", "/digest", "/stats", "/settings", "/graph", "/sources", "/wiki"]:
         r = client.get(path, follow_redirects=False)
         assert r.status_code == 302, f"{path} -> {r.status_code}"
-        assert r.headers["location"] == "/login"
+        assert r.headers["location"] == "/welcome"
 
 
 def test_wiki_item_page_redirects_unauthenticated(client):
     # {slug:path} route -- exercise it with an actual slash in the slug.
+    # Unconfigured -> /welcome (see the note above).
     r = client.get("/wiki/entities/anthropic", follow_redirects=False)
     assert r.status_code == 302
-    assert r.headers["location"] == "/login"
+    assert r.headers["location"] == "/welcome"
 
 
 def test_articles_list_empty_library(authenticated_client):

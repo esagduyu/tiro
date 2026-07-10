@@ -125,24 +125,20 @@
     <form id="auth-form">
       <label class="field-label" for="password">Password</label>
       <input type="password" id="password" placeholder="Enter your password" autofocus autocomplete="current-password">
-      <label class="field-label hidden" id="confirm-label" for="confirm">Confirm password</label>
-      <input type="password" id="confirm" class="hidden" placeholder="Re-enter your password" autocomplete="new-password">
       <button type="submit" id="submit">Sign in</button>
     </form>
   </div>
   <p class="login-footer">&ldquo;...without you the oracle was dumb.&rdquo; &mdash; Cicero to Tiro, 53 BC</p>
   <script>
-    let mode = "login";
+    // login.html is the sign-in surface for CONFIGURED installs only. First-run
+    // setup (setting the initial password) moved into the /welcome onboarding
+    // wizard (Phase 5 D6): if the server has no password yet, redirect there
+    // instead of flipping this page into an inline setup form.
     const $ = (id) => document.getElementById(id);
 
     fetch("/api/auth/status").then(r => r.json()).then(({ data }) => {
       if (!data.configured) {
-        mode = "setup";
-        $("subtitle").textContent = "Set a password to protect your library";
-        $("subtitle").classList.add("setup-mode");
-        $("confirm").classList.remove("hidden");
-        $("confirm-label").classList.remove("hidden");
-        $("submit").textContent = "Create password";
+        window.location.href = "/welcome";
       } else if (data.authenticated) {
         window.location.href = "/inbox";
       }
@@ -152,11 +148,7 @@
       e.preventDefault();
       $("error").textContent = "";
       const password = $("password").value;
-      if (mode === "setup" && password !== $("confirm").value) {
-        $("error").textContent = "Passwords do not match";
-        return;
-      }
-      const r = await fetch(`/api/auth/${mode}`, {
+      const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
