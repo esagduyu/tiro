@@ -299,6 +299,82 @@
       color: #C45B3E;
     }
 
+    /* Save all tabs */
+    .alltabs-btn {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px;
+      border: 1px solid #E0D5C7;
+      border-radius: 6px;
+      background: #F5EDE3;
+      color: #5C534A;
+      font-size: 12px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .alltabs-btn:hover {
+      border-color: #C45B3E;
+      color: #C45B3E;
+    }
+
+    .alltabs-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .alltabs-progress {
+      font-size: 12px;
+      color: #8A7E72;
+      margin-bottom: 10px;
+      text-align: center;
+    }
+
+    .alltabs-list {
+      max-height: 260px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+    }
+
+    .alltabs-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      padding: 5px 0;
+      border-bottom: 1px solid #EDE3D6;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .alltabs-item:last-child { border-bottom: none; }
+
+    .alltabs-item .mark {
+      flex: 0 0 auto;
+      width: 14px;
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .alltabs-item .mark.ok { color: #6B7F4E; }
+    .alltabs-item .mark.dup { color: #B8943E; }
+    .alltabs-item .mark.err { color: #C45B3E; }
+    .alltabs-item .mark.pending { color: #8A7E72; }
+
+    .alltabs-item .tab-title {
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #2C2520;
+    }
+
+    .alltabs-item .tab-status {
+      flex: 0 0 auto;
+      color: #8A7E72;
+      font-size: 10px;
+    }
+
     /* Already saved state */
     .already-icon {
       text-align: center;
@@ -349,6 +425,14 @@
         <label for="vip-toggle">Mark source as VIP</label>
       </div>
       <button class="save-btn" id="save-btn">Save to Tiro</button>
+      <button class="alltabs-btn" id="alltabs-btn">Save all tabs in this window</button>
+    </div>
+
+    <!-- Save-all-tabs state -->
+    <div id="state-alltabs" class="state">
+      <div class="alltabs-progress" id="alltabs-progress">Saving tabs…</div>
+      <div class="alltabs-list" id="alltabs-list"></div>
+      <button class="retry-btn" id="alltabs-done-btn">Done</button>
     </div>
 
     <!-- Saving state -->
@@ -397,6 +481,6 @@
     </div>
   </div>
 
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

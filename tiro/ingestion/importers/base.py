@@ -235,19 +235,9 @@ def _import_highlights(config: TiroConfig, article_row, highlights) -> tuple[int
             if result["status"] not in ("exact", "shifted"):
                 skipped += 1
                 continue
-            anchor = make_anchor(body, result["position_start"], result["position_end"])
-            append_highlight(
-                config,
-                conn,
-                article_row,
-                quote=anchor["quote"],
-                prefix=anchor["prefix"],
-                suffix=anchor["suffix"],
-                position_start=anchor["position_start"],
-                position_end=anchor["position_end"],
-                content_hash=body_hash,
-                color="yellow",
-                note_markdown=hl.note,
+            _append_anchored_highlight(
+                config, conn, article_row, body, body_hash, result,
+                note=hl.note, color="yellow",
             )
             existing_quotes.add(quote)
             imported += 1
@@ -255,6 +245,63 @@ def _import_highlights(config: TiroConfig, article_row, highlights) -> tuple[int
     finally:
         conn.close()
     return (imported, skipped)
+
+
+def _append_anchored_highlight(config, conn, article_row, body, body_hash, result, *, note, color):
+    """Given a resolved `reconcile_anchor` result (exact/shifted), build the full
+    stored anchor via `make_anchor` and create ONE highlight sidecar-first through
+    the shared `append_highlight` helper. Caller owns the transaction (no commit)
+    and supplies the already-read body + its content_hash."""
+    anchor = make_anchor(body, result["position_start"], result["position_end"])
+    append_highlight(
+        config,
+        conn,
+        article_row,
+        quote=anchor["quote"],
+        prefix=anchor["prefix"],
+        suffix=anchor["suffix"],
+        position_start=anchor["position_start"],
+        position_end=anchor["position_end"],
+        content_hash=body_hash,
+        color=color,
+        note_markdown=note,
+    )
+
+
+def create_highlight_from_quote(config: TiroConfig, article_id: int, quote: str, *, note=None, color="yellow") -> bool:
+    """Ingest-time convenience (spec D10 — the Chrome extension's "Save with
+    selection as highlight" flow): fetch the freshly-ingested article, read its
+    CURRENT markdown body, and anchor `quote` against it via the SAME D7.4
+    machinery the importer uses (`reconcile_anchor` search -> `make_anchor` ->
+    sidecar-first `append_highlight`). Returns `highlight_created`.
+
+    Soft-fail law (identical to import): a blank quote, a missing/empty body, or
+    an unlocatable quote (`hash_mismatch`/`missing`) -> return False, create
+    nothing, **never hand-place**. Opens and owns its own short transaction."""
+    quote = (quote or "").strip()
+    if not quote:
+        return False
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, uid, markdown_path FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        body = _read_article_body(config, row)
+        if not body:
+            return False
+        result = reconcile_anchor(
+            body,
+            {"quote": quote, "prefix": "", "suffix": "", "position_start": None, "content_hash": None},
+        )
+        if result["status"] not in ("exact", "shifted"):
+            return False
+        _append_anchored_highlight(config, conn, row, body, content_hash(body), result, note=note, color=color)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def _import_one(config: TiroConfig, item: ImportItem, kind: str, summary: dict) -> None:
