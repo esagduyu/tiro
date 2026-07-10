@@ -10,6 +10,16 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+### Fixed
+
+- **`load_config()` now honors `TIRO_CONFIG`** (ON-8 root-cause hardening).
+  A bare `load_config()` (from `tiro/app.py`, `scripts/`, or any script run
+  from the repo root) previously ignored the `TIRO_CONFIG` env var and
+  defaulted to CWD-relative `./config.yaml`, so a load→persist round-trip
+  could silently corrupt the owner's real config. Path precedence is now
+  explicit-arg > `TIRO_CONFIG` > `./config.yaml`, matching `run.py`/`cli.py`/
+  the MCP server. No signature change (additive default → `None`).
+
 ### Added
 
 - **Device pairing for the iOS client** (`/setup/qr?mode=device`,

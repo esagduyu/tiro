@@ -176,8 +176,20 @@ def _apply_env_overlay(config: "TiroConfig") -> None:
         setattr(config, fld.name, value)
 
 
-def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
-    """Load configuration from a YAML file, falling back to defaults."""
+def load_config(config_path: str | Path | None = None) -> TiroConfig:
+    """Load configuration from a YAML file, falling back to defaults.
+
+    Config-path precedence (ON-8 root-cause fix): explicit `config_path` arg >
+    ``TIRO_CONFIG`` env var (absolute path) > default CWD-relative
+    ``./config.yaml``. This mirrors run.py's / tiro/mcp/server.py's
+    ``_config_path()`` so a *bare* ``load_config()`` — from tiro/app.py,
+    scripts/, or any agent/script run from the repo root — can no longer
+    silently operate on the owner's real ``./config.yaml`` while
+    ``TIRO_CONFIG`` points elsewhere (which then had persist_config write to
+    the wrong file). Passing an explicit path still wins, unchanged.
+    """
+    if config_path is None:
+        config_path = os.environ.get("TIRO_CONFIG", "config.yaml")
     path = Path(config_path)
     data: dict = {}
 
