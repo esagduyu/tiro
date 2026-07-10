@@ -9,6 +9,14 @@
 # ChromaDB + real sentence-transformers embedding through the seed-the-cache
 # path (HF_HOME points at an EMPTY tmp dir, so the bundled model MUST seed).
 #
+# OFFLINE GATE (the load-bearing assertion): the whole boot runs with
+# HF_HUB_OFFLINE=1 + TRANSFORMERS_OFFLINE=1 and an EMPTY HF_HOME. Any attempt to
+# reach huggingface.co is a hard error, so if the bundled model isn't seeded as a
+# VALID, offline-loadable HF snapshot layout, init_vectorstore crashes and /healthz
+# never comes up — making the "malformed cache only loads with network" class of
+# regression structurally impossible to miss. A successful embed (semantic search
+# below) proves the seeded snapshot loaded with zero network.
+#
 # Usage:  desktop/pyinstaller/smoke.sh [path-to-tiro-server-binary]
 # Exit 0 = GATE PASSED. Any failure exits non-zero with a diagnostic.
 set -euo pipefail
@@ -72,7 +80,12 @@ YAML
 # --- boot the frozen server ---
 export TIRO_CONFIG="$CFG" TIRO_HOST="127.0.0.1" TIRO_PORT="$PORT"
 export HF_HOME="$HFHOME"          # empty -> seed-the-cache path must run
+# OFFLINE GATE: forbid ALL network to huggingface.co. With an empty HF_HOME the
+# bundled snapshot MUST seed into a valid, offline-loadable layout or the embed
+# (and thus /healthz + search) fails hard. This is finding-2's regression guard.
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export ANTHROPIC_API_KEY="" OPENAI_API_KEY=""   # offline: AI enrichment degrades gracefully
+echo "smoke: OFFLINE boot (HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1, empty HF_HOME) — model MUST load from seed"
 BASE="http://127.0.0.1:$PORT"
 LOG="$SCRATCH/server.log"
 

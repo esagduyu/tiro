@@ -42,8 +42,6 @@ tmp/
 
 # Design reference (local-only, not shipped)
 Tiro Design System.html
-# Phase 5 desktop build artifacts (M5.0)
+# Phase 5 desktop build artifacts (M5.0) — root build//dist/ already covered above
 desktop/pyinstaller/build/
 desktop/pyinstaller/dist/
-build/
-dist/

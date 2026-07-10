@@ -13,6 +13,7 @@ rebuild doesn't silently drop them).
 Build:  uv run --group packaging pyinstaller desktop/pyinstaller/tiro-server.spec
 """
 
+import shutil
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -39,31 +40,62 @@ for pattern in _data_globs:
 
 # --- Bundled embedding model (spec D1: BUNDLE + seed-the-cache). Stage the
 # refs/main snapshot of all-MiniLM-L6-v2 from THIS machine's HF cache into
-# `hf_model/models--sentence-transformers--all-MiniLM-L6-v2/...`, dereferencing
-# the HF blob symlinks into real files so the frozen bundle is self-contained.
-# entry.py copies this into the user's HF hub cache on first launch. ---
+# `hf_model/models--sentence-transformers--all-MiniLM-L6-v2/...`. entry.py
+# copies this into the user's HF hub cache on first launch, and it MUST be a
+# valid HF hub layout that loads with `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`
+# and an empty HF_HOME — a genuinely offline first boot is the whole point of
+# bundling (spec D1). See smoke.sh's offline phase, which enforces exactly this.
+#
+# LOAD-BEARING SUBTLETY (a real regression this replaces): a PyInstaller datas
+# tuple is `(source, dest_DIR)` — the file is staged at `dest_dir/basename(source)`.
+# The snapshot files (`snapshots/<rev>/config.json`, ...) are symlinks into
+# `blobs/<hash>`. If we hand PyInstaller `(f.resolve(), dest)` the source path is
+# the BLOB, so `basename` is the blob HASH — every snapshot file lands under a
+# hash name and the snapshot dir no longer contains `config.json`/`tokenizer.json`.
+# HF then can't resolve the snapshot offline and tries to reach huggingface.co,
+# which crashes an offline first boot. Fix: copy each refs/main snapshot file to
+# a build-staging tree under its TRUE name with the symlink's REAL bytes
+# (shutil.copyfile dereferences content but we control the destination name),
+# then hand PyInstaller the staged files (correct basenames). We ship ONLY the
+# snapshot tree (as real files) + refs/main — NOT the `blobs/` dir (redundant
+# once snapshots are real files) and NOT the `.no_exist/` network markers (a
+# complete snapshot needs none of them offline). ---
 MODEL_DIRNAME = "models--sentence-transformers--all-MiniLM-L6-v2"
 _hf_hub = Path.home() / ".cache" / "huggingface" / "hub" / MODEL_DIRNAME
 model_data = []
-if _hf_hub.is_dir():
-    ref_main = (_hf_hub / "refs" / "main")
-    keep_rev = ref_main.read_text().strip() if ref_main.exists() else None
-    for f in _hf_hub.rglob("*"):
-        if not f.is_file():
-            continue
-        # Only ship the refs/main snapshot (skip other revisions) to avoid
-        # dereferencing shared blobs into multiple full-size copies.
-        parts = f.relative_to(_hf_hub).parts
-        if keep_rev and parts and parts[0] == "snapshots" and len(parts) > 1 and parts[1] != keep_rev:
-            continue
-        rel_parent = ("hf_model" / f.relative_to(_hf_hub.parent).parent)
-        model_data.append((str(f.resolve()), str(rel_parent)))  # resolve() follows symlink -> real file
-else:
+if not _hf_hub.is_dir():
     raise SystemExit(
         f"Embedding model not found in HF cache at {_hf_hub}. "
         "Prime it first: `uv run python -c \"from tiro.vectorstore import init_vectorstore; "
         "import tempfile,pathlib; init_vectorstore(pathlib.Path(tempfile.mkdtemp()))\"`"
     )
+_ref_main = _hf_hub / "refs" / "main"
+if not _ref_main.exists():
+    raise SystemExit(f"HF cache at {_hf_hub} has no refs/main — reprime the model.")
+_keep_rev = _ref_main.read_text().strip()
+_snapshot_dir = _hf_hub / "snapshots" / _keep_rev
+if not _snapshot_dir.is_dir():
+    raise SystemExit(f"HF cache snapshot {_snapshot_dir} missing — reprime the model.")
+
+# Build-staging tree lives under the (git-ignored) workpath; recreated each run.
+# Files are copied under their true names so PyInstaller's basename == real name.
+_stage = SPEC_DIR / "build" / "hf_stage" / MODEL_DIRNAME
+if _stage.exists():
+    shutil.rmtree(_stage)
+(_stage / "refs").mkdir(parents=True, exist_ok=True)
+shutil.copyfile(_ref_main, _stage / "refs" / "main")
+for f in _snapshot_dir.rglob("*"):
+    if not f.is_file():  # follows symlink; True for the linked-to blob files
+        continue
+    _rel = f.relative_to(_snapshot_dir)  # e.g. config.json OR 1_Pooling/config.json
+    _target = _stage / "snapshots" / _keep_rev / _rel
+    _target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(f, _target)  # real bytes, TRUE name preserved
+for f in _stage.rglob("*"):
+    if not f.is_file():
+        continue
+    rel_parent = Path("hf_model") / MODEL_DIRNAME / f.relative_to(_stage).parent
+    model_data.append((str(f), str(rel_parent)))
 
 # --- Heavy third-party packages with native libs / dynamic imports / data
 # files. collect_all pulls binaries + datas + hiddenimports in one shot; this
@@ -117,8 +149,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # onnxruntime is chromadb's default EF that we never use; excluding it
-    # trims a large native dep. If chromadb import breaks, drop this line.
+    # Intentionally empty: nothing is excluded. (An earlier note here claimed
+    # onnxruntime — chromadb's default EF, which we don't use — was excluded to
+    # trim size; it never was, `excludes=[]` applies nothing. chromadb import
+    # paths still touch onnxruntime, so a blanket exclude risks breaking import;
+    # size is reported, not fought, per spec D1. Trimming is a later pass.)
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

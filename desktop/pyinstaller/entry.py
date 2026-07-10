@@ -15,6 +15,7 @@ build and the normal `uv run` tree share one code path.
 """
 
 import logging
+import multiprocessing
 import os
 import sys
 from pathlib import Path
@@ -67,4 +68,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # MUST be the first thing to run in the frozen process. Torch/chromadb spawn
+    # helper processes (DataLoader workers, resource_tracker); without this a
+    # frozen child re-executes the bootloader and re-enters main() instead of the
+    # multiprocessing worker bootstrap, leaking orphaned children that outlive a
+    # parent kill. Verified empirically (boot -> kill parent -> no survivors).
+    multiprocessing.freeze_support()
     main()
