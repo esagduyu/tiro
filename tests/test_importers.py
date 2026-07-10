@@ -17,7 +17,7 @@ import pytest
 from tiro.annotations import read_annotations, sidecar_stem
 from tiro.audit import read_audit_entries
 from tiro.database import get_connection
-from tiro.ingestion.importers import base, instapaper, omnivore
+from tiro.ingestion.importers import base, instapaper, omnivore, readwise
 from tiro.ingestion.importers.base import ImportHighlight, ImportItem, run_import
 from tiro.migrations import new_ulid
 
@@ -164,6 +164,78 @@ def test_omnivore_zip_slip_member_ignored(tmp_path):
     assert "EVIL" not in titles
     # Nothing escaped to the parent dir.
     assert not (tmp_path.parent / "evil.json").exists()
+
+
+# --- Readwise adapter -------------------------------------------------------
+
+
+def test_readwise_parse_items_and_highlights():
+    items = {it.title: it for it in readwise.parse_export(FIXTURES / "readwise.json")}
+    # The no-source_url item is skipped -> only 2 items.
+    assert set(items) == {"The Alpha Essay", "Beta Book"}
+
+    alpha = items["The Alpha Essay"]
+    assert alpha.url == "https://example.com/alpha"
+    assert alpha.author == "Ada Alpha"
+    assert alpha.published_at.date() == datetime(2023, 1, 2).date()
+    assert alpha.saved_at.date() == datetime(2023, 2, 3).date()  # last_highlight_at fallback
+    assert len(alpha.highlights) == 2
+    assert alpha.highlights[0].quote == "the first anchored quote"
+    assert alpha.highlights[0].note == "a reader note"
+    assert alpha.highlights[1].note is None
+
+    beta = items["Beta Book"]  # a "book" imports the same as an "article"
+    assert beta.url == "https://example.com/beta"
+    assert len(beta.highlights) == 1
+
+
+def test_readwise_item_without_source_url_skipped_with_count(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        items = list(readwise.parse_export(FIXTURES / "readwise.json"))
+    assert len(items) == 2  # the URL-less "No URL Orphan" is dropped
+    assert any("no source_url" in r.message for r in caplog.records)
+
+
+def test_readwise_accepts_wrapped_list(tmp_path):
+    """Lenient top-level shape: a dict wrapping the list under `results`."""
+    p = tmp_path / "wrapped.json"
+    p.write_text(
+        json.dumps(
+            {"results": [{"title": "W", "source_url": "https://x.test/w", "highlights": []}]}
+        )
+    )
+    items = list(readwise.parse_export(p))
+    assert len(items) == 1 and items[0].url == "https://x.test/w"
+
+
+def test_readwise_bad_json_yields_nothing(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("{not valid json")
+    assert list(readwise.parse_export(p)) == []
+
+
+# --- zip-slip guard (unit) --------------------------------------------------
+
+
+def test_is_safe_member_rejects_escaping_paths():
+    """Direct unit assertion on the zip-slip predicate: any member that
+    normpaths OUTSIDE the archive root is rejected; ordinary members pass."""
+    # Escapes root (normpath -> starts with `..`): rejected.
+    assert omnivore._is_safe_member("../secret") is False
+    assert omnivore._is_safe_member("content/../../escape.md") is False
+    assert omnivore._is_safe_member("a/../../b") is False
+    assert omnivore._is_safe_member("/abs/path") is False
+    assert omnivore._is_safe_member("\\windows\\evil") is False
+    # An internal `..` that still normpaths OUTSIDE root is caught.
+    import posixpath
+
+    assert posixpath.normpath("content/../../escape.md").startswith("..")
+    # Legitimate members pass.
+    assert omnivore._is_safe_member("metadata_0.json") is True
+    assert omnivore._is_safe_member("content/article.md") is True
+    assert omnivore._is_safe_member("a/b/c.html") is True
 
 
 # --- run_import core --------------------------------------------------------
@@ -332,9 +404,9 @@ def test_run_import_per_row_isolation(initialized_library, no_network, monkeypat
     assert summary["total"] == 3
 
 
-def test_run_import_highlights_counted_not_anchored(initialized_library, no_network):
-    """Task 4 stub: highlights are counted as skipped (not yet imported) and
-    no sidecar is written."""
+def test_run_import_highlights_anchored_sidecar_written(initialized_library, no_network):
+    """Task 5: quotes present in the body anchor (sidecar-first) and are
+    counted as imported (replaces the Task 4 counted-not-anchored stub)."""
     config = initialized_library
     item = ImportItem(
         url="https://ex.test/hl",
@@ -343,15 +415,17 @@ def test_run_import_highlights_counted_not_anchored(initialized_library, no_netw
         highlights=[ImportHighlight(quote="Some body"), ImportHighlight(quote="text")],
     )
     summary = run_import(config, [item], kind="instapaper")
-    assert summary["highlights_imported"] == 0
-    assert summary["highlights_skipped"] == 2
+    assert summary["highlights_imported"] == 2
+    assert summary["highlights_skipped"] == 0
 
     conn = get_connection(config.db_path)
     try:
         row = conn.execute("SELECT markdown_path FROM articles").fetchone()
     finally:
         conn.close()
-    assert read_annotations(config, sidecar_stem(row)) == []
+    lines = read_annotations(config, sidecar_stem(row))
+    assert len(lines) == 2
+    assert {ln["quote"] for ln in lines} == {"Some body", "text"}
 
 
 def test_run_import_progress_callback(initialized_library, no_network):
@@ -399,6 +473,27 @@ def test_cli_import_omnivore_verb(initialized_library, no_network, omnivore_zip,
     assert rc == 0
     assert "Import complete (omnivore)" in capsys.readouterr().out
     assert no_network == []  # both Omnivore items carry content
+
+
+def test_cli_import_readwise_verb(initialized_library, no_network, capsys):
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    config = initialized_library
+    args = SimpleNamespace(
+        file=str(FIXTURES / "readwise.json"), config="config.yaml", _config_override=config
+    )
+    rc = cli.cmd_import_readwise(args)
+    assert rc == 0
+    assert "Import complete (readwise)" in capsys.readouterr().out
+    # 2 items with URLs -> 2 articles (both stubs: Readwise carries no body).
+    conn = get_connection(config.db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 2
 
 
 def test_100_article_import_preserves_timestamps(initialized_library, no_network, tmp_path):

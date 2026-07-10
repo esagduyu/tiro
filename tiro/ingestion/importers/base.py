@@ -30,10 +30,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
+import frontmatter
 from markdownify import markdownify as _md
 
+from tiro.anchors import content_hash, make_anchor, reconcile_anchor
+from tiro.annotations import append_highlight, read_annotations, sidecar_stem
 from tiro.audit import log_api_call
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -168,14 +172,89 @@ def _resolve_content(item: ImportItem, kind: str) -> tuple[str, bool]:
     return _stub_body(item, kind), True
 
 
+def _read_article_body(config: TiroConfig, article_row) -> str:
+    """The article BODY as `GET /api/articles/{id}` serves it (post-frontmatter
+    markdown from `config.articles_dir / markdown_path`) -- the SAME text the
+    reader displays and `reconcile_anchor` re-locates against, so imported
+    offsets never disagree with what the reader will paint. Missing file -> ""
+    (mirrors `routes_annotations._read_article_body`'s tolerance)."""
+    md_path = Path(article_row["markdown_path"])
+    if not md_path.is_absolute():
+        md_path = config.articles_dir / md_path
+    if not md_path.exists():
+        logger.warning("Markdown file not found for highlight import: %s", md_path)
+        return ""
+    return frontmatter.load(str(md_path)).content
+
+
 def _import_highlights(config: TiroConfig, article_row, highlights) -> tuple[int, int]:
-    """STUB (Task 4). Real `reconcile_anchor`-based sidecar-first anchoring
-    lands in Task 5 (spec D7.4); until then every incoming highlight is
-    honestly reported as skipped (not yet imported) so counts never overclaim.
+    """Anchor each imported highlight against the article's CURRENT markdown
+    body via `tiro/anchors.py` search semantics (spec D7.4 — the trust-critical
+    ON-7 Q7 law), writing anchored ones sidecar-first through the shared
+    `annotations.append_highlight` helper the CRUD API uses.
+
+    Per highlight: search the body for the quote with
+    `reconcile_anchor(body, {quote, prefix:"", suffix:"", position_start:None,
+    content_hash:None})`. A `shifted`/`exact` result yields real offsets, from
+    which `make_anchor(body, start, end)` builds the full stored anchor (real
+    prefix/suffix) plus the current body's `content_hash`. `hash_mismatch`/
+    `missing` (quote not found -- common when a re-fetched extraction differs
+    from the source app's) -> **skipped, counted, NEVER hand-placed**.
+
+    Re-run idempotency (spec D7.4): dedupe by exact `quote` against the
+    article's current sidecar lines AND against quotes anchored earlier in this
+    same call -- an already-present quote is a silent no-op (counted in
+    NEITHER bucket), so re-importing catches only genuinely new highlights.
+
     Returns `(imported, skipped)`."""
     if not highlights:
         return (0, 0)
-    return (0, len(highlights))
+    body = _read_article_body(config, article_row)
+    if not body:
+        # No body to anchor against -- every highlight is honestly unlocatable.
+        return (0, len(highlights))
+    body_hash = content_hash(body)
+    existing_quotes = {ln.get("quote") for ln in read_annotations(config, sidecar_stem(article_row))}
+
+    imported = 0
+    skipped = 0
+    conn = get_connection(config.db_path)
+    try:
+        for hl in highlights:
+            quote = (hl.quote or "").strip()
+            if not quote:
+                skipped += 1
+                continue
+            if quote in existing_quotes:
+                continue  # dedupe: already anchored -> silent no-op, uncounted
+            result = reconcile_anchor(
+                body,
+                {"quote": quote, "prefix": "", "suffix": "", "position_start": None,
+                 "content_hash": None},
+            )
+            if result["status"] not in ("exact", "shifted"):
+                skipped += 1
+                continue
+            anchor = make_anchor(body, result["position_start"], result["position_end"])
+            append_highlight(
+                config,
+                conn,
+                article_row,
+                quote=anchor["quote"],
+                prefix=anchor["prefix"],
+                suffix=anchor["suffix"],
+                position_start=anchor["position_start"],
+                position_end=anchor["position_end"],
+                content_hash=body_hash,
+                color="yellow",
+                note_markdown=hl.note,
+            )
+            existing_quotes.add(quote)
+            imported += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return (imported, skipped)
 
 
 def _import_one(config: TiroConfig, item: ImportItem, kind: str, summary: dict) -> None:
@@ -207,9 +286,6 @@ def _import_one(config: TiroConfig, item: ImportItem, kind: str, summary: dict) 
         published_at=published,
         ingestion_method="import",
     )
-    summary["imported"] += 1
-    if is_stub:
-        summary["stub_articles"] += 1
 
     if tags:
         conn = get_connection(config.db_path)
@@ -218,6 +294,14 @@ def _import_one(config: TiroConfig, item: ImportItem, kind: str, summary: dict) 
             conn.commit()
         finally:
             conn.close()
+
+    # Count the article as imported only AFTER tag-attach: if `attach_tags`
+    # raised, `run_import`'s per-item handler already counts this item in
+    # `failed` -- incrementing `imported` above too would double-count the
+    # same item across two buckets.
+    summary["imported"] += 1
+    if is_stub:
+        summary["stub_articles"] += 1
 
     conn = get_connection(config.db_path)
     try:

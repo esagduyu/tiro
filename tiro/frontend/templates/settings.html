@@ -108,6 +108,31 @@
     <button id="btn-configure-tts" class="settings-configure-btn">Configure TTS</button>
 </div>
 
+<!-- Import Library (M4.2) -->
+<div class="settings-section">
+    <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("download", size=18) }}</span>Import Library</h3>
+    <p class="settings-section-desc">Import your reading history and highlights from Readwise, Instapaper, or Omnivore. Highlights are anchored to article text where the quote can be located; unlocatable ones are skipped.</p>
+
+    <div class="settings-field">
+        <label for="import-kind">Source</label>
+        <select id="import-kind">
+            <option value="readwise">Readwise (JSON export)</option>
+            <option value="instapaper">Instapaper (CSV export)</option>
+            <option value="omnivore">Omnivore (export zip)</option>
+        </select>
+    </div>
+    <div class="settings-field">
+        <label for="import-file">Export file</label>
+        <input type="file" id="import-file">
+    </div>
+
+    <div id="import-status" class="settings-status"></div>
+</div>
+
+<div class="settings-configure">
+    <button id="btn-start-import" class="settings-configure-btn">Start Import</button>
+</div>
+
 <!-- API Tokens -->
 <div class="settings-section">
     <h3 class="settings-section-title"><span class="settings-section-icon">{{ icon("copy", size=18) }}</span>API Tokens</h3>
@@ -1215,6 +1240,103 @@
         if (e.target === overlayEl) overlayEl.style.display = 'none';
     });
 
+    // --- Import Library (M4.2) ---
+    // Counts are numeric (coerced) and error/status text goes through
+    // textContent — no server string ever reaches an innerHTML sink here
+    // (sanitize invariant), consistent with the token card's DOM-built rows.
+    let importPollTimer = null;
+
+    function importSummaryLine(d) {
+        return (Number(d.processed) || 0) + (d.total ? ' / ' + (Number(d.total) || 0) : '') +
+            ' processed — ' + (Number(d.imported) || 0) + ' imported, ' +
+            (Number(d.skipped) || 0) + ' skipped, ' + (Number(d.failed) || 0) + ' failed, ' +
+            (Number(d.highlights_imported) || 0) + ' highlights';
+    }
+
+    function renderImportStatus(d) {
+        var el = document.getElementById('import-status');
+        var btn = document.getElementById('btn-start-import');
+        el.textContent = '';
+        if (!d || (!d.kind && d.running === false)) {
+            btn.disabled = false;
+            return;
+        }
+        var card = document.createElement('div');
+        card.className = 'status-card';
+        var header = document.createElement('div');
+        header.className = 'status-card-header';
+        var ind = document.createElement('span');
+        ind.className = 'status-indicator ' + (d.error ? 'status-off' : 'status-ok');
+        var strong = document.createElement('strong');
+        strong.textContent = d.running ? 'Importing…' : (d.error ? 'Import failed' : 'Import complete');
+        header.appendChild(ind);
+        header.appendChild(strong);
+        card.appendChild(header);
+        var detail = document.createElement('div');
+        detail.className = 'status-detail muted';
+        detail.textContent = d.error ? String(d.error) : importSummaryLine(d);
+        card.appendChild(detail);
+        el.appendChild(card);
+        btn.disabled = !!d.running;
+    }
+
+    async function loadImportStatus() {
+        try {
+            var res = await fetch('/api/import/status');
+            var json = await res.json();
+            renderImportStatus(json.data);
+            if (json.data && json.data.running) startImportPolling();
+        } catch (err) { /* status is best-effort */ }
+    }
+
+    function startImportPolling() {
+        if (importPollTimer) return;
+        importPollTimer = setInterval(async function() {
+            try {
+                var res = await fetch('/api/import/status');
+                var json = await res.json();
+                renderImportStatus(json.data);
+                var d = json.data || {};
+                if (!d.running) {
+                    clearInterval(importPollTimer);
+                    importPollTimer = null;
+                    if (d.error) showToast('Import failed', 'error');
+                    else showToast('Import complete: ' + (Number(d.imported) || 0) + ' imported', 'success');
+                }
+            } catch (err) { /* keep polling */ }
+        }, 2000);
+    }
+
+    document.getElementById('btn-start-import').addEventListener('click', async function() {
+        var btn = this;
+        var kind = document.getElementById('import-kind').value;
+        var fileInput = document.getElementById('import-file');
+        if (!fileInput.files || !fileInput.files.length) {
+            showToast('Choose an export file first', 'error');
+            return;
+        }
+        var fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        btn.disabled = true;
+        try {
+            var res = await fetch('/api/import/' + kind, { method: 'POST', body: fd });
+            var json = await res.json();
+            if (!res.ok) {
+                var running = json.detail && json.detail.error === 'import_running';
+                var msg = running ? 'An import is already running'
+                    : (typeof json.detail === 'string' ? json.detail : 'Import failed to start');
+                showToast(msg, 'error');
+                btn.disabled = false;
+                return;
+            }
+            renderImportStatus(json.data);
+            startImportPolling();
+        } catch (err) {
+            showToast('Connection error', 'error');
+            btn.disabled = false;
+        }
+    });
+
     // Load on init
     loadNetworkSettings();
     loadAppearanceSettings();
@@ -1222,6 +1344,7 @@
     loadEmailSettings();
     loadTtsSettings();
     loadTokens();
+    loadImportStatus();
 })();
 </script>
 {% endblock %}

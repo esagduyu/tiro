@@ -1,10 +1,12 @@
 """Shared tag helpers: ensure a tag row exists, link tags to an article.
 
-Centralizes the `INSERT OR IGNORE INTO tags` / `article_tags` pattern that
-`processor.py` (AI tags), `rss.py` (folder tags), and `importer.py` (bundle
-tag rebuild) each hand-rolled. Deterministic, no AI — used for OPML folder
-tags, the `import-stub` tag, and Instapaper folder tags. Never commits; the
-caller owns the transaction boundary.
+Deterministic, no AI. Current callers: `tiro/importer.py` (bundle-import tag
+rebuild) and `tiro/ingestion/importers/base.py` (the `import-stub` tag plus
+the Instapaper/Omnivore folder→tag mapping). `processor.py` still hand-rolls
+its own AI-tag `INSERT OR IGNORE INTO tags`, and RSS folder tags don't route
+through here — so this module centralizes the pattern for the import paths
+only, not library-wide. Never commits; the caller owns the transaction
+boundary.
 """
 
 import sqlite3

@@ -564,6 +564,19 @@ def cmd_import_omnivore(args):
     return _run_cli_import(config, omnivore.parse_export(path), kind="omnivore")
 
 
+def cmd_import_readwise(args):
+    """Import a Readwise JSON export (articles + books; highlights anchored)."""
+    from tiro.config import load_config
+    from tiro.ingestion.importers import readwise
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"Error: file not found: {path}")
+        sys.exit(1)
+    return _run_cli_import(config, readwise.parse_export(path), kind="readwise")
+
+
 def cmd_delete(args):
     """Delete an article by id from all stores."""
     from tiro.config import load_config
@@ -888,6 +901,11 @@ def main():
     )
     omnivore_parser.add_argument("file", help="Path to the Omnivore export .zip")
 
+    readwise_parser = subparsers.add_parser(
+        "import-readwise", help="Import a Readwise JSON export (always skips existing)"
+    )
+    readwise_parser.add_argument("file", help="Path to the Readwise JSON export")
+
     delete_parser = subparsers.add_parser("delete", help="Delete an article by id")
     delete_parser.add_argument("id", type=int)
 
@@ -955,6 +973,8 @@ def main():
         cmd_import_instapaper(args)
     elif args.command == "import-omnivore":
         cmd_import_omnivore(args)
+    elif args.command == "import-readwise":
+        cmd_import_readwise(args)
     elif args.command == "delete":
         cmd_delete(args)
     elif args.command == "setup-email":

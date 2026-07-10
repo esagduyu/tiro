@@ -189,6 +189,93 @@ def write_annotations(config: TiroConfig, stem: str, lines: list[dict]) -> None:
     _atomic_write_text(path, text)
 
 
+def append_highlight(
+    config: TiroConfig,
+    conn: sqlite3.Connection,
+    article,
+    *,
+    quote: str,
+    prefix: str,
+    suffix: str,
+    position_start: int | None,
+    position_end: int | None,
+    content_hash: str,
+    color: str,
+    note_markdown: str | None = None,
+    uid: str | None = None,
+    now: str | None = None,
+) -> str:
+    """Create ONE highlight the M2.1 sidecar-first way, shared by the
+    annotations CRUD API (`routes_annotations.py`) and the Phase 4 importer
+    (`importers/base.py`) so the file-then-rows ORDER and the on-disk line
+    shape live in exactly one place.
+
+    Order (the M2.1 invariant — a crash between the two leaves the file ahead
+    of the index, which `reconcile_annotations()` heals files-win):
+      1. FILE FIRST: append the JSONL line to `annotations/{stem}.jsonl`.
+      2. ROW SECOND: insert the derived `highlights` row, plus an anchored
+         `notes` row when `note_markdown` is a non-blank string.
+
+    Contains ZERO `await` points (it is a plain sync function) so an async
+    caller keeps the no-await read-modify-write guarantee. Never commits — the
+    caller owns the transaction boundary on `conn`. Returns the highlight uid.
+
+    `article` may be any mapping exposing `["uid"]` and `["id"]`."""
+    uid = uid or new_ulid()
+    now = now or _now_iso()
+    stem = sidecar_stem(article)
+    note = note_markdown if (note_markdown and note_markdown.strip()) else None
+
+    # 1. FILE FIRST.
+    lines = read_annotations(config, stem)
+    lines.append(
+        {
+            "uid": uid,
+            "article_uid": article["uid"],
+            "quote": quote,
+            "prefix": prefix,
+            "suffix": suffix,
+            "position_start": position_start,
+            "position_end": position_end,
+            "content_hash": content_hash,
+            "color": color,
+            "note_markdown": note,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    write_annotations(config, stem, lines)
+
+    # 2. ROW SECOND (derived cache — reconcile heals if this half never runs).
+    cur = conn.execute(
+        """INSERT INTO highlights
+           (uid, article_id, quote_text, prefix_context, suffix_context,
+            text_position_start, text_position_end, content_hash, color,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            uid,
+            article["id"],
+            quote,
+            prefix,
+            suffix,
+            position_start,
+            position_end,
+            content_hash,
+            color,
+            now,
+            now,
+        ),
+    )
+    if note is not None:
+        conn.execute(
+            "INSERT INTO notes (uid, article_id, highlight_id, body_markdown,"
+            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (new_ulid(), article["id"], cur.lastrowid, note, now, now),
+        )
+    return uid
+
+
 def read_note(config: TiroConfig, stem: str) -> str | None:
     """Read `{notes}/{stem}.md`. Missing file -> `None`."""
     path = notes_dir(config) / f"{stem}.md"

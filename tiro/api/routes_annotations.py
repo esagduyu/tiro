@@ -44,6 +44,7 @@ from pydantic import BaseModel
 from tiro.anchors import content_hash, make_anchor, reconcile_anchor
 from tiro.annotations import (
     annotations_dir,
+    append_highlight,
     delete_note,
     read_annotations,
     sidecar_stem,
@@ -250,53 +251,24 @@ async def create_highlight(article_id: int, body: HighlightCreateRequest, reques
             raise HTTPException(status_code=400, detail=str(e)) from e
 
         now = _now_iso()
-        uid = new_ulid()
         current_hash = content_hash(text)
 
-        # 1. FILE FIRST (truth): append the new line to the sidecar JSONL.
-        stem = sidecar_stem(article)
-        lines = read_annotations(config, stem)
-        lines.append(
-            {
-                "uid": uid,
-                "article_uid": article["uid"],
-                "quote": anchor["quote"],
-                "prefix": anchor["prefix"],
-                "suffix": anchor["suffix"],
-                "position_start": anchor["position_start"],
-                "position_end": anchor["position_end"],
-                "content_hash": current_hash,
-                "color": color,
-                "note_markdown": None,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        write_annotations(config, stem, lines)
-
-        # 2. INDEX SECOND (derived cache). If this insert fails after the file
-        # write above succeeded, the sidecar is ahead of SQLite -- the next
-        # `reconcile_annotations()` run (server boot / `tiro doctor --fix`)
-        # sees a line with no matching row and inserts it, healing the drift.
-        conn.execute(
-            """INSERT INTO highlights
-               (uid, article_id, quote_text, prefix_context, suffix_context,
-                text_position_start, text_position_end, content_hash, color,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                uid,
-                article_id,
-                anchor["quote"],
-                anchor["prefix"],
-                anchor["suffix"],
-                anchor["position_start"],
-                anchor["position_end"],
-                current_hash,
-                color,
-                now,
-                now,
-            ),
+        # Sidecar-first (file then row, M2.1 invariant) via the shared helper
+        # the importer also uses -- one place owns the line shape + order. If
+        # the row insert fails after the file write, the sidecar is ahead of
+        # SQLite and the next `reconcile_annotations()` run heals the drift.
+        uid = append_highlight(
+            config,
+            conn,
+            article,
+            quote=anchor["quote"],
+            prefix=anchor["prefix"],
+            suffix=anchor["suffix"],
+            position_start=anchor["position_start"],
+            position_end=anchor["position_end"],
+            content_hash=current_hash,
+            color=color,
+            now=now,
         )
         conn.commit()
 
