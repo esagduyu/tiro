@@ -2,6 +2,121 @@
    All colors use --tiro-* variables defined in theme files
    (themes/papyrus.css, themes/roman-night.css) */
 
+/* ============ tokens (non-color; colors live in themes/) ============ */
+:root {
+  --tiro-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --tiro-font-serif: Georgia, "Times New Roman", serif;
+  --tiro-radius-sm: 4px; --tiro-radius-md: 6px;
+  --tiro-radius-lg: 10px; --tiro-radius-xl: 12px;
+}
+
+/* ============ primitives (spec §5 — measurements are normative) ===== */
+.btn { display: inline-flex; align-items: center; gap: 6px;
+  font-family: inherit; font-size: 0.85rem; font-weight: 500;
+  padding: 0.5rem 1rem; border-radius: var(--tiro-radius-md);
+  border: 1px solid var(--tiro-border); background: none;
+  color: var(--tiro-fg-secondary); cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out,
+    border-color 120ms ease-out; }
+.btn-primary { background: var(--tiro-accent); border-color: var(--tiro-accent);
+  color: #fff; font-weight: 600; }
+.btn-primary:hover { background: var(--tiro-accent-hover);
+  border-color: var(--tiro-accent-hover); }
+.btn-ghost { color: var(--tiro-muted); }
+.btn-ghost:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-fg-secondary); border-color: var(--tiro-fg-secondary); }
+.btn-gold { border-color: var(--tiro-gold); color: var(--tiro-gold);
+  background: var(--tiro-bg-surface); }
+.btn-gold.active { background: var(--tiro-gold); color: #fff; }
+.btn-danger { border-color: var(--tiro-tier-must-read);
+  color: var(--tiro-tier-must-read); }
+.btn-danger:hover { background: var(--tiro-tier-must-read); color: #fff; }
+.btn-block { display: flex; width: 100%; justify-content: center;
+  padding: 0.75rem 1.5rem; border-radius: var(--tiro-radius-lg);
+  font-size: 0.9rem; font-weight: 600; }
+.btn:disabled { opacity: 0.6; cursor: default; }
+.icon-btn { width: 32px; height: 28px; display: inline-flex;
+  align-items: center; justify-content: center;
+  border: 1px solid var(--tiro-border); border-radius: var(--tiro-radius-sm);
+  background: transparent; color: var(--tiro-muted); cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out; }
+.icon-btn:hover { background: var(--tiro-bg-hover); }
+.icon-btn.active .ti { transform: scale(1.12);
+  transition: transform 120ms ease-out; }
+/* VIP toggle in the reader header cluster (M3.2 T6) — active reads as gold/filled,
+   mirroring the meta-line .vip-star.active. */
+.vip-btn.active { color: var(--tiro-gold); }
+.icon-btn-sm { width: 26px; height: 24px; }
+.pill { display: inline-block; font-size: 0.65rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem; border-radius: 9px;
+  background: var(--tiro-bg-surface); }
+.pill-tier { font-weight: 700; }
+.tag-chip { display: inline-block; font-size: 0.7rem;
+  background: var(--tiro-bg-surface); color: var(--tiro-fg-secondary);
+  padding: 0.15rem 0.5rem; border-radius: 3px; }
+a.tag-chip:hover, button.tag-chip:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-accent); }
+.filter-pill { display: inline-flex; align-items: center; gap: 5px;
+  padding: 0.2rem 0.5rem; background: var(--tiro-bg-surface);
+  border: 1px solid var(--tiro-border); border-radius: 12px;
+  font-size: 0.72rem; color: var(--tiro-fg-secondary); cursor: pointer; }
+.filter-pill:hover { border-color: var(--tiro-accent);
+  color: var(--tiro-accent); }
+.callout { background: var(--tiro-bg-surface); padding: 0.9rem 1.1rem;
+  border-left: 3px solid var(--tiro-accent);
+  border-radius: 0 var(--tiro-radius-md) var(--tiro-radius-md) 0;
+  font-size: 0.9rem; line-height: 1.6; color: var(--tiro-fg-secondary); }
+.callout-secondary { border-left-color: var(--tiro-secondary); }
+.callout-gold { border-left-color: var(--tiro-gold);
+  color: var(--tiro-gold-hover); }
+.callout-danger { border-left-color: var(--tiro-tier-must-read); }
+.stat-card { text-align: center; padding: 1rem 0.5rem;
+  background: var(--tiro-bg); border: 1px solid var(--tiro-border);
+  border-radius: 8px; }
+.stat-card .stat-value { display: block; font-family: var(--tiro-font-serif);
+  font-size: 1.5rem; font-weight: 700; color: var(--tiro-fg);
+  line-height: 1.2; margin-bottom: 2px; }
+.stat-card .stat-label { font-size: 0.75rem; color: var(--tiro-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
+.stat-card-hero { background: var(--tiro-bg-surface);
+  border-color: var(--tiro-accent); }
+.stat-card-hero .stat-value { color: var(--tiro-accent); }
+.empty-state { text-align: center; padding: 3rem 1rem;
+  color: var(--tiro-muted); }
+.empty-state .ti { width: 40px; height: 40px; margin-bottom: 12px; }
+.empty-state h2 { font-family: var(--tiro-font-serif); font-size: 1.3rem;
+  color: var(--tiro-fg); margin: 0 0 6px; }
+.mode-pill { padding: 0.4rem 0.9rem; border: 1px solid var(--tiro-border);
+  border-radius: var(--tiro-radius-sm); background: none;
+  color: var(--tiro-muted); font-family: inherit; font-size: 0.8rem;
+  font-weight: 500; cursor: pointer; }
+.mode-pill:hover { background: var(--tiro-bg-hover);
+  color: var(--tiro-fg-secondary); }
+.mode-pill.active { background: var(--tiro-fg); border-color: var(--tiro-fg);
+  color: var(--tiro-bg); }
+.tabs-underline { display: flex; border-bottom: 2px solid var(--tiro-border); }
+.tabs-underline .tab { padding: 0.6rem 1.25rem; font-size: 0.9rem;
+  font-weight: 500; color: var(--tiro-muted); cursor: pointer;
+  margin-bottom: -2px; border-bottom: 2px solid transparent; }
+.tabs-underline .tab.active { color: var(--tiro-fg);
+  border-bottom-color: var(--tiro-accent); }
+.page-title-serif { font-family: var(--tiro-font-serif); font-weight: 700;
+  letter-spacing: -0.02em; }
+.serif-num { font-family: var(--tiro-font-serif); }
+.ti { flex-shrink: 0; vertical-align: -0.15em; }
+
+/* Input focus contract (spec §5): applies to every bare input/select/
+   textarea in the app. Page-local `.foo-input:focus { border-color: ... }`
+   rules that already point at --tiro-accent are additive/harmless on top
+   of this (same color); none found setting a conflicting border color. */
+input:focus, select:focus, textarea:focus {
+  border-color: var(--tiro-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent) 15%, transparent);
+  outline: none;
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -18,7 +133,7 @@ body {
 }
 
 /* --- LAN-over-HTTP warning banner (M3.0 Task 4) ---
-   Fixed full-width top strip, above the sidebar/mobile-header (higher
+   Fixed full-width top strip, above the sidebar/phone-header (higher
    z-index) so it never gets tucked behind them. Only ever present in the
    DOM when insecure_lan_http is true (Jinja conditional in base.html), so
    the body.has-lan-banner rules below only ever apply alongside it -- a
@@ -55,6 +170,9 @@ body {
 }
 
 .lan-http-banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     position: absolute;
     right: 0.5rem;
     top: 50%;
@@ -62,7 +180,6 @@ body {
     background: none;
     border: none;
     color: #fff;
-    font-size: 1.2rem;
     line-height: 1;
     cursor: pointer;
     padding: 0.25rem 0.5rem;
@@ -77,8 +194,7 @@ body {
    mobile header, or content -- applied only when body carries the
    has-lan-banner class (set server-side alongside the banner itself). */
 body.has-lan-banner .sidebar,
-body.has-lan-banner .mobile-header,
-body.has-lan-banner .sidebar-overlay {
+body.has-lan-banner .phone-header {
     top: var(--tiro-lan-banner-h);
 }
 
@@ -94,26 +210,21 @@ body.has-lan-banner .content {
     /* The banner's text wraps onto two (sometimes three) lines on narrow
        viewports (unlike the single-line desktop case), so reserve roughly
        double the height here -- deliberately approximate, not measured,
-       per the "keep it simple" guidance in the M3.0 Task 4 brief. Also
-       re-override .sidebar's top/height here: the desktop rule above still
-       applies at this breakpoint (nothing narrows it back down), and the
-       mobile drawer (.sidebar.open, slid in from the hamburger button)
-       would otherwise start under the banner's single-line offset instead
-       of its wrapped one, clipping into the banner's lower lines. */
+       per the "keep it simple" guidance in the M3.0 Task 4 brief. The
+       sidebar is hidden entirely at this breakpoint; the slim phone header
+       is the fixed top element that must sit below the (wrapped) banner. */
     .lan-http-banner {
         padding: 0.35rem 2rem;
     }
-    body.has-lan-banner .mobile-header,
-    body.has-lan-banner .sidebar {
+    body.has-lan-banner .phone-header {
         top: calc(var(--tiro-lan-banner-h) * 2);
     }
-    body.has-lan-banner .sidebar {
-        height: calc(100vh - var(--tiro-lan-banner-h) * 2);
-    }
     body.has-lan-banner .content {
-        padding-top: calc(60px + var(--tiro-lan-banner-h) * 2);
+        padding-top: calc(52px + env(safe-area-inset-top) + var(--tiro-lan-banner-h) * 2);
     }
 }
+
+/* ============ chrome (sidebar, icon rail, tab bar, mobile header, sheets) === */
 
 /* --- Layout: Sidebar --- */
 
@@ -121,7 +232,7 @@ body.has-lan-banner .content {
     position: fixed;
     top: 0;
     left: 0;
-    width: 220px;
+    width: 240px;
     height: 100vh;
     background: var(--tiro-sidebar-bg);
     border-right: 1px solid var(--tiro-border);
@@ -132,7 +243,7 @@ body.has-lan-banner .content {
 }
 
 .sidebar-brand {
-    padding: 1.25rem 1rem;
+    padding: 1.1rem 1rem;
     display: flex;
     align-items: center;
     gap: 0.6rem;
@@ -146,11 +257,26 @@ body.has-lan-banner .content {
 }
 
 .sidebar-logo img {
-    border-radius: 6px;
+    border-radius: 7px;
+}
+
+.sidebar-brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.1;
+    min-width: 0;
+}
+
+.sidebar-brand-overline {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--tiro-accent);
 }
 
 .sidebar-title {
-    font-size: 1rem;
+    font-size: 0.98rem;
     font-weight: 600;
     color: var(--tiro-fg);
     letter-spacing: -0.01em;
@@ -161,16 +287,29 @@ body.has-lan-banner .content {
     padding: 0.5rem 0;
 }
 
+.sidebar-section {
+    padding: 0.35rem 0 0.5rem;
+}
+
+.sidebar-section-label {
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--tiro-muted);
+    padding: 0.2rem 0.9rem 0.35rem;
+}
+
 .sidebar-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.65rem 1rem;
+    gap: 0.7rem;
+    padding: 0.5rem 1.1rem;
     color: var(--tiro-fg-secondary);
     text-decoration: none;
-    font-size: 0.88rem;
+    font-size: 0.86rem;
     font-weight: 500;
-    transition: background 0.15s, color 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out;
     border-left: 3px solid transparent;
     position: relative;
 }
@@ -187,10 +326,17 @@ body.has-lan-banner .content {
     font-weight: 600;
 }
 
+.sidebar-item .ti {
+    flex-shrink: 0;
+}
+
+/* Theme-toggle icon wrapper (span filled with an SVG by sidebar.js) --
+   sized to line up with the 17px nav icons. */
 .sidebar-icon {
-    font-size: 1.1rem;
-    width: 1.4rem;
-    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
     flex-shrink: 0;
 }
 
@@ -207,101 +353,55 @@ body.has-lan-banner .content {
 }
 
 .sidebar-footer {
-    padding: 0.75rem 1rem;
+    padding: 0.6rem 0.75rem;
     border-top: 1px solid var(--tiro-border);
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.15rem;
 }
 
-.sidebar-theme-toggle {
+.sidebar-footer-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.7rem;
     border: none;
     background: none;
-    font-size: 0.88rem;
+    font-family: inherit;
+    font-size: 0.82rem;
     font-weight: 500;
     cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    border-radius: var(--tiro-radius-md);
     color: var(--tiro-muted);
-    transition: background 0.15s, color 0.15s;
+    text-decoration: none;
+    transition: background 120ms ease-out, color 120ms ease-out;
     text-align: left;
     width: 100%;
 }
-.sidebar-theme-toggle .sidebar-icon {
-    font-size: 1.1rem;
+
+.sidebar-footer-item .ti {
+    flex-shrink: 0;
 }
 
-.sidebar-theme-toggle:hover {
+.sidebar-footer-item:hover {
     background: var(--tiro-bg-hover);
     color: var(--tiro-fg);
 }
 
-.sidebar-about {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem;
-    color: var(--tiro-muted);
-    text-decoration: none;
-    font-size: 0.8rem;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
-}
-
-.sidebar-about:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
-.sidebar-logout-btn {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    border: none;
-    background: none;
-    font-family: inherit;
-    font-size: 0.8rem;
-    cursor: pointer;
-    padding: 0.5rem;
-    color: var(--tiro-muted);
-    text-decoration: none;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
-    text-align: left;
-    width: 100%;
+.sidebar-footer-item.active {
+    color: var(--tiro-accent);
 }
 
 .sidebar-logout-btn:hover {
-    background: var(--tiro-bg-hover);
     color: var(--tiro-accent);
 }
 
 /* --- Save button (sidebar) --- */
 
-.sidebar-save-btn {
-    background: var(--tiro-accent);
-    color: white;
-    border: none;
-    border-left: 3px solid var(--tiro-accent);
-    cursor: pointer;
-    margin: 0.25rem 0.6rem 0.4rem;
-    border-radius: 6px;
-    font-weight: 600;
+.sidebar-save {
+    width: calc(100% - 1.5rem);
+    margin: 0.5rem 0.75rem 0.6rem;
     justify-content: center;
-}
-
-.sidebar-save-btn:hover {
-    opacity: 0.9;
-    background: var(--tiro-accent);
-    color: white;
-}
-
-.sidebar-save-btn .sidebar-icon {
-    font-size: 1.2rem;
-    font-weight: 700;
 }
 
 /* --- Sidebar: Saved views --- */
@@ -374,8 +474,7 @@ body.has-lan-banner .content {
     background: none;
     color: var(--tiro-muted);
     cursor: pointer;
-    font-size: 0.68rem;
-    padding: 0.15rem 0.25rem;
+    padding: 0;
     border-radius: 3px;
     line-height: 1;
 }
@@ -417,7 +516,7 @@ body.has-lan-banner .content {
 .save-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -427,10 +526,47 @@ body.has-lan-banner .content {
 .save-modal {
     background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    width: 420px;
+    border-radius: var(--tiro-radius-lg);
+    width: 340px;
     max-width: 92vw;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+/* Shared modal close icon-button (save + shortcuts headers). */
+.modal-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--tiro-muted);
+    padding: 0.15rem;
+    border-radius: var(--tiro-radius-sm);
+    line-height: 1;
+    transition: background 120ms ease-out, color 120ms ease-out;
+}
+
+.modal-close:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-fg);
+}
+
+/* Modal entrance (spec §8): a single fade + 2%-scale keyframe shared by every
+   dialog that mounts fresh into the DOM (save modal, shortcuts, and the
+   .export-dialog family incl. the confirm + snooze sheets). Sheets and toasts
+   keep their bidirectional open/close TRANSITIONS instead (reconciled to
+   ease-out above / below) — one source of truth per component. Killed under
+   the shared prefers-reduced-motion block. */
+@keyframes modal-in {
+    from { opacity: 0; transform: scale(0.98); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.save-modal,
+.shortcuts-modal,
+.export-dialog {
+    animation: modal-in 280ms ease-out;
 }
 
 .save-modal-header {
@@ -455,26 +591,30 @@ body.has-lan-banner .content {
     display: flex;
     gap: 0;
     margin-bottom: 1rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    overflow: hidden;
+    border-bottom: 2px solid var(--tiro-border);
 }
 
 .save-tab {
-    flex: 1;
-    padding: 0.5rem;
+    padding: 0.5rem 1rem;
     border: none;
-    background: var(--tiro-bg);
+    background: none;
     color: var(--tiro-muted);
+    font-family: inherit;
     font-size: 0.85rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    margin-bottom: -2px;
+    border-bottom: 2px solid transparent;
+    transition: color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.save-tab:hover {
+    color: var(--tiro-fg-secondary);
 }
 
 .save-tab.active {
-    background: var(--tiro-accent);
-    color: white;
+    color: var(--tiro-fg);
+    border-bottom-color: var(--tiro-accent);
 }
 
 .save-url-input {
@@ -578,51 +718,221 @@ body.has-lan-banner .content {
     border: 1px solid var(--tiro-border);
 }
 
-/* Mobile header (hidden on desktop) */
-.mobile-header {
+/* Slim phone header (hidden on desktop; shown ≤768px). Replaces the old
+   hamburger header — brand glyph + serif page title, no buttons. */
+.phone-header {
     display: none;
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
-    height: 48px;
+    height: calc(52px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 1rem 0;
     background: var(--tiro-sidebar-bg);
     border-bottom: 1px solid var(--tiro-border);
     align-items: center;
-    padding: 0 1rem;
+    gap: 0.55rem;
     z-index: 40;
 }
 
-.mobile-menu-btn,
-.mobile-theme-toggle {
-    border: none;
-    background: none;
-    font-size: 1.2rem;
-    cursor: pointer;
-    color: var(--tiro-fg-secondary);
-    padding: 0.4rem;
+.phone-header-brand {
+    font-family: var(--tiro-font-serif);
+    font-size: 1.35rem;
+    line-height: 1;
+    color: var(--tiro-accent);
 }
 
-.mobile-brand {
-    flex: 1;
-    text-align: center;
-    font-weight: 700;
-    font-size: 1rem;
+.phone-header .page-title-serif {
+    font-family: var(--tiro-font-serif);
+    font-size: 1.05rem;
+    font-weight: 600;
     color: var(--tiro-fg);
-    font-family: Georgia, 'Times New Roman', serif;
 }
 
-.sidebar-overlay {
+/* --- Bottom tab bar (phone chrome, ≤768px only) --- */
+#tab-bar {
     display: none;
     position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.3);
-    z-index: 45;
+    inset: auto 0 0 0;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--tiro-sidebar-bg);
+    border-top: 1px solid var(--tiro-border);
+    z-index: 60;
+    grid-template-columns: repeat(5, 1fr);
+    align-items: center;
 }
+
+.tab-slot {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 100%;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: var(--tiro-muted);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+
+.tab-slot:hover,
+.tab-slot.active {
+    color: var(--tiro-accent);
+}
+
+.tab-save {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    margin: 0 auto;
+    border: none;
+    border-radius: 50%;
+    background: var(--tiro-accent);
+    color: #fff;
+    cursor: pointer;
+    transform: translateY(-12px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.tab-save .ti {
+    color: #fff;
+}
+
+.tab-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 16px);
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--tiro-accent);
+}
+
+.tab-badge[hidden] {
+    display: none;
+}
+
+/* --- Generic bottom sheet (phone chrome). Geometry pattern donated by the
+   snooze preset sheet family: scrim + slide-up panel, radius-xl top corners.
+   The .snooze-preset-* originals are deliberately left untouched. --- */
+.sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+}
+
+.sheet[hidden] {
+    display: none;
+}
+
+.sheet-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    transition: opacity 200ms ease-out;
+}
+
+.sheet.open .sheet-scrim {
+    opacity: 1;
+}
+
+.sheet-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 1rem 1rem calc(1.25rem + env(safe-area-inset-bottom));
+    background: var(--tiro-bg-surface, var(--tiro-sidebar-bg));
+    border-top: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-xl, 20px) var(--tiro-radius-xl, 20px) 0 0;
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.18);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    transform: translateY(100%);
+    transition: transform 200ms ease-out;
+}
+
+.sheet.open .sheet-panel {
+    transform: translateY(0);
+}
+
+.sheet-panel a,
+.sheet-panel button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 1rem 0.5rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius, 10px);
+    background: var(--tiro-bg);
+    font-family: inherit;
+    font-size: 0.8rem;
+    color: var(--tiro-fg);
+    text-decoration: none;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.sheet-panel a:hover,
+.sheet-panel button:hover {
+    border-color: var(--tiro-accent);
+    color: var(--tiro-accent);
+}
+
+/* Reduced-motion: kill the sheet slide (above) plus every §8 motion added in
+   Task 10 — the modal fade-in, the card hover tint, and the rating-pop scale.
+   This is the shared reduced-motion block; new selectors fold in here rather
+   than opening a second media query. */
+@media (prefers-reduced-motion: reduce) {
+    .sheet-scrim,
+    .sheet-panel,
+    .article-card,
+    .save-modal,
+    .shortcuts-modal,
+    .export-dialog,
+    .icon-btn.active .ti {
+        transition: none;
+        animation: none;
+    }
+}
+
+/* --- Phone reader action bar (spec §6) ---
+   Same shell/geometry as #tab-bar; replaces the tab bar on the reader page at
+   ≤768px (see the responsive block). Hidden on desktop/tablet, where the reader
+   keeps its in-page header chrome. grid-auto-flow lets the optional play/pause
+   slot come and go (display:none) without leaving a gap. */
+#reader-action-bar {
+    display: none;
+    position: fixed;
+    inset: auto 0 0 0;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--tiro-sidebar-bg);
+    border-top: 1px solid var(--tiro-border);
+    z-index: 60;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    align-items: center;
+}
+
+#reader-action-bar .reader-bar-rate.love:not(.active) .ti-heart { fill: none; }
 
 /* Content area */
 .content {
-    margin-left: 220px;
+    margin-left: 240px;
     min-height: 100vh;
     background: var(--tiro-bg);
     color: var(--tiro-fg);
@@ -646,19 +956,8 @@ main {
 }
 
 /* --- Empty state --- */
-
-.empty-state {
-    text-align: center;
-    padding: 4rem 1rem;
-    color: var(--tiro-muted);
-}
-
-.empty-state h2 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--tiro-fg-secondary);
-    margin-bottom: 0.5rem;
-}
+/* .empty-state / .empty-state h2 are the spec-normative primitives (top of
+   this file); only the onboarding-specific p/code descendants live here. */
 
 .empty-state p {
     margin-bottom: 1rem;
@@ -680,6 +979,8 @@ main {
     color: var(--tiro-fg-secondary);
 }
 
+/* ============ components (cards, pills, modals, toasts, filter panel, pagination) === */
+
 /* --- Article list --- */
 
 .article-list {
@@ -695,10 +996,22 @@ main {
     display: flex;
     gap: 1rem;
     align-items: flex-start;
+    transition: background-color 120ms ease-out;
 }
 
 .article-card:first-child {
     padding-top: 0;
+}
+
+/* Card hover tint (spec §8): pointer devices only — a background tint to
+   hover-bg with NO translate/scale, so the list stays geometrically stable
+   during touch triage. Gated on (hover: hover) so it never fires on the
+   phone where the swipe gesture lives; the .swiping / .swipe-*-hint classes
+   set their own (more specific) background + transition mid-drag and win. */
+@media (hover: hover) and (pointer: fine) {
+    .article-card:hover {
+        background: var(--tiro-bg-hover);
+    }
 }
 
 .article-card.is-read .article-title a {
@@ -757,7 +1070,8 @@ main {
 .vip-star {
     color: var(--tiro-gold);
     cursor: pointer;
-    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
     opacity: 0.3;
     transition: opacity 0.15s;
 }
@@ -899,6 +1213,12 @@ main {
 
 .rate-btn:hover {
     background: var(--tiro-bg-hover);
+}
+
+/* Heart reads as an outline at rest (the icon set fills it by default) and
+   only fills once "Love" is active — matches the rating-cluster contract. */
+.rate-btn.love:not(.active) .ti-heart {
+    fill: none;
 }
 
 .rate-btn.dislike:hover,
@@ -1089,6 +1409,19 @@ main {
     background: var(--tiro-bg-hover);
 }
 
+/* Reader header overflow menu: items carry a leading icon; align it with the
+   label and give the destructive Delete item crimson intent. */
+.reader-menu .card-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.reader-menu .card-menu-danger {
+    color: var(--tiro-tier-must-read);
+}
+
 /* --- Snooze preset sheet (M3.2 Task 1) ---
    Reuses the .export-overlay/.export-dialog/.export-dialog-actions/
    .export-cancel-btn shell (see the export-confirm dialog above) so it
@@ -1129,6 +1462,42 @@ main {
 
 .article-card {
     touch-action: pan-y;
+    position: relative;
+}
+
+/* Reveal-layer direction icons (design pass): archive on a rightward drag,
+   clock/snooze on a leftward drag. Hidden until the matching hint class is
+   set by the swipe handler (js/swipe.js is untouched — only these classes
+   toggle). Pointer-events off so they never interfere with the gesture. */
+.swipe-hint-icon {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
+}
+
+.swipe-hint-right {
+    right: 0.9rem;
+    color: var(--tiro-secondary);
+}
+
+.swipe-hint-left {
+    left: 0.9rem;
+    color: var(--tiro-gold);
+}
+
+.article-card.swipe-right-hint .swipe-hint-right,
+.article-card.swipe-left-hint .swipe-hint-left {
+    opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .swipe-hint-icon {
+        transition: none;
+    }
 }
 
 /* Applied only once the horizontal lock engages (never on plain taps or
@@ -1206,88 +1575,39 @@ main {
     margin-bottom: 1rem;
 }
 
-.classify-btn {
-    padding: 0.4rem 0.9rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    color: white;
-    font-size: 0.8rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
+/* The in-toolbar Filters icon-button is phone-only; desktop/tablet use the
+   vertical edge tab instead (hidden ≤768px — see the mobile media block). */
+#filter-icon-btn {
+    display: none;
 }
 
-.classify-btn:hover {
-    background: var(--tiro-accent-hover);
-}
-
+/* The toolbar buttons now ride the .btn primitives (see inbox.html); only
+   their state-specific overrides and disabled treatment stay page-local. */
 .classify-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
 
-.classify-btn-secondary {
+/* Reclassify state: override .btn-primary into a quiet ghost. Compound
+   selector wins over .btn-primary regardless of source order. */
+.classify-btn.classify-btn-secondary {
     background: none;
     color: var(--tiro-muted);
     border-color: var(--tiro-border);
+    font-weight: 500;
 }
 
-.classify-btn-secondary:hover {
+.classify-btn.classify-btn-secondary:hover {
     background: var(--tiro-bg-hover);
     color: var(--tiro-fg-secondary);
     border-color: var(--tiro-fg-secondary);
 }
 
-.discard-toggle {
-    padding: 0.4rem 0.9rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    background: none;
-    font-size: 0.8rem;
-    color: var(--tiro-muted);
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.discard-toggle:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
+/* Toggled-on state for the ghost archived/snoozed/discarded toggles. */
 .discard-toggle.active {
     background: var(--tiro-bg-surface);
     color: var(--tiro-fg-secondary);
-}
-
-/* Bulk-delete toolbar button — danger outline, distinct from the muted
-   discard-toggle it's rendered next to. */
-.danger-outline-btn {
-    padding: 0.4rem 0.9rem;
-    border: 1px solid var(--tiro-tier-must-read);
-    border-radius: 6px;
-    background: none;
-    font-size: 0.8rem;
-    font-weight: 500;
-    color: var(--tiro-tier-must-read);
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.danger-outline-btn:hover {
-    background: var(--tiro-tier-must-read);
-    color: white;
-}
-
-.danger-outline-btn:focus-visible {
-    outline: 2px solid var(--tiro-tier-must-read);
-    outline-offset: 2px;
-}
-
-#vip-toggle.active {
-    background: var(--tiro-bg-surface);
-    color: var(--tiro-gold);
-    border-color: var(--tiro-gold);
+    border-color: var(--tiro-fg-secondary);
 }
 
 .classify-info {
@@ -1301,6 +1621,8 @@ main {
    accent as the count gets small, mirroring the tier-badge language used
    elsewhere without introducing a new color. */
 .triage-pill {
+    align-items: center;
+    gap: 5px;
     padding: 0.3rem 0.7rem;
     border-radius: 999px;
     background: var(--tiro-bg-surface);
@@ -1309,6 +1631,10 @@ main {
     font-size: 0.75rem;
     font-weight: 600;
     white-space: nowrap;
+}
+
+.triage-pill .ti {
+    color: var(--tiro-muted);
 }
 
 /* --- Inbox-zero celebratory state (M3.2 Task 4) ---
@@ -1329,10 +1655,26 @@ main {
 }
 
 .inbox-zero-mark {
-    font-size: 2.75rem;
+    display: flex;
+    justify-content: center;
     line-height: 1;
     color: var(--tiro-gold);
     margin-bottom: 0.75rem;
+}
+
+.inbox-zero-mark .ti {
+    width: 40px;
+    height: 40px;
+    animation: inbox-zero-pop 300ms ease-out;
+}
+
+@keyframes inbox-zero-pop {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .inbox-zero-mark .ti { animation: none; }
 }
 
 .inbox-zero-state h2 {
@@ -1380,8 +1722,8 @@ main {
 .inbox-main {
     max-width: 700px;
     /* Center relative to viewport, not just the content area after sidebar.
-       110px = half of 220px sidebar width. Clamp to 0 on narrow screens. */
-    margin-left: max(0px, calc(50% - 350px - 110px));
+       120px = half of 240px sidebar width. Clamp to 0 on narrow screens. */
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
 }
 
@@ -1473,13 +1815,14 @@ main {
 }
 
 .filter-panel-close {
+    display: inline-flex;
+    align-items: center;
     border: none;
     background: none;
-    font-size: 1.4rem;
     cursor: pointer;
     color: var(--tiro-muted);
     padding: 0 0.25rem;
-    line-height: 1;
+    line-height: 0;
 }
 
 .filter-panel-close:hover {
@@ -1639,6 +1982,16 @@ main {
     font-weight: 500;
 }
 
+.filter-option-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.filter-option-label .ti {
+    color: var(--tiro-muted);
+}
+
 .filter-option-count {
     margin-left: auto;
     font-size: 0.7rem;
@@ -1708,8 +2061,9 @@ main {
 }
 
 .filter-pill-x {
-    font-size: 0.85rem;
-    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    line-height: 0;
     color: var(--tiro-muted);
 }
 
@@ -1762,17 +2116,29 @@ main {
     pointer-events: none;
 }
 
+/* Prev/next chevron cells: flex-centre the icon, drop the numeral min-width. */
+.page-nav {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    padding: 0.3rem 0.45rem;
+    color: var(--tiro-muted);
+}
+
 .page-info {
     font-size: 0.75rem;
     color: var(--tiro-muted);
     padding: 0 0.5rem;
 }
 
+/* ============ pages (per-page sections) ============================= */
+
 /* --- Reader view --- */
 
 .reader {
     max-width: 700px;
-    margin-left: max(0px, calc(50% - 350px - 110px));
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
 }
 
@@ -1843,12 +2209,11 @@ main {
 }
 
 .reader-source-link a {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     color: var(--tiro-accent);
     text-decoration: none;
-}
-
-.reader-source-link a::before {
-    content: "\2197\00a0";
 }
 
 .reader-source-link a:hover {
@@ -2088,9 +2453,19 @@ main {
     margin-bottom: 1.25rem;
 }
 
+.search-icon {
+    position: absolute;
+    left: 0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    color: var(--tiro-muted);
+    pointer-events: none;
+}
+
 .search-bar input {
     width: 100%;
-    padding: 0.6rem 2.5rem 0.6rem 0.9rem;
+    padding: 0.6rem 2.5rem 0.6rem 2.35rem;
     border: 1px solid var(--tiro-border);
     border-radius: 6px;
     font-size: 0.9rem;
@@ -2116,11 +2491,12 @@ main {
     transform: translateY(-50%);
     border: none;
     background: none;
-    font-size: 1.2rem;
     color: var(--tiro-muted);
     cursor: pointer;
     padding: 0.25rem;
-    line-height: 1;
+    line-height: 0;
+    display: inline-flex;
+    align-items: center;
 }
 
 .search-clear:hover {
@@ -2160,69 +2536,66 @@ main {
 
 .digest-view {
     max-width: 700px;
-    margin-left: max(0px, calc(50% - 350px - 110px));
+    margin-left: max(0px, calc(50% - 350px - 120px));
     margin-right: auto;
+}
+
+.digest-header {
+    margin-bottom: 1.25rem;
+}
+
+.digest-title {
+    font-size: 1.75rem;
+}
+
+.digest-title-et {
+    color: var(--tiro-accent);
+    font-style: normal;
+}
+
+.digest-title-date {
+    color: var(--tiro-fg-secondary);
+    font-weight: 400;
 }
 
 .digest-tabs {
     display: flex;
-    gap: 0.25rem;
+    flex-wrap: wrap;
+    gap: 0.35rem;
     margin-bottom: 1.5rem;
     align-items: center;
 }
 
-.digest-tab {
-    padding: 0.4rem 0.9rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: none;
-    cursor: pointer;
-    font-size: 0.8rem;
-    font-weight: 500;
+/* .digest-tab keeps its class for digest.js (queries `.digest-tab`, toggles
+   `.active`); visual treatment is the shared `.mode-pill` primitive. */
+
+.digest-history-wrap {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.digest-history-icon {
+    display: inline-flex;
     color: var(--tiro-muted);
-    transition: all 0.15s;
-}
-
-.digest-tab:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
-.digest-tab.active {
-    background: var(--tiro-fg);
-    color: var(--tiro-bg);
-    border-color: var(--tiro-fg);
 }
 
 .digest-history-select {
-    margin-left: auto;
-    padding: 0.3rem 0.5rem;
+    padding: 0.45rem 0.6rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 4px;
+    border-radius: var(--tiro-radius-md);
     background: var(--tiro-bg);
     color: var(--tiro-fg-secondary);
-    font-size: 0.8rem;
+    font-family: inherit;
+    font-size: 0.85rem;
     cursor: pointer;
     max-width: 160px;
 }
-.digest-history-select:focus {
-    outline: 1px solid var(--tiro-accent);
-}
 
+/* .btn .btn-ghost supply the base; only the active-accent + nowrap remain. */
 .digest-schedule-btn {
-    padding: 0.3rem 0.7rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: none;
-    cursor: pointer;
-    font-size: 0.75rem;
-    color: var(--tiro-muted);
-    transition: all 0.15s;
     white-space: nowrap;
-}
-.digest-schedule-btn:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
 }
 .digest-schedule-btn.active {
     border-color: var(--tiro-accent);
@@ -2261,21 +2634,9 @@ main {
     font-style: italic;
 }
 
+/* .icon-btn supplies the base; keep only the disabled + no-shrink rules. */
 .digest-refresh {
-    padding: 0.3rem 0.6rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: none;
-    cursor: pointer;
-    font-size: 1rem;
-    color: var(--tiro-muted);
-    transition: all 0.15s;
     flex-shrink: 0;
-}
-
-.digest-refresh:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
 }
 
 .digest-refresh:disabled {
@@ -2286,36 +2647,36 @@ main {
 /* --- Digest banner --- */
 
 .digest-banner {
-    font-size: 0.8rem;
-    color: var(--tiro-muted);
-    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    color: var(--tiro-fg-secondary);
+    padding: 0.6rem 0.9rem;
     background: var(--tiro-bg-surface);
-    border-radius: 4px;
+    border-radius: var(--tiro-radius-md);
     margin-bottom: 1.25rem;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.6rem;
 }
 
+/* Stale variant layers the shared `.callout .callout-gold` (gold left rule)
+   on top; only the gold text colour needs asserting over the base. */
 .digest-banner-stale {
-    background: var(--tiro-bg-surface);
     color: var(--tiro-gold-hover);
-    border: 1px solid var(--tiro-gold);
+}
+
+.digest-banner-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.digest-banner-text {
+    flex: 1;
 }
 
 .digest-refresh-inline {
-    border: none;
-    background: none;
-    color: var(--tiro-accent);
-    cursor: pointer;
-    font-size: 0.8rem;
-    padding: 0;
-    text-decoration: underline;
-    text-underline-offset: 2px;
-}
-
-.digest-refresh-inline:hover {
-    color: var(--tiro-accent-hover);
+    flex-shrink: 0;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.78rem;
 }
 
 /* --- Digest loading --- */
@@ -2384,11 +2745,9 @@ main {
     min-height: 200px;
 }
 
-.digest-section {
-    font-size: 1rem;
-    line-height: 1.75;
-}
-
+/* Body typography is inherited from the shared `.reader-body` selector group
+   (digest sections carry that class in digest.html) so digest prose matches
+   the reader. Only the internal article-link treatment is digest-specific. */
 .digest-section a[href^="/articles/"] {
     color: var(--tiro-accent);
     text-decoration: none;
@@ -2464,29 +2823,6 @@ main {
     line-height: 1.4;
 }
 
-/* --- Analysis button --- */
-
-.analysis-btn {
-    width: 32px;
-    height: 28px;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: transparent;
-    cursor: pointer;
-    font-size: 1rem;
-    color: var(--tiro-muted);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.15s;
-}
-
-.analysis-btn:hover {
-    background: var(--tiro-bg-surface);
-    color: var(--tiro-accent);
-    border-color: var(--tiro-accent);
-}
-
 /* --- Analysis overlay --- */
 
 .analysis-overlay {
@@ -2543,9 +2879,11 @@ main {
 }
 
 .analysis-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: none;
-    font-size: 1.4rem;
     cursor: pointer;
     color: var(--tiro-muted);
     padding: 0 0.25rem;
@@ -2695,7 +3033,8 @@ main {
 .analysis-dimension {
     margin-bottom: 0.5rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
+    border-left: 3px solid var(--tiro-secondary);
+    border-radius: 0 var(--tiro-radius-md) var(--tiro-radius-md) 0;
     overflow: hidden;
 }
 
@@ -3130,7 +3469,7 @@ main {
 .shortcuts-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -3138,11 +3477,11 @@ main {
 }
 
 .shortcuts-modal {
-    background: var(--tiro-bg);
+    background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
-    width: 380px;
+    border-radius: var(--tiro-radius-lg);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    width: 560px;
     max-width: 90vw;
     max-height: 80vh;
     overflow-y: auto;
@@ -3164,24 +3503,19 @@ main {
     color: var(--tiro-fg);
 }
 
-.shortcuts-close {
-    border: none;
-    background: none;
-    font-size: 1.4rem;
-    cursor: pointer;
-    color: var(--tiro-muted);
-    padding: 0 0.25rem;
-    line-height: 1;
-}
-
-.shortcuts-close:hover {
-    color: var(--tiro-fg);
-}
-
 .shortcuts-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem 1.5rem;
+    align-content: start;
+}
+
+.shortcut-section {
+    grid-column: 1 / -1;
+}
+
+.shortcut-hint {
+    grid-column: 1 / -1;
 }
 
 .shortcut-row {
@@ -3234,6 +3568,10 @@ main {
     margin-top: -0.15rem;
 }
 
+@media (max-width: 560px) {
+    .shortcuts-body { grid-template-columns: 1fr; }
+}
+
 /* --- Nav link --- */
 
 .nav-link {
@@ -3269,7 +3607,7 @@ main {
 }
 
 .stats-header h2 {
-    font-size: 1.15rem;
+    font-size: 1.3rem;
     font-weight: 700;
     color: var(--tiro-fg);
 }
@@ -3286,44 +3624,13 @@ main {
 
 .stats-summary {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 0.75rem;
     margin-bottom: 2rem;
 }
 
-.stat-card {
-    text-align: center;
-    padding: 1rem 0.5rem;
-    background: var(--tiro-bg);
-    border: 1px solid var(--tiro-border);
-    border-radius: 8px;
-}
-
-.stat-card-accent {
-    border-color: var(--tiro-accent);
-    background: var(--tiro-bg-surface);
-}
-
-.stat-value {
-    display: block;
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--tiro-fg);
-    line-height: 1.2;
-    margin-bottom: 0.2rem;
-}
-
-.stat-card-accent .stat-value {
-    color: var(--tiro-accent);
-}
-
-.stat-label {
-    font-size: 0.75rem;
-    color: var(--tiro-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-}
+/* Stat cards + hero + serif numerals are the shared `.stat-card` /
+   `.stat-card-hero` primitives (spec §5); no page-local copies. */
 
 .stats-charts {
     display: flex;
@@ -3343,10 +3650,12 @@ main {
 }
 
 .chart-title {
-    font-size: 0.85rem;
+    font-size: 1.05rem;
     font-weight: 600;
-    color: var(--tiro-fg-secondary);
-    margin-bottom: 0.75rem;
+    color: var(--tiro-fg);
+    margin-bottom: 0.9rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--tiro-border);
 }
 
 .chart-empty {
@@ -3357,25 +3666,7 @@ main {
     font-style: italic;
 }
 
-/* --- Export button --- */
-
-.export-btn {
-    padding: 0.35rem 0.8rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    font-size: 0.8rem;
-    font-family: inherit;
-    font-weight: 500;
-    color: white;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.export-btn:hover {
-    background: var(--tiro-accent-hover);
-    border-color: var(--tiro-accent-hover);
-}
+/* Export trigger button uses the shared `.btn .btn-primary` primitive. */
 
 /* --- Export confirmation dialog --- */
 
@@ -3493,9 +3784,8 @@ main {
 }
 
 @media (max-width: 640px) {
-    .stats-summary {
-        grid-template-columns: repeat(3, 1fr);
-    }
+    /* .stats-summary wraps on its own via auto-fit/minmax(120px) — no
+       fixed column count needed here. */
     .stats-header {
         flex-direction: column;
         align-items: flex-start;
@@ -3677,10 +3967,20 @@ main {
 }
 
 .settings-section-title {
-    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
     font-weight: 600;
     color: var(--tiro-fg);
     margin-bottom: 0.25rem;
+}
+
+/* Leading card icon (spec §7 settings) — muted line icon before the heading. */
+.settings-section-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--tiro-accent);
 }
 
 .settings-section-desc {
@@ -3748,31 +4048,67 @@ main {
     padding: 0.15rem 0.6rem;
 }
 
+/* Remote-access wizard (remote_setup.html): numbered serif step circles. */
+.wizard-step {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.wizard-step-num {
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--tiro-border);
+    border-radius: 50%;
+    background: var(--tiro-bg-surface);
+    font-family: var(--tiro-font-serif);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--tiro-accent);
+}
+.wizard-step-body {
+    flex: 1;
+    min-width: 0;
+}
+.wizard-step-body .settings-section-title {
+    margin-top: 0.15rem;
+}
+
 .settings-actions {
     display: flex;
     gap: 0.5rem;
     margin-bottom: 1.5rem;
 }
 
+/* Settings buttons ride the primitive language (spec §5): ghost/outline by
+   default with accent reserved for modal primaries (.settings-save-btn). */
 .settings-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 0.5rem 1rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    color: white;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: none;
+    color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
     font-family: inherit;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-action-btn:hover {
-    background: var(--tiro-accent-hover);
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-fg-secondary);
 }
 
 .settings-action-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.6;
     cursor: not-allowed;
 }
 
@@ -3781,20 +4117,26 @@ main {
 }
 
 .settings-configure-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 0.5rem 1.25rem;
-    border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
-    background: var(--tiro-accent);
-    color: white;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: none;
+    color: var(--tiro-fg-secondary);
     font-size: 0.85rem;
     font-family: inherit;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-configure-btn:hover {
-    background: var(--tiro-accent-hover);
+    background: var(--tiro-bg-hover);
+    border-color: var(--tiro-fg-secondary);
+    color: var(--tiro-fg-secondary);
 }
 
 .settings-configure-btn-secondary {
@@ -3829,7 +4171,7 @@ main {
 .settings-modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(0, 0, 0, 0.28);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -3837,10 +4179,10 @@ main {
 }
 
 .settings-modal {
-    background: var(--tiro-bg);
+    background: var(--tiro-bg-surface);
     border: 1px solid var(--tiro-border);
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+    border-radius: var(--tiro-radius-lg);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
     width: 440px;
     max-width: 90vw;
     padding: 1.5rem;
@@ -3868,9 +4210,12 @@ main {
     color: var(--tiro-muted);
     padding: 0 0.25rem;
     line-height: 1;
+    border-radius: var(--tiro-radius-sm);
+    transition: background 120ms ease-out, color 120ms ease-out;
 }
 
 .settings-modal-close:hover {
+    background: var(--tiro-bg-hover);
     color: var(--tiro-fg);
 }
 
@@ -3911,19 +4256,21 @@ main {
 .settings-field input[type="text"],
 .settings-field select {
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.6rem 0.75rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    font-size: 0.88rem;
+    border-radius: var(--tiro-radius-md);
+    font-size: 0.9rem;
     font-family: inherit;
     color: var(--tiro-fg);
     background: var(--tiro-bg);
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.settings-field input:focus {
+.settings-field input:focus,
+.settings-field select:focus {
     border-color: var(--tiro-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent) 15%, transparent);
 }
 
 /* --- Token reveal (copyable code block) --- */
@@ -3975,41 +4322,44 @@ main {
 }
 
 .settings-cancel-btn {
-    padding: 0.45rem 1rem;
+    padding: 0.5rem 1rem;
     border: 1px solid var(--tiro-border);
-    border-radius: 6px;
-    background: var(--tiro-bg);
+    border-radius: var(--tiro-radius-md);
+    background: none;
     font-size: 0.85rem;
     font-family: inherit;
-    color: var(--tiro-fg-secondary);
+    color: var(--tiro-muted);
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, color 120ms ease-out,
+        border-color 120ms ease-out;
 }
 
 .settings-cancel-btn:hover {
     background: var(--tiro-bg-hover);
+    color: var(--tiro-fg-secondary);
     border-color: var(--tiro-fg-secondary);
 }
 
 .settings-save-btn {
-    padding: 0.45rem 1rem;
+    padding: 0.5rem 1rem;
     border: 1px solid var(--tiro-accent);
-    border-radius: 6px;
+    border-radius: var(--tiro-radius-md);
     background: var(--tiro-accent);
     font-size: 0.85rem;
     font-family: inherit;
-    font-weight: 500;
-    color: white;
+    font-weight: 600;
+    color: #fff;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background 120ms ease-out, border-color 120ms ease-out;
 }
 
 .settings-save-btn:hover {
     background: var(--tiro-accent-hover);
+    border-color: var(--tiro-accent-hover);
 }
 
 .settings-save-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.6;
     cursor: not-allowed;
 }
 
@@ -4057,11 +4407,8 @@ main {
     opacity: 1;
 }
 
-@media (max-width: 768px) {
-    .a2hs-hint {
-        bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
-    }
-}
+/* Phone (≤768px) bottom offset for .a2hs-hint is handled in the consolidated
+   responsive block near the end of this file (sits above the bottom tab bar). */
 
 /* --- Settings toast --- */
 
@@ -4076,7 +4423,7 @@ main {
     font-weight: 500;
     color: white;
     opacity: 0;
-    transition: opacity 0.3s, transform 0.3s;
+    transition: opacity 280ms ease-out, transform 280ms ease-out;
     z-index: 300;
     pointer-events: none;
 }
@@ -4188,37 +4535,14 @@ main {
 
 .sources-row-actions {
     display: flex;
+    align-items: center;
     gap: 0.4rem;
     justify-content: flex-end;
     flex-wrap: wrap;
 }
 
-.sources-row-btn {
-    padding: 0.25rem 0.55rem;
-    border: 1px solid var(--tiro-border);
-    border-radius: 4px;
-    background: none;
-    cursor: pointer;
-    font-size: 0.72rem;
-    color: var(--tiro-muted);
-    transition: all 0.15s;
-    white-space: nowrap;
-}
-
-.sources-row-btn:hover {
-    background: var(--tiro-bg-hover);
-    color: var(--tiro-fg-secondary);
-}
-
-.sources-row-btn.danger:hover {
-    color: var(--tiro-rate-dislike);
-    border-color: var(--tiro-rate-dislike);
-}
-
-.sources-vip-star {
-    cursor: pointer;
-    font-size: 0.95rem;
-}
+/* VIP toggle reads as gold/filled when active (mirrors reader .vip-btn.active). */
+.sources-vip-btn.active { color: var(--tiro-gold); }
 
 .sources-force-warning {
     margin-top: 0.6rem;
@@ -4230,13 +4554,57 @@ main {
     font-size: 0.8rem;
 }
 
+/* Phones: table rows stack into definition-list cards (spec §7). The <table>
+   markup is unchanged — only its display is restyled here. Each <td> carries a
+   data-label (set in sources.js) surfaced as a leading key via ::before. */
 @media (max-width: 640px) {
-    .sources-table {
-        font-size: 0.78rem;
-    }
-    .sources-table th,
+    .sources-table,
+    .sources-table tbody,
+    .sources-table tr,
     .sources-table td {
-        padding: 0.4rem 0.35rem;
+        display: block;
+        width: 100%;
+    }
+    .sources-table thead {
+        display: none;
+    }
+    .sources-table tr {
+        border: 1px solid var(--tiro-border);
+        border-radius: var(--tiro-radius-md);
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.75rem;
+        background: var(--tiro-bg);
+    }
+    .sources-table tbody tr:hover {
+        background: var(--tiro-bg);
+    }
+    .sources-table td {
+        border: none;
+        padding: 0.3rem 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        text-align: right;
+    }
+    .sources-table td::before {
+        content: attr(data-label);
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--tiro-muted);
+        text-align: left;
+    }
+    .sources-col-count,
+    .sources-col-vip {
+        text-align: right;
+    }
+    .sources-col-actions {
+        text-align: left;
+    }
+    .sources-row-actions {
+        justify-content: flex-end;
     }
 }
 
@@ -4271,17 +4639,26 @@ main {
     cursor: pointer;
 }
 
+.wiki-title-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.wiki-row-icon {
+    color: var(--tiro-muted);
+    flex-shrink: 0;
+}
+
+.wiki-title-text {
+    color: var(--tiro-fg);
+    font-weight: 500;
+}
+
+/* Stale badge rides the .pill primitive; only the gold tint + spacing here. */
 .wiki-stale-badge {
-    display: inline-block;
-    margin-left: 0.4rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 9px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: var(--tiro-bg-surface);
-    color: var(--tiro-tier-summary);
+    margin-left: 0.1rem;
+    color: var(--tiro-gold-hover);
 }
 
 /* --- Wiki page view (/wiki/{slug}) --- */
@@ -4313,48 +4690,113 @@ main {
     font-size: 0.85rem;
 }
 
-/* --- Responsive: Sidebar collapse --- */
+/* User's pinned note — gold callout riding the .callout .callout-gold
+   primitives; only the layout of the overline label + body added here. */
+.wiki-pinned-note {
+    margin: 0 0 1.5rem;
+    white-space: pre-line;
+}
 
-@media (max-width: 1200px) {
-    .sidebar { width: 60px; }
-    .sidebar-label, .sidebar-title, .sidebar-badge { display: none; }
-    .sidebar-brand { justify-content: center; }
-    .sidebar-logo { margin: 0; }
-    .sidebar-item { justify-content: center; padding: 0.65rem 0; border-left: none; border-bottom: 3px solid transparent; }
-    .sidebar-item.active { border-bottom-color: var(--tiro-sidebar-active); border-left-color: transparent; }
-    .sidebar-footer { align-items: center; }
-    .sidebar-about .sidebar-label { display: none; }
+.wiki-pinned-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tiro-gold);
+    margin-bottom: 0.25rem;
+}
+
+.wiki-pinned-body {
+    color: var(--tiro-fg-secondary);
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
+/* Resolved citation links inside the wiki body render as file-text tag-chips.
+   Scoped to win specificity over the generic .reader-body a link rules. */
+#wiki-page-body a.wiki-citation {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--tiro-fg-secondary);
+    text-decoration: none;
+    vertical-align: baseline;
+}
+
+#wiki-page-body a.wiki-citation:hover {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-accent);
+}
+
+/* ============ responsive (media-query consolidation region) ========= */
+
+/* --- Responsive: Tablet icon rail (769-1199px, spec §6) ---
+   64px wide, icons only. Scoped with a min-width floor so the <=768px
+   mobile drawer block below (which slides the full-width labelled sidebar
+   in from the hamburger) is driven purely by the desktop defaults it
+   overrides, never by these rail rules. */
+
+@media (min-width: 769px) and (max-width: 1200px) {
+    .sidebar { width: 64px; }
+    .sidebar-label, .sidebar-title, .sidebar-brand-text,
+    .sidebar-brand-overline, .sidebar-section-label,
     .sidebar-views { display: none; }
-    .content { margin-left: 60px; }
-    .inbox-main { margin-left: max(0px, calc(50% - 350px - 30px)); }
-    .reader { margin-left: max(0px, calc(50% - 350px - 30px)); }
-    .digest-view { margin-left: max(0px, calc(50% - 350px - 30px)); }
+    .sidebar-brand { justify-content: center; padding: 1.1rem 0; }
+    .sidebar-logo { margin: 0; }
+    .sidebar-section { padding: 0.25rem 0; }
+    .sidebar-item { justify-content: center; gap: 0; padding: 0.55rem 0;
+        border-left: none; border-bottom: 3px solid transparent; }
+    .sidebar-item.active { background: var(--tiro-bg-surface);
+        border-bottom-color: var(--tiro-sidebar-active);
+        border-left-color: transparent; }
+    .sidebar-item .ti, .sidebar-footer-item .ti, .sidebar-icon .ti {
+        width: 20px; height: 20px; }
+    /* Save button collapses to a 40px accent circle, icon only */
+    .sidebar-save { width: 40px; height: 40px; margin: 0.5rem auto 0.6rem;
+        padding: 0; border-radius: 50%; }
+    /* Unread badge becomes an 8px accent dot on the Inbox icon corner */
+    .sidebar-badge { position: absolute; top: 0.35rem; right: 1.1rem;
+        margin: 0; min-width: 0; width: 8px; height: 8px; padding: 0;
+        font-size: 0; line-height: 0; border-radius: 50%; overflow: hidden; }
+    .sidebar-footer { align-items: center; }
+    .sidebar-footer-item { justify-content: center; width: auto;
+        padding: 0.5rem; gap: 0; }
+    .content { margin-left: 64px; }
+    .inbox-main { margin-left: max(0px, calc(50% - 350px - 32px)); }
+    .reader { margin-left: max(0px, calc(50% - 350px - 32px)); }
+    .digest-view { margin-left: max(0px, calc(50% - 350px - 32px)); }
     /* Inbox toolbar: wrap on narrower screens */
     .inbox-toolbar { flex-wrap: wrap; gap: 0.4rem; }
 }
 
 @media (max-width: 768px) {
-    .sidebar {
-        transform: translateX(-100%);
-        width: 260px;
-        transition: transform 0.25s ease;
+    /* Phone chrome (design pass, Task 4): the sidebar is fully replaced by
+       the bottom tab bar + slim top header; no off-canvas drawer. */
+    .sidebar { display: none; }
+    #tab-bar { display: grid; }
+    .phone-header { display: flex; }
+    /* Reader page: the tab bar yields to the reader action bar (same shell). */
+    body.reader-page #tab-bar { display: none; }
+    body.reader-page #reader-action-bar { display: grid; }
+    /* The in-page reader nav (back link + header icon cluster) collapses into
+       the action bar/overflow sheet on phones. */
+    body.reader-page .reader-nav { display: none; }
+    .content {
+        margin-left: 0;
+        padding-top: calc(52px + env(safe-area-inset-top));
+        padding-bottom: calc(72px + env(safe-area-inset-bottom));
     }
-    .sidebar.open { transform: translateX(0); }
-    .sidebar-overlay.open { display: block; }
-    /* Restore labels hidden by the 1200px icon-only mode */
-    .sidebar-label, .sidebar-title, .sidebar-badge { display: unset; }
-    .sidebar-brand { justify-content: flex-start; }
-    .sidebar-logo { margin-right: 0.6rem; }
-    .sidebar-item { justify-content: flex-start; padding: 0.65rem 1rem; border-left: 3px solid transparent; border-bottom: none; }
-    .sidebar-item.active { border-left-color: var(--tiro-sidebar-active); border-bottom-color: transparent; }
-    .sidebar-footer { align-items: stretch; }
-    .sidebar-about .sidebar-label { display: unset; }
-    .sidebar-views { display: block; }
-    .mobile-header { display: flex; }
-    .content { margin-left: 0; padding-top: 60px; }
-    /* Filter panel: full width on mobile */
+    /* Filter panel: full width on mobile. The vertical edge tab is replaced
+       by the in-toolbar Filters icon-button on phones. */
     .filter-panel { width: 100%; max-width: 100vw; }
-    .filter-panel.open + .filter-tab { right: 100%; }
+    .filter-tab { display: none; }
+    #filter-icon-btn { display: inline-flex; }
+    /* Fixed-bottom overlays sit above the tab bar. */
+    .settings-toast,
+    .a2hs-hint {
+        bottom: calc(56px + env(safe-area-inset-bottom) + 12px);
+    }
     /* Inbox: tighter spacing, normal centering */
     .inbox-main { padding: 0.75rem; margin-left: auto; }
     .article-card { padding: 0.75rem; }
@@ -4381,6 +4823,7 @@ main {
 }
 
 .tiro-footer-quote {
+    font-family: var(--tiro-font-serif);
     font-style: italic;
 }
 
@@ -4490,14 +4933,24 @@ main {
 .highlights-groups {
     display: flex;
     flex-direction: column;
-    gap: 1.75rem;
+    gap: 1.25rem;
+}
+
+/* Each article's highlights ride a surface card (card contract, spec §7). */
+.highlights-group {
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-lg);
+    padding: 1rem 1.1rem;
+    background: var(--tiro-bg);
 }
 
 .highlights-group-header {
     display: flex;
     align-items: baseline;
     gap: 0.5rem;
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--tiro-border);
     flex-wrap: wrap;
 }
 
@@ -4521,10 +4974,24 @@ main {
     color: var(--tiro-muted);
 }
 
+/* Inside a group card the rows are flat (no per-row border) — the group is
+   the single card. Separated by hairlines, not nested boxes. */
+.highlights-group .highlights-list {
+    gap: 0;
+}
+
 .hl-list-row {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
+    border: none;
+    border-radius: 0;
+    padding: 0.6rem 0;
+    cursor: pointer;
+}
+
+.hl-list-row + .hl-list-row {
+    border-top: 1px solid var(--tiro-border);
 }
 
 .hl-list-meta {
@@ -4535,8 +5002,8 @@ main {
 
 .hl-list-note {
     display: flex;
-    align-items: baseline;
-    gap: 0.3rem;
+    align-items: flex-start;
+    gap: 0.35rem;
     margin-left: 1.35rem;
     font-size: 0.78rem;
     color: var(--tiro-fg-secondary);
@@ -4544,6 +5011,9 @@ main {
 
 .hl-list-note-icon {
     flex-shrink: 0;
+    display: inline-flex;
+    color: var(--tiro-muted);
+    margin-top: 0.1rem;
 }
 
 .highlights-load-more-wrap {

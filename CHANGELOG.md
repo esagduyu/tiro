@@ -10,6 +10,37 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+### Design pass — full frontend redesign (`design/codex-pass`, `STATIC_VERSION` 66)
+
+Whole-app visual and interaction redesign, landed as a sequence of
+self-contained tasks (icons/tokens/chrome first, then a page-by-page pass,
+then motion/dark-theme/glyph closeout). No backend or API surface changed.
+
+- **Icons**: a single canonical SVG icon set (`tiro/frontend/static/js/icons.js`
+  for JS call sites, `_icons.html`'s `icon()` Jinja macro for templates, kept
+  in sync by a dedicated test) replaces every emoji/dingbat/HTML-entity glyph
+  across the app — nav, toolbars, modals, cards, empty states, close buttons.
+- **Chrome**: CSS custom-property token layer (color/spacing/radius/type
+  scale, light + dark) and shared component primitives (modal, overlay,
+  banner surfaces); rebuilt 240px sidebar with an icon rail; phone chrome
+  replaced with a bottom tab bar + Library/More sheets (hamburger menu
+  removed).
+- **Per-page pass**: inbox (icon cards, toolbar, serif pagination, empty
+  states), reader (chrome, audio player, callouts, phone action bar), digest,
+  stats, graph, sources, wiki, highlights, settings, login, QR/remote-access
+  wizards, and the offline fallback page all restyled on the new token/
+  component layer.
+- **Motion**: a consistent transition/easing pass across interactive surfaces
+  (cards, modals, sheets, toasts) with `prefers-reduced-motion: reduce`
+  support throughout, plus a dark-theme (Roman Night) contrast audit.
+- **Closeout sweep**: final glyph audit — remaining literal `&times;` close
+  buttons (graph.html's node panel, base.html's LAN-over-HTTP banner
+  dismiss, reader.html's analysis/highlights panel close buttons) converted
+  to the canonical `close` icon; orphaned `.shortcuts-close` and
+  `.graph-node-panel-close` CSS rules removed (both close buttons already
+  used `.modal-close`); LAN-banner phone padding constant aligned to the
+  real phone-header height. `STATIC_VERSION` 65 → 66.
+
 ## [0.5.0] — 2026-07-06 · `private-remote-beta` (Phase 3)
 
 Read your library from a phone without giving up local ownership.

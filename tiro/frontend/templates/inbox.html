@@ -1,14 +1,17 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Inbox{% endblock %}
+{% block page_title %}Inbox{% endblock %}
 {% block nav_inbox %}active{% endblock %}
 {% block content_class %}inbox-layout{% endblock %}
 
 {% block content %}
 <div class="inbox-main">
     <div class="search-bar">
+        <span class="search-icon" aria-hidden="true">{{ icon("search", size=16) }}</span>
         <input type="text" id="search-input" placeholder="Search your library..." autocomplete="off">
-        <button id="search-clear" class="search-clear" style="display: none;">&times;</button>
+        <button id="search-clear" class="search-clear" style="display: none;" aria-label="Clear search">{{ icon("close", size=16) }}</button>
     </div>
     <div id="empty-state" class="empty-state" style="display: none;">
         <h2>No articles yet</h2>
@@ -22,18 +25,19 @@
          filtered-empty message rendered inline in #article-list (filters
          active). Shown only when triage has emptied the default,
          unfiltered view; see inbox.js's updateInboxZeroState(). -->
-    <div id="inbox-zero-state" class="inbox-zero-state" style="display: none;">
-        <div class="inbox-zero-mark" aria-hidden="true">&#8266;</div>
+    <div id="inbox-zero-state" class="inbox-zero-state empty-state" style="display: none;">
+        <div class="inbox-zero-mark" aria-hidden="true">{{ icon("check", size=40) }}</div>
         <h2>Inbox zero &mdash; the oracle rests.</h2>
         <p>Every article you kept has been read, archived, or snoozed. Tiro will wake you when there&rsquo;s more.</p>
     </div>
     <div id="inbox-toolbar" class="inbox-toolbar" style="display: none;">
-        <button id="classify-btn" class="classify-btn">Classify inbox</button>
-        <span id="triage-pill" class="triage-pill" style="display: none;"></span>
-        <button id="vip-toggle" class="discard-toggle" title="Show only VIP articles">&#9733; VIP only</button>
-        <button id="discard-toggle" class="discard-toggle" style="display: none;">Show discarded (0)</button>
-        <button id="archived-toggle" class="discard-toggle" style="display: none;">Show archived</button>
-        <button id="snoozed-toggle" class="discard-toggle" style="display: none;">Show snoozed</button>
+        <button id="classify-btn" class="btn btn-primary classify-btn">{{ icon("zap", size=14) }}<span class="classify-label">Classify inbox</span></button>
+        <span id="triage-pill" class="triage-pill" style="display: none;">{{ icon("archive", size=12) }}<span class="triage-pill-count"></span></span>
+        <button id="vip-toggle" class="btn btn-gold" title="Show only VIP articles">{{ icon("star", size=13) }}VIP only</button>
+        <button id="discard-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show discarded (0)</button>
+        <button id="archived-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show archived</button>
+        <button id="snoozed-toggle" class="btn btn-ghost discard-toggle" style="display: none;">Show snoozed</button>
+        <button id="filter-icon-btn" class="icon-btn" title="Filters" aria-label="Filters">{{ icon("filter", size=16) }}</button>
         <span id="classify-info" class="classify-info"></span>
         <select id="sort-select" class="sort-select">
             <option value="unread">Unread first</option>
@@ -51,7 +55,7 @@
 <aside id="filter-panel" class="filter-panel">
     <div class="filter-panel-header">
         <h3>Filters</h3>
-        <button id="filter-panel-close" class="filter-panel-close">&times;</button>
+        <button id="filter-panel-close" class="filter-panel-close" aria-label="Close filters">{{ icon("close", size=16) }}</button>
     </div>
     <div id="filter-panel-body" class="filter-panel-body">
         <div class="filter-loading">Loading filters...</div>

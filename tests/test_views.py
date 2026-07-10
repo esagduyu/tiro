@@ -251,5 +251,6 @@ def test_static_version_bumped_for_saved_views_ui():
     # M3.1 Tasks 1-4 under the old "63" pin), then 64 -> 65 in M3.2 Task 5
     # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage pill,
     # inbox-zero, logout SW-cache hardening landed across M3.2 Tasks 1-4
-    # under the old "64" pin).
-    assert STATIC_VERSION == "65"
+    # under the old "64" pin), then 65 -> 66 in the design-pass Task 11
+    # closeout sweep (final glyph sweep landed under the old "65" pin).
+    assert STATIC_VERSION == "66"

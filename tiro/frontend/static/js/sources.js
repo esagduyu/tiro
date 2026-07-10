@@ -22,6 +22,7 @@
  */
 
 import { esc, num, showToast } from "./core.js";
+import { icon } from "./icons.js";
 
 let sourcesData = [];
 let authorsData = [];
@@ -100,21 +101,21 @@ function renderSources() {
 function sourceRowHtml(s) {
     const typeLabel = s.source_type || "web";
     const domainOrSender = s.email_sender || s.domain || "";
-    const vipClass = s.is_vip ? "sources-vip-star active" : "sources-vip-star";
+    const vipClass = s.is_vip ? "icon-btn sources-vip-btn active" : "icon-btn sources-vip-btn";
     return `
         <tr>
-            <td>${esc(s.name || "Unnamed")}</td>
-            <td><span class="source-type-pill source-type-${esc(typeLabel)}">${esc(typeLabel)}</span></td>
-            <td>${esc(domainOrSender)}</td>
-            <td class="sources-col-count">${num(s.article_count)}</td>
-            <td class="sources-col-vip">
-                <span class="${vipClass}" data-action="vip" data-id="${s.id}" title="Toggle VIP">&#9733;</span>
+            <td data-label="Name">${esc(s.name || "Unnamed")}</td>
+            <td data-label="Type"><span class="source-type-pill source-type-${esc(typeLabel)}">${esc(typeLabel)}</span></td>
+            <td data-label="Domain / Sender">${esc(domainOrSender)}</td>
+            <td class="sources-col-count" data-label="Articles">${num(s.article_count)}</td>
+            <td class="sources-col-vip" data-label="VIP">
+                <button type="button" class="${vipClass}" data-action="vip" data-id="${s.id}" title="Toggle VIP">${icon("star", { size: 15 })}</button>
             </td>
-            <td class="sources-col-actions">
+            <td class="sources-col-actions" data-label="Actions">
                 <div class="sources-row-actions">
-                    <button class="sources-row-btn" data-action="edit" data-id="${s.id}">Edit</button>
-                    <button class="sources-row-btn" data-action="merge" data-id="${s.id}">Merge</button>
-                    <button class="sources-row-btn danger" data-action="delete" data-id="${s.id}">Delete</button>
+                    <button type="button" class="icon-btn" data-action="edit" data-id="${s.id}" title="Edit source">${icon("pencil", { size: 15 })}</button>
+                    <button type="button" class="btn btn-ghost" data-action="merge" data-id="${s.id}">Merge</button>
+                    <button type="button" class="btn btn-danger" data-action="delete" data-id="${s.id}">${icon("trash", { size: 14 })}Delete</button>
                 </div>
             </td>
         </tr>
@@ -150,7 +151,7 @@ function openEditSourceModal(id) {
         '<div class="settings-modal">' +
             '<div class="settings-modal-header">' +
                 "<h3>Edit source</h3>" +
-                '<button class="settings-modal-close" id="sources-modal-close">&times;</button>' +
+                '<button class="settings-modal-close" id="sources-modal-close" title="Close">' + icon("close", { size: 15 }) + "</button>" +
             "</div>" +
             '<div class="settings-modal-body">' +
                 '<div class="settings-field">' +
@@ -167,8 +168,8 @@ function openEditSourceModal(id) {
                 "</div>" +
             "</div>" +
             '<div class="settings-modal-actions">' +
-                '<button class="settings-cancel-btn" id="sources-modal-cancel">Cancel</button>' +
-                '<button class="settings-save-btn" id="sources-modal-save">Save</button>' +
+                '<button class="btn btn-ghost" id="sources-modal-cancel">Cancel</button>' +
+                '<button class="btn btn-primary" id="sources-modal-save">Save</button>' +
             "</div>" +
         "</div>";
     document.body.appendChild(overlay);
@@ -236,7 +237,7 @@ function openMergeSourceModal(id) {
         '<div class="settings-modal">' +
             '<div class="settings-modal-header">' +
                 `<h3>Merge "${esc(source.name)}" into...</h3>` +
-                '<button class="settings-modal-close" id="sources-modal-close">&times;</button>' +
+                '<button class="settings-modal-close" id="sources-modal-close" title="Close">' + icon("close", { size: 15 }) + "</button>" +
             "</div>" +
             '<div class="settings-modal-body">' +
                 '<div class="settings-field">' +
@@ -247,8 +248,8 @@ function openMergeSourceModal(id) {
                 '<div id="merge-force-warning" class="sources-force-warning" style="display: none;"></div>' +
             "</div>" +
             '<div class="settings-modal-actions">' +
-                '<button class="settings-cancel-btn" id="sources-modal-cancel">Cancel</button>' +
-                '<button class="settings-save-btn" id="sources-modal-save">Merge</button>' +
+                '<button class="btn btn-ghost" id="sources-modal-cancel">Cancel</button>' +
+                '<button class="btn btn-primary" id="sources-modal-save">Merge</button>' +
             "</div>" +
         "</div>";
     document.body.appendChild(overlay);
@@ -412,17 +413,17 @@ function renderAuthors() {
 }
 
 function authorRowHtml(a) {
-    const vipClass = a.is_vip ? "sources-vip-star active" : "sources-vip-star";
+    const vipClass = a.is_vip ? "icon-btn sources-vip-btn active" : "icon-btn sources-vip-btn";
     return `
         <tr>
-            <td>${esc(a.name || "Unknown")}</td>
-            <td class="sources-col-count">${num(a.article_count)}</td>
-            <td class="sources-col-vip">
-                <span class="${vipClass}" data-action="vip" data-id="${a.id}" title="Toggle VIP">&#9733;</span>
+            <td data-label="Name">${esc(a.name || "Unknown")}</td>
+            <td class="sources-col-count" data-label="Articles">${num(a.article_count)}</td>
+            <td class="sources-col-vip" data-label="VIP">
+                <button type="button" class="${vipClass}" data-action="vip" data-id="${a.id}" title="Toggle VIP">${icon("star", { size: 15 })}</button>
             </td>
-            <td class="sources-col-actions">
+            <td class="sources-col-actions" data-label="Actions">
                 <div class="sources-row-actions">
-                    <button class="sources-row-btn" data-action="merge" data-id="${a.id}">Merge</button>
+                    <button type="button" class="btn btn-ghost" data-action="merge" data-id="${a.id}">Merge</button>
                 </div>
             </td>
         </tr>
@@ -464,7 +465,7 @@ function openMergeAuthorModal(id) {
         '<div class="settings-modal">' +
             '<div class="settings-modal-header">' +
                 `<h3>Merge "${esc(author.name)}" into...</h3>` +
-                '<button class="settings-modal-close" id="sources-modal-close">&times;</button>' +
+                '<button class="settings-modal-close" id="sources-modal-close" title="Close">' + icon("close", { size: 15 }) + "</button>" +
             "</div>" +
             '<div class="settings-modal-body">' +
                 '<div class="settings-field">' +
@@ -474,8 +475,8 @@ function openMergeAuthorModal(id) {
                 `<p class="settings-modal-hint">All ${num(author.article_count)} article(s) credited to "${esc(author.name)}" will be re-credited to the target, and "${esc(author.name)}" will be removed.</p>` +
             "</div>" +
             '<div class="settings-modal-actions">' +
-                '<button class="settings-cancel-btn" id="sources-modal-cancel">Cancel</button>' +
-                '<button class="settings-save-btn" id="sources-modal-save">Merge</button>' +
+                '<button class="btn btn-ghost" id="sources-modal-cancel">Cancel</button>' +
+                '<button class="btn btn-primary" id="sources-modal-save">Merge</button>' +
             "</div>" +
         "</div>";
     document.body.appendChild(overlay);

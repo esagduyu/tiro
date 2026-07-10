@@ -27,6 +27,7 @@
  */
 
 import { esc, num, renderMarkdown, timeAgo } from "./core.js";
+import { icon } from "./icons.js";
 
 let wikiPageData = null; // cached GET /api/wiki/{slug} response for the page view
 let wikiRegenerating = false; // in-flight guard so rapid clicks can't fire concurrent POSTs
@@ -100,7 +101,7 @@ function renderWikiKindSection(kind, pages) {
     }
 
     section.style.display = "block";
-    tbody.innerHTML = pages.map(wikiRowHtml).join("");
+    tbody.innerHTML = pages.map((p) => wikiRowHtml(p, kind)).join("");
 
     tbody.querySelectorAll("tr[data-slug]").forEach((row) => {
         row.addEventListener("click", () => {
@@ -109,14 +110,15 @@ function renderWikiKindSection(kind, pages) {
     });
 }
 
-function wikiRowHtml(p) {
-    const staleBadge = p.status === "stale" ? '<span class="wiki-stale-badge">Stale</span>' : "";
+function wikiRowHtml(p, kind) {
+    const staleBadge = p.status === "stale" ? '<span class="pill wiki-stale-badge">Stale</span>' : "";
+    const leadIcon = icon(kind === "entity" ? "book-open" : "tag", { size: 15, cls: "wiki-row-icon" });
     const updatedRaw = p.updated_at
         ? timeAgo(new Date(p.updated_at.replace(" ", "T")))
         : (p.updated_at || "");
     return `
         <tr data-slug="${esc(p.slug)}" class="wiki-row">
-            <td>${esc(p.title)} ${staleBadge}</td>
+            <td class="wiki-title-cell">${leadIcon}<span class="wiki-title-text">${esc(p.title)}</span>${staleBadge}</td>
             <td class="sources-col-count">${num(p.source_count)}</td>
             <td>${esc(p.status)}</td>
             <td>${esc(updatedRaw)}</td>
@@ -165,9 +167,41 @@ function renderWikiPage(data) {
         : "";
     document.getElementById("wiki-page-updated").textContent = updatedText;
 
+    renderPinnedNote(data.user_pinned_note || "");
+
     const bodyEl = document.getElementById("wiki-page-body");
     const resolved = resolveWikilinks(data.body || "", data.citations || {});
     bodyEl.innerHTML = renderMarkdown(resolved);
+    decorateCitations(bodyEl);
+}
+
+/* Render the user's pinned note (frontmatter `user_pinned_note`) as a gold
+   callout. User-authored plain text — escaped, never markdown-rendered. */
+function renderPinnedNote(note) {
+    const el = document.getElementById("wiki-page-pinned");
+    if (!el) return;
+    const trimmed = String(note).trim();
+    if (!trimmed) {
+        el.style.display = "none";
+        el.textContent = "";
+        return;
+    }
+    el.style.display = "block";
+    el.innerHTML =
+        '<span class="wiki-pinned-label">Pinned note</span>' +
+        `<span class="wiki-pinned-body">${esc(trimmed)}</span>`;
+}
+
+/* Style resolved citation links (rendered by renderMarkdown as
+   `<a href="/articles/{id}">`) as file-text tag-chips. The links were already
+   DOMPurify-sanitized inside renderMarkdown; here we only add a class and a
+   leading icon from our own trusted icon() set. */
+function decorateCitations(bodyEl) {
+    bodyEl.querySelectorAll('a[href^="/articles/"]').forEach((a) => {
+        if (a.classList.contains("wiki-citation")) return;
+        a.classList.add("tag-chip", "wiki-citation");
+        a.insertAdjacentHTML("afterbegin", icon("file-text", { size: 12 }));
+    });
 }
 
 /* --- Wikilink resolution (security-sensitive: runs BEFORE markdown render) ---

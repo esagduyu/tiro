@@ -32,6 +32,21 @@
  */
 
 import { renderMarkdown, timeAgo } from "./core.js";
+import { icon } from "./icons.js";
+
+/* Masthead date shown in the serif "Daily Digest ⁊ {date}" header. Purely
+ * cosmetic: defaults to today at init, then reflects whichever digest is
+ * currently shown (its created_at day) via updateDigestBanner(). */
+function setDigestTitleDate(d) {
+    const el = document.getElementById("digest-title-date");
+    if (el) {
+        el.textContent = d.toLocaleDateString("en-US", {
+            month: "long",
+            day: "numeric",
+            year: "numeric",
+        });
+    }
+}
 
 let digestData = null; // cached digest response
 let digestLoaded = false;
@@ -221,14 +236,24 @@ function updateDigestBanner(data) {
     }
 
     const then = new Date(section.created_at.replace(" ", "T"));
+    setDigestTitleDate(then);
     const diffHr = (new Date() - then) / 3600000;
     const stale = diffHr >= 24;
     const ago = timeAgo(then);
 
-    banner.className = stale ? "digest-banner digest-banner-stale" : "digest-banner";
-    banner.innerHTML = stale
-        ? `Digest is ${ago} old — new articles may not be included. <button class="digest-refresh-inline">Regenerate now</button>`
-        : `Generated ${ago} <button class="digest-refresh-inline">Regenerate</button>`;
+    banner.className = stale
+        ? "digest-banner callout callout-gold digest-banner-stale"
+        : "digest-banner";
+    const lead = stale
+        ? `<span class="digest-banner-icon" aria-hidden="true">${icon("alert", { size: 15 })}</span>`
+        : "";
+    const msg = stale
+        ? `Digest is ${ago} old — new articles may not be included.`
+        : `Generated ${ago}`;
+    const btnLabel = stale ? "Regenerate now" : "Regenerate";
+    banner.innerHTML =
+        `${lead}<span class="digest-banner-text">${msg}</span>` +
+        `<button class="digest-refresh-inline btn btn-ghost">${icon("refresh", { size: 13 })}<span>${btnLabel}</span></button>`;
     banner.style.display = "flex";
 
     // Was an inline onclick="loadDigest(true)" in the pre-module version —
@@ -415,6 +440,7 @@ async function saveDigestSchedule() {
 
 document.addEventListener("DOMContentLoaded", () => {
     if (!document.querySelector(".digest-tab")) return;
+    setDigestTitleDate(new Date());
     setupDigestTabs();
     if (!digestLoaded) {
         loadDigest(false);

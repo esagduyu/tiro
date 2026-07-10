@@ -51,10 +51,10 @@ test.describe('Phase 0 core loop', () => {
     await expect(page).toHaveURL(/\/inbox/);
 
     // --- Save an article via the "+" Save modal ---
-    // Use the #save-btn id rather than a role/name lookup: the inbox rating
-    // buttons ("Like"/"Dislike") also render literal "+"/"−" text, which
+    // Use the #sidebar-save-btn id rather than a role/name lookup: the inbox
+    // rating buttons ("Like"/"Dislike") also render literal "+"/"−" text, which
     // makes name-based lookups ambiguous once the library has articles.
-    await page.locator('#save-btn').click();
+    await page.locator('#sidebar-save-btn').click();
     const urlInput = page.getByRole('textbox', { name: 'Paste a URL...' });
     await expect(urlInput).toBeVisible();
     await urlInput.fill(TEST_URL);

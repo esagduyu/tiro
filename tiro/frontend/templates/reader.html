@@ -1,6 +1,9 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Reading{% endblock %}
+{% block page_title %}Reading{% endblock %}
+{% block body_class %}reader-page{% endblock %}
 
 {% block content %}
 <article id="reader" class="reader" data-article-id="{{ article_id }}" data-telemetry="{{ 'on' if reading_telemetry_enabled else 'off' }}">
@@ -11,22 +14,31 @@
     </div>
     <div id="reader-content" style="display: none;">
         <nav class="reader-nav">
-            <a href="/inbox" class="back-link">&larr; Back to inbox</a>
+            <a href="/inbox" class="back-link">{{ icon("chevron-left", size=15) }} Inbox</a>
             <div class="reader-actions">
-                <button id="analysis-btn" class="analysis-btn" title="Ingenuity Analysis">&#9432;</button>
-                <button id="highlights-btn" class="analysis-btn" title="Highlights &amp; Notes">&#9998;</button>
-                <button id="article-note-btn" class="analysis-btn" title="Article note">&#128196;</button>
-                <button class="rate-btn love" data-rating="2" title="Love">&hearts;</button>
-                <button class="rate-btn like" data-rating="1" title="Like">&plus;</button>
-                <button class="rate-btn dislike" data-rating="-1" title="Dislike">&minus;</button>
-                <button id="delete-btn" class="analysis-btn" title="Delete article">&#128465;</button>
+                <button id="analysis-btn" class="icon-btn" title="Ingenuity Analysis">{{ icon("info", size=15) }}</button>
+                <button id="highlights-btn" class="icon-btn" title="Highlights &amp; Notes">{{ icon("highlighter", size=15) }}</button>
+                <button id="article-note-btn" class="icon-btn" title="Article note">{{ icon("note", size=15) }}</button>
+                <button id="reader-vip-btn" class="icon-btn vip-btn" title="Toggle VIP">{{ icon("star", size=15) }}</button>
+                <button class="rate-btn icon-btn love" data-rating="2" title="Love">{{ icon("heart", size=15) }}</button>
+                <button class="rate-btn icon-btn like" data-rating="1" title="Like">{{ icon("thumb-up", size=15) }}</button>
+                <button class="rate-btn icon-btn dislike" data-rating="-1" title="Dislike">{{ icon("thumb-down", size=15) }}</button>
+                <div class="card-menu reader-menu">
+                    <button id="reader-kebab-btn" class="card-menu-btn icon-btn"
+                            aria-haspopup="true" aria-expanded="false"
+                            title="More actions">{{ icon("kebab", size=15) }}</button>
+                    <div class="card-menu-dropdown" hidden>
+                        <a id="reader-kebab-original" class="card-menu-item" target="_blank" rel="noopener noreferrer" style="display: none;">{{ icon("external", size=14) }}Read original</a>
+                        <button id="delete-btn" class="card-menu-item card-menu-danger" title="Delete article">{{ icon("trash", size=14) }}Delete</button>
+                    </div>
+                </div>
             </div>
         </nav>
         <header class="reader-header">
-            <h1 id="reader-title"></h1>
+            <h1 id="reader-title" class="page-title-serif"></h1>
             <div class="reader-meta">
                 <span id="reader-source" class="source-name"></span>
-                <span id="reader-vip" class="vip-star" style="display: none;">&#9733;</span>
+                <span id="reader-vip" class="vip-star" style="display: none;">{{ icon("star", size=13, cls="vip-star-icon") }}</span>
                 <span class="meta-sep">&middot;</span>
                 <span id="reader-author"></span>
                 <span class="meta-sep" id="author-sep">&middot;</span>
@@ -39,7 +51,7 @@
             </div>
             <div id="reader-tags" class="article-tags"></div>
         </header>
-        <div id="reader-summary" class="reader-summary"></div>
+        <div id="reader-summary" class="reader-summary callout"></div>
         <div id="audio-player" class="audio-player" style="display: none;">
             <div id="audio-generate" class="audio-generate">
                 <button id="audio-generate-btn" class="audio-generate-btn">Listen to this article</button>
@@ -49,14 +61,14 @@
                 <span>Generating audio...</span>
             </div>
             <div id="audio-controls" class="audio-controls" style="display: none;">
-                <button id="audio-play-btn" class="audio-play-btn" title="Play/Pause">&#9654;</button>
+                <button id="audio-play-btn" class="audio-play-btn" title="Play/Pause">{{ icon("play", size=15) }}</button>
                 <div class="audio-progress-wrap">
                     <div id="audio-progress" class="audio-progress">
                         <div id="audio-progress-fill" class="audio-progress-fill"></div>
                     </div>
                 </div>
-                <span id="audio-time" class="audio-time">0:00 / 0:00</span>
-                <button id="audio-speed-btn" class="audio-speed-btn" title="Playback speed">1x</button>
+                <span id="audio-time" class="audio-time serif-num">0:00 / 0:00</span>
+                <button id="audio-speed-btn" class="audio-speed-btn mode-pill" title="Playback speed">1x</button>
             </div>
             <audio id="audio-el"></audio>
         </div>
@@ -75,7 +87,7 @@
 <div id="analysis-panel" class="analysis-panel">
     <div class="analysis-panel-header">
         <h3>Ingenuity Analysis</h3>
-        <button id="analysis-close" class="analysis-close">&times;</button>
+        <button id="analysis-close" class="analysis-close" aria-label="Close">{{ icon("close", size=16) }}</button>
     </div>
     <div id="analysis-intro" class="analysis-intro">
         <p class="analysis-intro-text">
@@ -95,7 +107,7 @@
                 <span>Assesses originality of ideas and unique contribution to discourse</span>
             </div>
         </div>
-        <button id="analysis-run-btn" class="analysis-run-btn">Run Ingenuity Analysis with Opus 4.6</button>
+        <button id="analysis-run-btn" class="analysis-run-btn btn btn-block btn-primary">Run Ingenuity Analysis with Opus 4.6</button>
     </div>
     <div id="analysis-loading" class="analysis-loading" style="display: none;">
         <div class="digest-spinner"></div>
@@ -118,7 +130,7 @@
 <div id="highlights-panel" class="analysis-panel highlights-panel">
     <div class="analysis-panel-header">
         <h3>Highlights &amp; Notes</h3>
-        <button id="highlights-close" class="analysis-close">&times;</button>
+        <button id="highlights-close" class="analysis-close" aria-label="Close">{{ icon("close", size=16) }}</button>
     </div>
 
     <div id="note-drawer" class="note-drawer">
@@ -148,6 +160,30 @@
     </div>
 </div>
 <div id="highlights-overlay" class="analysis-overlay"></div>
+
+<!-- Phone reader action bar (spec §6): fixed bottom, same geometry as the
+     bottom tab bar (which is CSS-hidden on body.reader-page ≤768px). Every
+     button delegates to an EXISTING reader.js handler/control — no new logic
+     paths. Wired in reader.js's setupReaderActionBar(). Present in the DOM on
+     all form factors but CSS-shown only ≤768px. -->
+<nav id="reader-action-bar" aria-label="Reader actions">
+    <a href="/inbox" class="tab-slot" aria-label="Back to inbox">{{ icon("chevron-left", size=20) }}<span>Back</span></a>
+    <button class="tab-slot reader-bar-rate love" data-rating="2" aria-label="Love">{{ icon("heart", size=20) }}</button>
+    <button class="tab-slot reader-bar-rate like" data-rating="1" aria-label="Like">{{ icon("thumb-up", size=20) }}</button>
+    <button class="tab-slot reader-bar-rate dislike" data-rating="-1" aria-label="Dislike">{{ icon("thumb-down", size=20) }}</button>
+    <button id="reader-bar-audio" class="tab-slot" aria-label="Play/Pause" style="display: none;">{{ icon("play", size=20) }}</button>
+    <button id="reader-bar-note" class="tab-slot" aria-label="Article note">{{ icon("note", size=20) }}</button>
+    <button class="tab-slot" data-sheet="reader-overflow-sheet" aria-label="More actions">{{ icon("kebab", size=20) }}</button>
+</nav>
+<div id="reader-overflow-sheet" class="sheet" hidden>
+    <div class="sheet-scrim" data-sheet-close></div>
+    <div class="sheet-panel">
+        <button id="reader-sheet-analysis" data-sheet-close>{{ icon("info", size=22) }}<span>Analysis</span></button>
+        <button id="reader-sheet-vip" data-sheet-close>{{ icon("star", size=22) }}<span>VIP</span></button>
+        <button id="reader-sheet-delete" data-sheet-close>{{ icon("trash", size=22) }}<span>Delete</span></button>
+        <a id="reader-sheet-original" target="_blank" rel="noopener noreferrer" data-sheet-close style="display: none;">{{ icon("external", size=22) }}<span>Read original</span></a>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}

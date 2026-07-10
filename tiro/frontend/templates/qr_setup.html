@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Mobile Login{% endblock %}
+{% block page_title %}Mobile Login{% endblock %}
 {% block nav_settings %}active{% endblock %}
 
 {% block content %}
@@ -11,7 +13,9 @@
 </section>
 
 <div class="settings-section">
-    <h3 class="settings-section-title">Scan to sign in</h3>
+    <h3 class="settings-section-title">
+        <span class="settings-section-icon">{{ icon("phone", size=18) }}</span>Scan to sign in
+    </h3>
     <p class="settings-section-desc">
         Scan this code with your phone's camera to open Tiro there, already
         signed in &mdash; no password to type. The code is single-use and
@@ -19,6 +23,7 @@
     </p>
 
     <div class="qr-setup-card">
+        <p class="qr-setup-overline">Point your camera here</p>
         <div class="qr-setup-svg">{{ qr_svg | safe }}</div>
         <p class="qr-setup-url">{{ qr_url }}</p>
         <p class="qr-setup-countdown" id="qr-countdown" data-ttl-seconds="{{ qr_ttl_minutes * 60 }}">
@@ -28,8 +33,8 @@
 </div>
 
 <form method="post" action="/setup/qr" class="settings-configure">
-    <button type="submit" class="settings-configure-btn settings-configure-btn-secondary">
-        Generate new code
+    <button type="submit" class="btn btn-ghost">
+        {{ icon("refresh", size=15) }}<span>Generate new code</span>
     </button>
 </form>
 
@@ -41,6 +46,18 @@
     gap: 0.75rem;
     padding: 1.5rem;
     max-width: 320px;
+    background: var(--tiro-bg-surface);
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-lg);
+}
+.qr-setup-overline {
+    font-family: var(--tiro-font-serif);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tiro-muted);
+    margin: 0;
 }
 .qr-setup-svg {
     background: #fff;

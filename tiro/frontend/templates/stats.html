@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Reading Stats{% endblock %}
+{% block page_title %}Stats{% endblock %}
 {% block nav_stats %}active{% endblock %}
 
 {% block content %}
@@ -14,13 +16,13 @@
             <option value="month" selected>Last 30 days</option>
             <option value="all">All time</option>
         </select>
-        <button id="export-btn" class="export-btn" title="Export library as zip">Export</button>
+        <button id="export-btn" class="btn btn-primary" title="Export library as zip">{{ icon("download", size=14) }}<span>Export</span></button>
     </div>
 </div>
 
 <!-- Summary cards -->
 <div class="stats-summary" id="stats-summary">
-    <div class="stat-card">
+    <div class="stat-card stat-card-hero">
         <span class="stat-value" id="stat-saved">-</span>
         <span class="stat-label">Saved</span>
     </div>
@@ -36,7 +38,7 @@
         <span class="stat-value" id="stat-time">-</span>
         <span class="stat-label">Reading time</span>
     </div>
-    <div class="stat-card stat-card-accent">
+    <div class="stat-card">
         <span class="stat-value" id="stat-streak">-</span>
         <span class="stat-label">Day streak</span>
     </div>

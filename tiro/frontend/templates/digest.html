@@ -1,19 +1,27 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}Tiro ⁊ Digest{% endblock %}
+{% block page_title %}Digest{% endblock %}
 {% block nav_digest %}active{% endblock %}
 
 {% block content %}
 <section class="digest-view">
+    <header class="digest-header">
+        <h1 class="page-title-serif digest-title">Daily Digest <span class="digest-title-et" aria-hidden="true">⁊</span> <span id="digest-title-date" class="digest-title-date"></span></h1>
+    </header>
     <div class="digest-tabs">
-        <button class="digest-tab active" data-type="ranked">Ranked</button>
-        <button class="digest-tab" data-type="by_topic">By Topic</button>
-        <button class="digest-tab" data-type="by_entity">By Entity</button>
-        <select id="digest-history" class="digest-history-select" title="Browse previous digests">
-            <option value="today">Today</option>
-        </select>
-        <button id="digest-schedule-btn" class="digest-schedule-btn" title="Schedule daily digest">&#128340; Schedule</button>
-        <button class="digest-refresh" id="digest-refresh" title="Regenerate digest">&#8635;</button>
+        <button class="digest-tab mode-pill active" data-type="ranked">Ranked</button>
+        <button class="digest-tab mode-pill" data-type="by_topic">By Topic</button>
+        <button class="digest-tab mode-pill" data-type="by_entity">By Entity</button>
+        <span class="digest-history-wrap">
+            <span class="digest-history-icon" aria-hidden="true">{{ icon("calendar", size=15) }}</span>
+            <select id="digest-history" class="digest-history-select" title="Browse previous digests">
+                <option value="today">Today</option>
+            </select>
+        </span>
+        <button id="digest-schedule-btn" class="btn btn-ghost digest-schedule-btn" title="Schedule daily digest">{{ icon("clock", size=14) }}<span>Schedule</span></button>
+        <button class="digest-refresh icon-btn" id="digest-refresh" title="Regenerate digest" aria-label="Regenerate digest">{{ icon("refresh", size=15) }}</button>
     </div>
 
     <!-- Schedule modal -->
@@ -21,7 +29,7 @@
         <div class="save-modal">
             <div class="save-modal-header">
                 <h3>Digest Schedule</h3>
-                <button id="digest-schedule-close" class="shortcuts-close">&times;</button>
+                <button id="digest-schedule-close" class="modal-close" aria-label="Close">{{ icon("close", size=16) }}</button>
             </div>
             <div class="save-modal-body">
                 <div class="schedule-form">
@@ -36,7 +44,7 @@
                         <input type="checkbox" id="schedule-unread-only"> Unread articles only
                     </label>
                     <div class="schedule-row schedule-email-status" id="schedule-email-status"></div>
-                    <button id="schedule-save-btn" class="save-submit-btn">Save Schedule</button>
+                    <button id="schedule-save-btn" class="btn btn-primary btn-block">Save Schedule</button>
                 </div>
             </div>
         </div>

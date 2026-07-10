@@ -40,6 +40,7 @@ const ARTICLES_CACHE = `tiro-${VERSION}-articles`;
 const PRECACHE_URLS = [
     "/offline",
     "/static/js/core.js?v=__STATIC_VERSION__",
+    "/static/js/icons.js?v=__STATIC_VERSION__",
     "/static/vendor/marked.min.js?v=__STATIC_VERSION__",
     "/static/vendor/purify.min.js?v=__STATIC_VERSION__",
 ];

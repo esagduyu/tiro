@@ -58,7 +58,7 @@ def test_wiki_page_view_loads_wiki_js(authenticated_client):
     assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
-def test_static_version_is_65():
+def test_static_version_is_66():
     from tiro.app import STATIC_VERSION
 
     # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout), then
@@ -69,10 +69,15 @@ def test_static_version_is_65():
     # banner: sidebar.js/base.html/styles.css), then 63 -> 64 in M3.1
     # Task 5 (PWA + remote-wizard closeout), then 64 -> 65 in M3.2 Task 5
     # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage
-    # pill, inbox-zero, logout SW-cache hardening) — see
-    # tests/test_static_version.py for the import-map pin that owns the
-    # details of what changed at the 60 bump specifically.
-    assert STATIC_VERSION == "65"
+    # pill, inbox-zero, logout SW-cache hardening), then 65 -> 66 in the
+    # design-pass Task 11 closeout sweep (glyph sweep: graph.html node-panel
+    # close button, base.html LAN-banner dismiss, reader.html analysis/
+    # highlights panel close buttons all switched from literal &times; to
+    # the icons.js/_icons.html "close" glyph; orphaned .shortcuts-close and
+    # .graph-node-panel-close CSS removed) — see tests/test_static_version.py
+    # for the import-map pin that owns the details of what changed at the
+    # 60 bump specifically.
+    assert STATIC_VERSION == "66"
 
 
 # --- Sidebar nav link ----------------------------------------------------------
@@ -84,12 +89,15 @@ def test_base_html_has_wiki_nav_link(authenticated_client):
     assert 'href="/wiki"' in r.text
 
 
-def test_base_html_wiki_link_between_graph_and_sources():
+def test_base_html_library_nav_order():
+    # Design pass (Task 3) reordered the Library section to
+    # Wiki -> Highlights -> Sources -> Graph -> Stats (spec §6). Wiki now
+    # leads the section and Graph follows Sources.
     base_html = (TEMPLATES_DIR / "base.html").read_text()
-    graph_pos = base_html.index('href="/graph"')
     wiki_pos = base_html.index('href="/wiki"')
     sources_pos = base_html.index('href="/sources"')
-    assert graph_pos < wiki_pos < sources_pos
+    graph_pos = base_html.index('href="/graph"')
+    assert wiki_pos < sources_pos < graph_pos
 
 
 def test_wiki_page_marks_nav_wiki_active(authenticated_client):

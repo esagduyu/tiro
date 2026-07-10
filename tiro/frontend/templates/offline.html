@@ -27,13 +27,11 @@
     .offline-card {
       width: min(92vw, 640px);
     }
-    .offline-badge {
-      display: inline-block; margin-bottom: 0.75rem;
-      padding: 0.2rem 0.6rem; border-radius: 999px;
-      background: var(--tiro-tier-must-read, #B5334D); color: #fff;
-      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em;
-      text-transform: uppercase;
+    .offline-empty-mark {
+      color: var(--tiro-muted, #9C9389);
+      margin-bottom: 0.75rem;
     }
+    .offline-empty-mark svg { display: block; }
     h1 {
       margin: 0 0 0.5rem; font-size: 1.6rem; font-weight: 700;
       font-family: Georgia, 'Times New Roman', serif;
@@ -76,7 +74,17 @@
 </head>
 <body>
   <div class="offline-card">
-    <span class="offline-badge">Offline</span>
+    <!-- Empty-state mark: "layers" icon, hand-inlined verbatim from
+         static/js/icons.js ICONS.layers.body (this standalone page can't
+         import icons.js — it must render from the SW precache with zero
+         network, so the macro/module path isn't available here). Keep in
+         sync if the canonical layers glyph ever changes. -->
+    <div class="offline-empty-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3 3 8l9 5 9-5z"/><path d="M3 13l9 5 9-5"/>
+      </svg>
+    </div>
     <h1>You're offline</h1>
     <p class="sub" id="offline-sub">
       Tiro can't reach the server right now. Here's what's already saved

@@ -47,7 +47,7 @@ async function loginOrSetup(page) {
 // response rather than off DOM text — two articles both titled "Example
 // Domain" are otherwise indistinguishable by name.
 async function saveArticle(page, uniqueSuffix) {
-  await page.locator('#save-btn').click();
+  await page.locator('#sidebar-save-btn').click();
   const urlInput = page.getByRole('textbox', { name: 'Paste a URL...' });
   await expect(urlInput).toBeVisible();
   await urlInput.fill(`${TEST_URL}/?snooze-ui-spec=${uniqueSuffix}`);
