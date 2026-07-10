@@ -49,6 +49,8 @@ The product itself decomposes into three components the phases advance: (1) the 
 
 ## Product Principles
 
+> **`VISION.md` (added 2026-07-10) is the authoritative statement of Tiro's five core principles** — the reading library, inbox management, tracking & intelligence, data ownership, and compounding knowledge — and the standard every feature and phase is judged against. Read it alongside this front matter before planning. The engineering-posture principles below stand unchanged; they are the operational form of VISION.md's principles 3, 4, and 5.
+
 - **Local-first, cloud-optional** — local use must remain first-class and never feel like a trial.
 - **Source-preserving** — never mutate the original saved article markdown to store personal data. Use sidecars.
 - **Bring-your-own-AI by default** — API keys, local models, and external assistants must all be supported.
