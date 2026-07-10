@@ -18,6 +18,7 @@ from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
+from tiro.paths import platform_default_library
 from tiro.scheduler import PeriodicTask, Scheduler
 from tiro.vectorstore import init_vectorstore
 
@@ -27,7 +28,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "67"
+STATIC_VERSION = "68"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -60,7 +61,23 @@ def _theme_context(request: Request) -> dict:
         "theme_light_href": _theme_href(config, config.theme_light, "papyrus"),
         "theme_dark_href": _theme_href(config, config.theme_dark, "roman-night"),
         "insecure_lan_http": getattr(request.app.state, "insecure_lan_http", False),
+        "library_at_legacy_default": _library_at_legacy_default(config),
     }
+
+
+def _library_at_legacy_default(config: TiroConfig) -> bool:
+    """True when the effective library resolves to the legacy CWD-relative
+    `./tiro-library` default AND the platform-standard location is not in use
+    (spec D3). Drives base.html's dismissible migrate-library suggestion banner.
+    The check is purely cosmetic — a resolve() comparison against the CWD, never
+    a filesystem mutation — so any surprise (e.g. a symlink oddity) degrades to
+    "no banner", never an error on a page render."""
+    try:
+        lib = config.library
+        legacy = (Path.cwd() / "tiro-library").resolve()
+        return lib == legacy and lib != platform_default_library().resolve()
+    except OSError:
+        return False
 
 
 def _qr_svg(data: str) -> str:

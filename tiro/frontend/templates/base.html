@@ -35,6 +35,13 @@
         <button id="lan-http-banner-dismiss" class="lan-http-banner-dismiss" aria-label="Dismiss">{{ icon("close", size=15) }}</button>
     </div>
     {% endif %}
+    {% if library_at_legacy_default %}
+    <div id="libmove-banner" class="libmove-banner" role="status">
+        {{ icon("info", size=15) }}
+        <span class="libmove-banner-text">Your library is in the old default location. Move it to the standard place with <code>tiro migrate-library</code> (copies then confirms &mdash; the old copy is never deleted).</span>
+        <button id="libmove-banner-dismiss" class="libmove-banner-dismiss" aria-label="Dismiss">{{ icon("close", size=15) }}</button>
+    </div>
+    {% endif %}
     <!-- Left sidebar navigation -->
     <nav id="sidebar" class="sidebar">
         <div class="sidebar-brand">

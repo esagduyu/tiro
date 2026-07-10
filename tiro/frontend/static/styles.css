@@ -224,6 +224,54 @@ body.has-lan-banner .content {
     }
 }
 
+/* --- Legacy-library-path suggestion banner (Phase 5 D3) ---
+   Unlike the LAN banner above, this is a NON-fixed, in-flow strip: it scrolls
+   with the page and needs no body-offset math, so it can never collide with
+   the fixed LAN banner's layout reservations if both happen to render. A softer
+   informational look (secondary/olive tone, not the crimson must-read alarm) --
+   this is a one-time nudge, not a security warning. */
+.libmove-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    position: relative;
+    padding: 0.5rem 2.75rem;
+    background: var(--tiro-secondary, #6B7F4E);
+    color: #fff;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    text-align: center;
+}
+
+.libmove-banner-text code {
+    background: rgba(255, 255, 255, 0.18);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.libmove-banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #fff;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    opacity: 0.85;
+}
+
+.libmove-banner-dismiss:hover {
+    opacity: 1;
+}
+
 /* ============ chrome (sidebar, icon rail, tab bar, mobile header, sheets) === */
 
 /* --- Layout: Sidebar --- */
