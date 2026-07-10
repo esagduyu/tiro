@@ -18,7 +18,7 @@ from tiro import __version__, auth
 from tiro.config import TiroConfig, load_config
 from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
-from tiro.scheduler import Scheduler
+from tiro.scheduler import PeriodicTask, Scheduler
 from tiro.vectorstore import init_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -186,49 +186,52 @@ def _detect_lan_ips() -> list[str]:
     return sorted(candidate_ips)
 
 
-async def _imap_sync_loop(config: TiroConfig):
-    """Background task that checks IMAP inbox on a schedule."""
+def _make_imap_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the IMAP inbox sync loop (M4.0).
+
+    Sleep-first (preserves the pre-M4.0 loop shape). `next_delay` encodes the
+    original before-sleep guard (interval 0 or receive-disabled ⇒ stop looping);
+    `run_once` re-checks the config after the sleep, matching the original
+    loop's second guard — config may have been disabled while we slept.
+    """
     from tiro.ingestion.imap import check_imap_inbox
 
-    while True:
-        interval = config.imap_sync_interval
-        if interval <= 0 or not config.imap_enabled:
-            return
+    def next_delay() -> float:
+        if config.imap_sync_interval <= 0 or not config.imap_enabled:
+            return 0
+        return config.imap_sync_interval * 60
 
-        await asyncio.sleep(interval * 60)
-
+    async def run_once() -> None:
         if not config.imap_enabled or config.imap_sync_interval <= 0:
             return
+        result = await asyncio.to_thread(check_imap_inbox, config)
+        if result["fetched"] > 0:
+            logger.info(
+                "IMAP sync: %d fetched, %d processed, %d skipped, %d failed",
+                result["fetched"], result["processed"],
+                result["skipped"], result["failed"],
+            )
+        else:
+            logger.debug("IMAP sync: no new messages")
 
-        try:
-            result = await asyncio.to_thread(check_imap_inbox, config)
-            if result["fetched"] > 0:
-                logger.info(
-                    "IMAP sync: %d fetched, %d processed, %d skipped, %d failed",
-                    result["fetched"], result["processed"],
-                    result["skipped"], result["failed"],
-                )
-            else:
-                logger.debug("IMAP sync: no new messages")
-        except Exception as e:
-            logger.error("IMAP sync failed: %s", e)
+    return PeriodicTask("imap", run_once, next_delay)
 
 
-async def _vector_retry_loop(config: TiroConfig):
-    """Background task that retries pending ChromaDB vector adds on a schedule."""
+def _make_vector_retry_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the ChromaDB pending-vector retry loop (M4.0)."""
     from tiro.vectorstore import retry_pending_vectors
 
-    while True:
-        interval = config.vector_retry_interval
-        if interval <= 0:
-            return
-        await asyncio.sleep(interval * 60)
-        try:
-            n = await asyncio.to_thread(retry_pending_vectors, config)
-            if n:
-                logger.info("Vector retry: indexed %d pending article(s)", n)
-        except Exception as e:
-            logger.error("Vector retry loop error: %s", e)
+    def next_delay() -> float:
+        if config.vector_retry_interval <= 0:
+            return 0
+        return config.vector_retry_interval * 60
+
+    async def run_once() -> None:
+        n = await asyncio.to_thread(retry_pending_vectors, config)
+        if n:
+            logger.info("Vector retry: indexed %d pending article(s)", n)
+
+    return PeriodicTask("vector_retry", run_once, next_delay)
 
 
 def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
@@ -261,43 +264,50 @@ def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     return max(delta, 60)  # At least 60 seconds to avoid tight loops
 
 
-async def _digest_schedule_loop(config: TiroConfig):
-    """Background task that generates + emails digests on schedule."""
+def _make_digest_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the scheduled digest generate + email loop (M4.0).
+
+    Sleep-first. The time-of-day schedule fits the `next_delay` hook via the
+    existing `_compute_sleep_until` (untouched); the "next run in N seconds" log
+    line moves into `next_delay` where the sleep is decided. `last_email_date`
+    (the send-once-per-day dedup) persists across cycles in a closure cell.
+    """
     from tiro.intelligence.digest import generate_digest
     from tiro.intelligence.email_digest import send_digest_email
 
-    last_email_date = None
+    state = {"last_email_date": None}
 
-    while True:
+    def next_delay() -> float:
         if not config.digest_schedule_enabled:
-            return
-
+            return 0
         sleep_secs = _compute_sleep_until(config.digest_schedule_time, config.digest_timezone_offset)
-        logger.info("Digest scheduler: next run in %.0f seconds (at %s)", sleep_secs, config.digest_schedule_time)
-        await asyncio.sleep(sleep_secs)
+        logger.info(
+            "Digest scheduler: next run in %.0f seconds (at %s)",
+            sleep_secs, config.digest_schedule_time,
+        )
+        return sleep_secs
 
+    async def run_once() -> None:
         # Re-check config (may have been disabled while sleeping)
         if not config.digest_schedule_enabled:
             return
-
         today = datetime.now(UTC).strftime("%Y-%m-%d")
-        try:
-            result = await asyncio.to_thread(
-                generate_digest, config, unread_only=config.digest_unread_only
-            )
-            logger.info("Scheduled digest generated for %s (%d sections)", today, len(result))
+        result = await asyncio.to_thread(
+            generate_digest, config, unread_only=config.digest_unread_only
+        )
+        logger.info("Scheduled digest generated for %s (%d sections)", today, len(result))
 
-            # Auto-email if SMTP configured and haven't sent today
-            if config.smtp_user and config.smtp_password and config.digest_email:
-                if last_email_date != today:
-                    try:
-                        await asyncio.to_thread(send_digest_email, config, True)
-                        last_email_date = today
-                        logger.info("Scheduled digest emailed to %s", config.digest_email)
-                    except Exception as e:
-                        logger.error("Scheduled digest email failed: %s", e)
-        except Exception as e:
-            logger.error("Scheduled digest generation failed: %s", e)
+        # Auto-email if SMTP configured and haven't sent today
+        if config.smtp_user and config.smtp_password and config.digest_email:
+            if state["last_email_date"] != today:
+                try:
+                    await asyncio.to_thread(send_digest_email, config, True)
+                    state["last_email_date"] = today
+                    logger.info("Scheduled digest emailed to %s", config.digest_email)
+                except Exception as e:
+                    logger.error("Scheduled digest email failed: %s", e)
+
+    return PeriodicTask("digest", run_once, next_delay)
 
 
 @asynccontextmanager
@@ -358,17 +368,17 @@ async def lifespan(app: FastAPI):
 
     # Start IMAP sync background task if configured
     if config.imap_enabled and config.imap_sync_interval > 0:
-        scheduler.start("imap", _imap_sync_loop(config))
+        scheduler.start_periodic("imap", _make_imap_task(config))
         logger.info("IMAP sync started: every %d minutes", config.imap_sync_interval)
 
     # Start digest schedule background task if configured
     if config.digest_schedule_enabled:
-        scheduler.start("digest", _digest_schedule_loop(config))
+        scheduler.start_periodic("digest", _make_digest_task(config))
         logger.info("Digest schedule started: daily at %s", config.digest_schedule_time)
 
     # Start vector retry background task if configured
     if config.vector_retry_interval > 0:
-        scheduler.start("vector_retry", _vector_retry_loop(config))
+        scheduler.start_periodic("vector_retry", _make_vector_retry_task(config))
         logger.info("Vector retry started: every %d minutes", config.vector_retry_interval)
 
     # mDNS/Bonjour advertisement (Phase 3 M3.0): opt-in, and only meaningful
@@ -774,6 +784,11 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
             "digest": _running("digest_task"),
             "vector_retry": _running("vector_retry_task"),
         }
+        # Additive (M4.0): richer per-loop introspection from the PeriodicTask
+        # registry (last_run/last_success/last_error/consecutive_failures).
+        # `tasks` above stays as the back-compat boolean liveness readout.
+        sched = getattr(app.state, "scheduler", None)
+        body["periodic"] = sched.periodic_status() if sched else {}
         return body
 
     @app.get("/login", response_class=HTMLResponse)
