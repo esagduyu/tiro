@@ -179,6 +179,29 @@ def test_import_opml_dedupes_against_existing(authenticated_client, configured_l
     assert len(_feed_urls(configured_library)) == 3
 
 
+def test_import_opml_rejects_non_http_scheme_per_row(authenticated_client, configured_library):
+    """An OPML xmlUrl with a non-http(s) scheme (javascript:/file:/data:) is
+    rejected per-row (same allowlist POST /api/feeds enforces) and reported in
+    `errors`, without 400-ing the whole import — the valid row still lands."""
+    xml = (
+        b'<?xml version="1.0"?><opml version="2.0"><head/><body>'
+        b'<outline type="rss" text="Good" xmlUrl="https://good.example.com/feed"/>'
+        b'<outline type="rss" text="Evil" xmlUrl="javascript:alert(1)"/>'
+        b'<outline type="rss" text="File" xmlUrl="file:///etc/passwd"/>'
+        b"</body></opml>"
+    )
+    r = authenticated_client.post(
+        "/api/feeds/import", files={"file": ("mixed.opml", xml, "text/x-opml+xml")}
+    )
+    assert r.status_code == 200
+    body = r.json()["data"]
+    assert body["added"] == 1
+    assert len(body["errors"]) == 2
+    assert all("http or https" in e for e in body["errors"])
+    # Only the http(s) feed was persisted.
+    assert _feed_urls(configured_library) == {"https://good.example.com/feed"}
+
+
 def test_import_hostile_opml_returns_400(authenticated_client):
     data = (FIXTURES / "hostile.opml").read_bytes()
     r = authenticated_client.post(

@@ -326,14 +326,19 @@ the CLI (`tiro import-readwise|import-instapaper|import-omnivore`).
   failing the import. Original save/publish timestamps are preserved.
 - **Skips existing** — an article already in your library (matched by URL, then
   title+source) is skipped and counted, never duplicated.
-- **Highlights, anchored** — Readwise highlights are re-anchored against the
-  re-fetched markdown body using the same machinery the reader uses. A
-  highlight whose quote can't be located in the fetched text is **skipped and
-  reported in the count, never hand-placed at a guessed position** — so the
-  summary's "highlights skipped" number is an honest measure of what didn't
-  line up, not a silent loss. Note that duplicate imported highlights dedupe by
-  exact quote text, so re-importing the same export adds nothing; if two
-  highlights share identical quote text, only the first's note is kept.
+- **Highlights, anchored** — Readwise highlights and Omnivore highlights (both
+  the ones carried inline in the metadata and the ones in the export's separate
+  `highlights/{slug}.md` files) are re-anchored against the re-fetched markdown
+  body using the same machinery the reader uses. Omnivore highlight files are
+  parsed conservatively — each `>` blockquote is a quoted passage, an optional
+  following paragraph its note; anything that isn't a recognizable blockquote is
+  left alone. A highlight whose quote can't be located in the fetched text is
+  **skipped and reported in the count, never hand-placed at a guessed
+  position** — so the summary's "highlights skipped" number is an honest measure
+  of what didn't line up, not a silent loss. Note that duplicate imported
+  highlights dedupe by exact quote text, so re-importing the same export adds
+  nothing; if two highlights share identical quote text, only the first's note
+  is kept.
 
 ### Forwarding newsletters to a Tiro address
 

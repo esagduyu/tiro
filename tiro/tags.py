@@ -16,7 +16,10 @@ from tiro.migrations import new_ulid
 
 def ensure_tag(conn: sqlite3.Connection, name: str) -> int:
     """Return the id of the tag named `name`, creating it (with a fresh uid)
-    if absent."""
+    if absent. `name` is used verbatim as the tag's canonical name; callers
+    that need case-folding normalize first (the importer folder/label path via
+    `attach_tags`; the bundle-restore path in `importer.py` deliberately
+    preserves the exported name as-is for round-trip fidelity)."""
     row = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
     if row is not None:
         return row["id"]
@@ -25,13 +28,16 @@ def ensure_tag(conn: sqlite3.Connection, name: str) -> int:
 
 
 def attach_tags(conn: sqlite3.Connection, article_id: int, names) -> None:
-    """Ensure + link each tag name to `article_id`. Blank/whitespace-only
-    names are skipped; links are idempotent (`INSERT OR IGNORE`). Does not
-    commit."""
+    """Ensure + link each tag name to `article_id`. Names are normalized to
+    lowercase (stripped) so a folder/label tag like "Tech" collides with the
+    lowercase form the RSS folder-tag path (`rss._attach_folder_tag`) writes —
+    otherwise the same concept would split into two tag rows. Blank/
+    whitespace-only names are skipped; links are idempotent (`INSERT OR
+    IGNORE`). Does not commit."""
     for name in names:
         if not name or not name.strip():
             continue
-        tag_id = ensure_tag(conn, name.strip())
+        tag_id = ensure_tag(conn, name.strip().lower())
         conn.execute(
             "INSERT OR IGNORE INTO article_tags (article_id, tag_id) VALUES (?, ?)",
             (article_id, tag_id),

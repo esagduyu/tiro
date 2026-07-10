@@ -68,10 +68,13 @@ def canonical_url(url: str) -> str:
     tracking query param (`utm_*`, `fbclid`) — the same tracking-param family
     the email pipeline strips. Order-preserving for the remaining params.
 
-    This is the key the RSS dedup (spec D3.4b) compares against `articles.url`
-    so an RSS item never duplicates an article the user already saved
-    manually/via extension/email with a tracked variant of the same link.
-    Task 4/5 (importers) reuse this same canonical form.
+    Applied at READ time only (spec D3.4b): the incoming feed/import link is
+    canonicalized and matched against the stored RAW `articles.url` (via
+    `url = ? OR url = ?`), so an RSS item never duplicates an article the user
+    already saved manually/via extension/email with a tracked variant of the
+    same link. Stored urls are NEVER rewritten to canonical form on write —
+    this is a read-time normalization, not a write-time invariant. Task 4/5
+    (importers) reuse this same canonical form.
     """
     parsed = urlparse(url)
     kept = [

@@ -398,8 +398,10 @@ async def import_opml(file: UploadFile, request: Request):
     Recursively flattens nested outlines into a `folder` label, dedupes by feed
     URL against existing rows, and creates a feed + its rss source row per new
     URL WITHOUT network autodiscovery (the OPML already carries the feed URL;
-    the first poll validates it). Returns `{added, skipped, errors}`. 400 on an
-    upload over 5 MB or unparseable OPML.
+    the first poll validates it). Feed URLs whose scheme isn't http/https are
+    rejected per-row (the SAME allowlist `POST /api/feeds` enforces) and
+    reported in `errors`, never aborting the whole import. Returns
+    `{added, skipped, errors}`. 400 on an upload over 5 MB or unparseable OPML.
     """
     config = request.app.state.config
     raw = await file.read()
@@ -420,6 +422,12 @@ async def import_opml(file: UploadFile, request: Request):
         for entry in parsed:
             feed_url = (entry.get("url") or "").strip()
             if not feed_url:
+                continue
+            if urlparse(feed_url).scheme not in ("http", "https"):
+                # Same scheme allowlist as POST /api/feeds — an OPML row can
+                # carry a javascript:/file:/data: xmlUrl. Reject the row, keep
+                # importing the rest.
+                errors.append(f"{feed_url}: URL must be http or https")
                 continue
             if feed_url in existing:
                 skipped += 1

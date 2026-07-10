@@ -2,16 +2,25 @@
 
 An Omnivore export is a zip of `metadata_*.json` chunk arrays plus per-article
 content files under `content/` (HTML in older exports, markdown in newer ones
-— both handled) and optional per-article highlight files under `highlights/`.
-Content files are resolved by slug (then id). Everything is read IN-MEMORY —
-no member is ever extracted to disk — and hostile member paths (absolute or
-`..`-traversal) are rejected up front (zip-slip protection), so a malicious
-archive can neither escape a directory nor be processed.
+— both handled) and, in the shutdown-era export format, per-article highlight
+files under `highlights/{slug}.md`. Both content and highlight files are
+resolved by slug (then id). Highlights come from two places, merged: any
+`highlights` array carried inline in the metadata object, PLUS the article's
+`highlights/{slug}.md` file if present — each highlight in that file is a `>`
+blockquote (the quoted passage) optionally followed by a plain paragraph (the
+note). Parsing is conservative: a blockquote run becomes one quote; anything
+that isn't a recognizable blockquote yields no highlight, and any parsed quote
+the importer can't re-anchor is counted in `highlights_skipped` (never
+hand-placed). Everything is read IN-MEMORY — no member is ever extracted to
+disk — and hostile member paths (absolute or `..`-traversal) are rejected up
+front (zip-slip protection), so a malicious archive can neither escape a
+directory nor be processed.
 """
 
 import json
 import logging
 import posixpath
+import re
 import zipfile
 from datetime import datetime
 
@@ -94,11 +103,58 @@ def _highlights_from_obj(obj: dict) -> list[ImportHighlight]:
     return out
 
 
+def _parse_highlights_md(text: str) -> list[ImportHighlight]:
+    """Parse an Omnivore `highlights/{slug}.md` export file into highlights.
+
+    Conservative, blockquote-shaped: every contiguous run of `>` lines is one
+    quote; the next non-blank paragraph that isn't itself a blockquote, heading,
+    or horizontal rule is that quote's note. Structural lines (the title /
+    `#### Highlights` headings, `---` rules) are ignored, and Omnivore's trailing
+    `[⤴️](url)` link marker on a quote line is stripped. Anything that isn't a
+    recognizable blockquote yields no highlight — an unparseable file simply
+    contributes nothing, and any parsed quote that later can't be re-anchored is
+    counted in `highlights_skipped` by the importer (never hand-placed)."""
+    out: list[ImportHighlight] = []
+    lines = text.split("\n")
+    i, n = 0, len(lines)
+    while i < n:
+        if not lines[i].lstrip().startswith(">"):
+            i += 1
+            continue
+        quote_parts = []
+        while i < n and lines[i].lstrip().startswith(">"):
+            frag = lines[i].lstrip()[1:]
+            if frag.startswith(" "):
+                frag = frag[1:]
+            quote_parts.append(frag)
+            i += 1
+        quote = "\n".join(quote_parts).strip()
+        # Drop a trailing Omnivore highlight-link marker, e.g. " [⤴️](url)".
+        quote = re.sub(r"\s*\[[^\]]*\]\([^)]*\)\s*$", "", quote).strip()
+        # Optional note: the next non-blank paragraph that isn't a blockquote,
+        # heading, or horizontal rule.
+        while i < n and not lines[i].strip():
+            i += 1
+        note_parts = []
+        while i < n:
+            s = lines[i].strip()
+            if not s or s.startswith((">", "#")) or s in ("---", "***", "___"):
+                break
+            note_parts.append(lines[i].rstrip())
+            i += 1
+        note = "\n".join(note_parts).strip() or None
+        if quote:
+            out.append(ImportHighlight(quote=quote, note=note))
+    return out
+
+
 def _index_members(zf: zipfile.ZipFile):
-    """Return `(metadata_infos, content_by_stem)` over the safe members.
-    `content_by_stem[stem] = (ext, ZipInfo)`."""
+    """Return `(metadata_infos, content_by_stem, highlights_by_stem)` over the
+    safe members. `content_by_stem[stem] = (ext, ZipInfo)`;
+    `highlights_by_stem[stem] = ZipInfo` for `highlights/{slug}.md` files."""
     metadata_infos = []
     content_by_stem: dict[str, tuple[str, zipfile.ZipInfo]] = {}
+    highlights_by_stem: dict[str, zipfile.ZipInfo] = {}
     for info in zf.infolist():
         name = info.filename
         if not _is_safe_member(name):
@@ -110,12 +166,14 @@ def _index_members(zf: zipfile.ZipFile):
         ext = ext.lower()
         if base.lower().startswith("metadata") and low.endswith(".json"):
             metadata_infos.append(info)
+        elif ("highlights/" in low or low.startswith("highlights")) and ext == ".md":
+            highlights_by_stem[stem] = info
         elif ("content/" in low or low.startswith("content")) and ext in (".md", ".html", ".htm"):
             content_by_stem[stem] = (ext, info)
-    return metadata_infos, content_by_stem
+    return metadata_infos, content_by_stem, highlights_by_stem
 
 
-def _item_from_obj(zf, obj, content_by_stem) -> ImportItem | None:
+def _item_from_obj(zf, obj, content_by_stem, highlights_by_stem) -> ImportItem | None:
     if not isinstance(obj, dict):
         return None
     url = (obj.get("url") or "").strip()
@@ -123,10 +181,11 @@ def _item_from_obj(zf, obj, content_by_stem) -> ImportItem | None:
     slug = (obj.get("slug") or "").strip()
     if not url and not title:
         return None
+    id_key = str(obj.get("id") or "")
 
     content_md = None
     content_html = None
-    cf = content_by_stem.get(slug) or content_by_stem.get(str(obj.get("id") or ""))
+    cf = content_by_stem.get(slug) or content_by_stem.get(id_key)
     if cf:
         ext, info = cf
         text = _read_member(zf, info)
@@ -135,6 +194,15 @@ def _item_from_obj(zf, obj, content_by_stem) -> ImportItem | None:
                 content_md = text
             else:
                 content_html = text
+
+    # Highlights: inline (metadata `highlights` array) + the per-article
+    # highlights/{slug}.md export file, if present. Both keyed by slug (then id).
+    highlights = _highlights_from_obj(obj)
+    hf = highlights_by_stem.get(slug) or highlights_by_stem.get(id_key)
+    if hf:
+        htext = _read_member(zf, hf)
+        if htext:
+            highlights = highlights + _parse_highlights_md(htext)
 
     return ImportItem(
         url=url or None,
@@ -145,7 +213,7 @@ def _item_from_obj(zf, obj, content_by_stem) -> ImportItem | None:
         tags=_labels_to_tags(obj.get("labels")),
         content_md=content_md,
         content_html=content_html,
-        highlights=_highlights_from_obj(obj),
+        highlights=highlights,
     )
 
 
@@ -153,7 +221,7 @@ def parse_export(path):
     """Yield one `ImportItem` per article across every `metadata_*.json` chunk.
     Malformed chunks/objects are skipped with a logged warning."""
     with zipfile.ZipFile(path) as zf:
-        metadata_infos, content_by_stem = _index_members(zf)
+        metadata_infos, content_by_stem, highlights_by_stem = _index_members(zf)
         for info in sorted(metadata_infos, key=lambda i: i.filename):
             raw = _read_member(zf, info)
             if raw is None:
@@ -167,6 +235,6 @@ def parse_export(path):
                 logger.warning("Omnivore metadata %s skipped: not a list", info.filename)
                 continue
             for obj in data:
-                item = _item_from_obj(zf, obj, content_by_stem)
+                item = _item_from_obj(zf, obj, content_by_stem, highlights_by_stem)
                 if item is not None:
                     yield item

@@ -402,6 +402,13 @@ def run_import(config: TiroConfig, items, *, kind: str, progress_cb=None) -> dic
         error = str(e)
         raise
     finally:
+        # Mirror check_feeds' audit semantics: a run with per-item failures is
+        # not a clean success (unless a stream-level exception already flagged
+        # it). success = no failures.
+        if success:
+            success = summary["failed"] == 0
+            if not success:
+                error = f'{summary["failed"]} item(s) failed'
         log_api_call(
             config,
             "import",

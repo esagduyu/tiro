@@ -1,11 +1,9 @@
 // Shared helpers for the popup and the background service worker (MV3).
 //
 // The pure functions here (isSavableUrl, savableTabs, classifySaveResponse) are
-// unit-testable in isolation — see lib.test.mjs. NOTE ON COVERAGE: the extension
-// has no CI test harness historically (it lives outside both the pytest and the
-// `tiro/frontend/static/js/tests/*.test.mjs` node globs), so lib.test.mjs is run
-// by hand (`node --test extension/lib.test.mjs`), not in CI. Documented honestly
-// rather than pretending it is gated.
+// unit-testable in isolation — see lib.test.mjs, which IS gated in CI: the
+// node-test step in .github/workflows/ci.yml runs `extension/lib.test.mjs`
+// alongside the `tiro/frontend/static/js/tests/*.test.mjs` glob.
 
 export const TIRO_URL = 'http://localhost:8000';
 

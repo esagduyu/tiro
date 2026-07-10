@@ -166,6 +166,56 @@ def test_omnivore_zip_slip_member_ignored(tmp_path):
     assert not (tmp_path.parent / "evil.json").exists()
 
 
+def test_omnivore_parse_highlights_md_conservative():
+    """Blockquote-shaped parsing: contiguous `>` lines are one quote, the next
+    non-blank paragraph its note; headings/rules ignored, trailing link marker
+    stripped, non-blockquote text contributes nothing."""
+    text = (
+        "# Title\n#### Highlights\n\n"
+        "> first quote line\n> continued here\n\n"
+        "a note paragraph\n\n"
+        "> second quote [⤴️](https://omnivore.app/h/abc)\n\n"
+        "---\n"
+        "loose text that is not a blockquote is ignored\n"
+    )
+    hls = omnivore._parse_highlights_md(text)
+    assert len(hls) == 2
+    assert hls[0].quote == "first quote line\ncontinued here"
+    assert hls[0].note == "a note paragraph"
+    assert hls[1].quote == "second quote"  # trailing [link](url) marker stripped
+    assert hls[1].note is None
+
+
+def test_omnivore_parse_reads_highlights_file(omnivore_zip):
+    """The `highlights/{slug}.md` member is matched to its article by slug and
+    parsed into the item's highlights (in addition to any inline ones)."""
+    items = {it.title: it for it in omnivore.parse_export(omnivore_zip)}
+    html = items["HTML Article"]  # has no inline highlights; only the file
+    quotes = {h.quote for h in html.highlights}
+    assert quotes == {
+        "content that gets sanitized and markdownified",
+        "a phantom quote that never appears in the body",
+    }
+    anchorable = next(
+        h for h in html.highlights
+        if h.quote == "content that gets sanitized and markdownified"
+    )
+    assert anchorable.note == "a note attached to this highlight"
+
+
+def test_omnivore_highlights_file_anchors_and_skips(initialized_library, no_network, omnivore_zip):
+    """Through the full import pipeline: the anchorable quote from the
+    highlights file is imported, the phantom one is skipped + counted (the
+    skip-with-count law — never silently dropped)."""
+    config = initialized_library
+    html_item = next(
+        it for it in omnivore.parse_export(omnivore_zip) if it.title == "HTML Article"
+    )
+    summary = run_import(config, [html_item], kind="omnivore")
+    assert summary["highlights_imported"] == 1  # the anchorable quote
+    assert summary["highlights_skipped"] == 1  # the phantom quote
+
+
 # --- Readwise adapter -------------------------------------------------------
 
 
@@ -402,6 +452,38 @@ def test_run_import_per_row_isolation(initialized_library, no_network, monkeypat
     assert summary["imported"] == 2
     assert summary["failed"] == 1
     assert summary["total"] == 3
+    # Audit: a run with per-item failures is not a clean success (mirrors
+    # check_feeds' `success = failed == 0` semantics).
+    entries = [e for e in read_audit_entries(config) if e["service"] == "import"]
+    assert len(entries) == 1
+    assert entries[0]["success"] is False
+
+
+def test_import_tag_case_unifies_with_existing_lowercase(initialized_library, no_network):
+    """A folder/label tag like "Tech" folds into the lowercase "tech" row the
+    RSS folder-tag path writes — one tag row, not two (attach_tags lowercases)."""
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    try:
+        # Simulate the RSS folder-tag path having already created lowercase "tech".
+        conn.execute("INSERT INTO tags (uid, name) VALUES (?, 'tech')", (new_ulid(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+    item = ImportItem(url="https://ex.test/t", title="T", content_md="b", tags=["Tech"])
+    run_import(config, [item], kind="instapaper")
+
+    conn = get_connection(config.db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM tags WHERE name IN ('tech', 'Tech')"
+        ).fetchone()["n"]
+        row = conn.execute("SELECT id FROM articles").fetchone()
+    finally:
+        conn.close()
+    assert n == 1  # "Tech" folded into the existing lowercase row, not a second
+    assert "tech" in _tag_names(config, row["id"])
 
 
 def test_run_import_highlights_anchored_sidecar_written(initialized_library, no_network):
