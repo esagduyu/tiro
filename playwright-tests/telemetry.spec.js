@@ -85,7 +85,7 @@ async function saveAndOpenTestArticle(page) {
     await page.goto(`/articles/${existingId}`);
   } else {
     await page.goto('/inbox');
-    await page.locator('#save-btn').click();
+    await page.locator('#sidebar-save-btn').click();
     const urlInput = page.getByRole('textbox', { name: 'Paste a URL...' });
     await expect(urlInput).toBeVisible();
     await urlInput.fill(TEST_URL);

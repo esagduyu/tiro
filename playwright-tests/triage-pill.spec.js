@@ -162,8 +162,14 @@ test.describe('M3.2 triage pill + inbox-zero (mobile emulation)', () => {
 
     // Toggle dark mode with the zero state on screen -- sweep again. Mobile
     // viewport (design pass): the theme toggle lives inside the phone "More"
-    // bottom sheet, opened from the tab bar's More slot.
-    await page.locator('[data-sheet="more-sheet"]').click();
+    // bottom sheet, opened from the tab bar's More slot. force:true matches the
+    // #sheet-theme-toggle click just below: under Playwright's isMobile
+    // emulation the fixed bottom tab bar's hit-test misfires against the tall
+    // inbox-zero <main> (visual-vs-layout-viewport mismatch), even though the
+    // button is provably the top element at that point (elementFromPoint) and a
+    // real tap opens the sheet — same known headless-emulation actionability
+    // quirk as swipe-triage.spec.js's undo-toast clicks (Task 12 verification).
+    await page.locator('[data-sheet="more-sheet"]').click({ force: true });
     await page.locator('#sheet-theme-toggle').click({ force: true });
     await page.waitForTimeout(300);
     await expect(zeroState).toBeVisible();

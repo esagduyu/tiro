@@ -103,7 +103,7 @@ test.describe('M3.1 offline save queue', () => {
       }
     });
 
-    await page.locator('#save-btn').click();
+    await page.locator('#sidebar-save-btn').click();
     const urlInput = page.getByRole('textbox', { name: 'Paste a URL...' });
     await expect(urlInput).toBeVisible();
     await urlInput.fill(uniqueUrl);
@@ -114,7 +114,7 @@ test.describe('M3.1 offline save queue', () => {
     await expect(page.locator('#save-overlay')).not.toBeVisible();
 
     // Reopen the modal -- the "N queued" indicator must be visible now.
-    await page.locator('#save-btn').click();
+    await page.locator('#sidebar-save-btn').click();
     await expect(page.locator('#save-queue-indicator')).toBeVisible();
     await expect(page.locator('#save-queue-indicator')).toHaveText('1 queued');
 
@@ -141,7 +141,7 @@ test.describe('M3.1 offline save queue', () => {
     await expect(page.getByText(`Saved queued article: ${TEST_TITLE}`)).toBeVisible({ timeout: 10000 });
 
     // Queue drained -- indicator gone, localStorage empty array.
-    await page.locator('#save-btn').click();
+    await page.locator('#sidebar-save-btn').click();
     await expect(page.locator('#save-queue-indicator')).not.toBeVisible();
     const storedAfter = await page.evaluate(() => window.localStorage.getItem('tiro-save-queue'));
     expect(JSON.parse(storedAfter)).toEqual([]);
@@ -173,7 +173,7 @@ test.describe('M3.1 offline save queue', () => {
       // once, then re-seed the queue (the direct save already drains
       // nothing since the queue was empty at that point).
       await page.goto('/inbox');
-      await page.locator('#save-btn').click();
+      await page.locator('#sidebar-save-btn').click();
       const urlInput = page.getByRole('textbox', { name: 'Paste a URL...' });
       await urlInput.fill(TEST_URL);
       await urlInput.press('Enter');
