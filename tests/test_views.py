@@ -252,5 +252,7 @@ def test_static_version_bumped_for_saved_views_ui():
     # (swipe-triage closeout: swipe.js/undo.js/inbox.js wiring, triage pill,
     # inbox-zero, logout SW-cache hardening landed across M3.2 Tasks 1-4
     # under the old "64" pin), then 65 -> 66 in the design-pass Task 11
-    # closeout sweep (final glyph sweep landed under the old "65" pin).
-    assert STATIC_VERSION == "66"
+    # closeout sweep (final glyph sweep landed under the old "65" pin), then
+    # 66 -> 67 in the Phase 4 (0.6.0 feeds-beta) closeout (feeds/import UI +
+    # reader progress ResizeObserver landed under the old "66" pin).
+    assert STATIC_VERSION == "67"

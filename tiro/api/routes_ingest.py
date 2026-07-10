@@ -118,9 +118,19 @@ async def ingest_url(body: IngestURLRequest, request: Request):
     # still 200) when the quote can't be located; the key appears only when the
     # field was provided, so an absent field leaves the response shape unchanged.
     if body.highlight_text is not None:
-        created = await asyncio.to_thread(
-            create_highlight_from_quote, config, article["id"], body.highlight_text
-        )
+        try:
+            created = await asyncio.to_thread(
+                create_highlight_from_quote, config, article["id"], body.highlight_text
+            )
+        except Exception as e:
+            # The article is already saved — a highlight-anchoring failure must
+            # never turn that success into a 500. Log and report the highlight
+            # as not created; the caller still gets its 200 + article data.
+            logger.error(
+                "Selection-as-highlight failed for article %s (non-fatal): %s",
+                article["id"], e,
+            )
+            created = False
         response["highlight_created"] = created
 
     return response

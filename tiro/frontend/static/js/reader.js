@@ -1235,6 +1235,12 @@ function setupReadingProgress() {
 
     window.addEventListener("scroll", onScrollOrResize, { passive: true });
     window.addEventListener("resize", onScrollOrResize, { passive: true });
+    // Re-measure when #reader-body's own height changes after first paint —
+    // late-loading images reflow the body and shift the true denominator, which
+    // a window resize/scroll alone wouldn't catch.
+    if (typeof ResizeObserver !== "undefined") {
+        new ResizeObserver(onScrollOrResize).observe(bodyEl);
+    }
     measure(); // initial fill (short articles start at 100%)
 }
 

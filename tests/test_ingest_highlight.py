@@ -97,6 +97,31 @@ def test_highlight_text_unanchorable_soft_fails(authenticated_client, configured
     assert _highlight_count(configured_library, body["data"]["id"]) == 0
 
 
+def test_highlight_creation_exception_never_500s(
+    authenticated_client, configured_library, stub_fetch, monkeypatch
+):
+    """An unexpected exception anywhere under the highlight-anchoring path must
+    not turn an already-saved article into a 500: the route logs it and reports
+    highlight_created False on the 200 (M4.3 T6 fold-in)."""
+    from tiro.api import routes_ingest
+
+    def _boom(*a, **k):
+        raise RuntimeError("anchoring blew up")
+
+    monkeypatch.setattr(routes_ingest, "create_highlight_from_quote", _boom)
+
+    r = authenticated_client.post(
+        "/api/ingest/url",
+        json={"url": "https://example.com/boom", "highlight_text": "quick brown fox"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["highlight_created"] is False
+    # Article itself still saved.
+    assert _highlight_count(configured_library, body["data"]["id"]) == 0
+
+
 def test_highlight_text_ignored_on_duplicate_409(authenticated_client, configured_library, stub_fetch):
     first = authenticated_client.post(
         "/api/ingest/url", json={"url": "https://example.com/d"}

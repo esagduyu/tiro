@@ -309,6 +309,83 @@ def test_restore_round_trip(initialized_library, tmp_path):
     assert Path(result["displaced_library"]).exists()
 
 
+def test_restore_preserves_feed_rows(initialized_library, tmp_path):
+    """Phase 4: `feeds` subscriptions live in SQLite, which snapshots and
+    restores wholesale — a round-trip must keep the exact feed rows."""
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    config = initialized_library
+    _seed_article(config)
+    conn = get_connection(config.db_path)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('RSS', 'rss')")
+    sid = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO feeds (uid, url, title, folder, source_id, fetch_interval_minutes) "
+        "VALUES (?, 'https://ex.com/feed.xml', 'Ex', 'News', ?, 30)",
+        (new_ulid(), sid),
+    )
+    conn.commit()
+    conn.close()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    # Mutate: drop the feed after snapshot.
+    conn = get_connection(config.db_path)
+    conn.execute("DELETE FROM feeds")
+    conn.commit()
+    conn.close()
+
+    restore_snapshot(config, snap)
+
+    conn = get_connection(config.db_path)
+    feed = conn.execute(
+        "SELECT url, title, folder, fetch_interval_minutes FROM feeds"
+    ).fetchone()
+    conn.close()
+    assert feed is not None
+    assert feed["url"] == "https://ex.com/feed.xml"
+    assert feed["title"] == "Ex"
+    assert feed["folder"] == "News"
+    assert feed["fetch_interval_minutes"] == 30
+
+
+def test_restore_migrates_pre_feeds_snapshot(initialized_library, tmp_path):
+    """A snapshot taken before migration 013 (no `feeds` table, user_version
+    < 13) must restore AND migrate forward cleanly — restore runs migrate_db,
+    which only applies forward migrations, so the feeds table appears."""
+    from tiro.backup import restore_snapshot
+    from tiro.database import get_connection
+
+    config = initialized_library
+    _seed_article(config)
+
+    # Simulate a pre-013 database inside the live library, then snapshot it.
+    conn = get_connection(config.db_path)
+    conn.execute("DROP TABLE IF EXISTS feed_entries")
+    conn.execute("DROP TABLE IF EXISTS feeds")
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    snap = create_snapshot(config, tmp_path / "snap.tar.zst")
+    result = restore_snapshot(config, snap)
+    assert result["schema_newer_than_app"] is False
+
+    conn = get_connection(config.db_path)
+    tables = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert "feeds" in tables and "feed_entries" in tables
+    from tiro.migrations import LATEST_VERSION
+    assert version == LATEST_VERSION
+
+
 def test_restore_marks_missing_vectors_pending(initialized_library, tmp_path):
     from tiro.backup import restore_snapshot
     from tiro.database import get_connection

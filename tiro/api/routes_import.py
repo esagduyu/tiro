@@ -115,11 +115,24 @@ async def start_import(kind: str, file: UploadFile, request: Request, response: 
     if existing is not None and existing.get("running"):
         raise HTTPException(status_code=409, detail={"error": "import_running"})
 
+    # Enforce the upload cap EARLY — before the full body read — using the
+    # multipart part's declared size when Starlette has it, so a hostile
+    # oversize upload is rejected without first buffering it all into memory.
+    if file.size is not None and file.size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Upload exceeds 100 MB")
+
     raw = await file.read()
-    if len(raw) > _MAX_UPLOAD_BYTES:
+    if len(raw) > _MAX_UPLOAD_BYTES:  # backstop: honor the cap even if .size lied/absent
         raise HTTPException(status_code=400, detail="Upload exceeds 100 MB")
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
+
+    # Re-check the single-slot gate AFTER the await above: two POSTs can both
+    # pass the pre-read check before either claims the slot, so the second
+    # must lose here (409) rather than clobber the first's just-started job.
+    existing = getattr(request.app.state, "import_job", None)
+    if existing is not None and existing.get("running"):
+        raise HTTPException(status_code=409, detail={"error": "import_running"})
 
     fd, tmp_path = tempfile.mkstemp(prefix="tiro-import-", suffix=f"-{kind}")
     try:

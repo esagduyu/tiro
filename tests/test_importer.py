@@ -663,3 +663,107 @@ def test_import_reconciles_sidecars_into_rows_after_run(initialized_library, tmp
     finally:
         bundle.unlink()
         bundle2.unlink()
+
+
+# --- Phase 4: feed subscription merge (spec D5) ------------------------------
+
+
+def _seed_feed(config, *, url, title="RSS Blog", folder=None):
+    """Insert a feed + its backing rss source into `config`'s library."""
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    conn.execute(
+        "INSERT INTO sources (name, domain, source_type) VALUES (?, 'blog.example.com', 'rss')",
+        (title,),
+    )
+    source_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO feeds (uid, url, title, site_url, folder, source_id, "
+        "fetch_interval_minutes, status) "
+        "VALUES (?, ?, ?, 'https://blog.example.com', ?, ?, 45, 'active')",
+        (new_ulid(), url, title, folder, source_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_import_merges_feeds_by_url_with_fresh_source(initialized_library, tmp_path):
+    config = initialized_library
+    _seed(config)
+    _seed_feed(config, url="https://blog.example.com/feed.xml", title="RSS Blog", folder="Tech")
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        result = import_bundle(target, bundle)
+        assert result["feeds_imported"] == 1
+        conn = get_connection(target.db_path)
+        try:
+            feed = conn.execute(
+                "SELECT f.url, f.title, f.folder, f.fetch_interval_minutes, "
+                "f.error_count, f.last_etag, s.source_type, s.name AS src_name "
+                "FROM feeds f JOIN sources s ON f.source_id = s.id"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert feed["url"] == "https://blog.example.com/feed.xml"
+        assert feed["title"] == "RSS Blog"
+        assert feed["folder"] == "Tech"
+        assert feed["fetch_interval_minutes"] == 45
+        # Fresh source resolved locally, backed by an rss source.
+        assert feed["source_type"] == "rss"
+        assert feed["src_name"] == "RSS Blog"
+        # Transient state starts clean (not in the bundle).
+        assert feed["error_count"] == 0
+        assert feed["last_etag"] is None
+    finally:
+        bundle.unlink()
+
+
+def test_import_skips_feed_with_existing_url(initialized_library, tmp_path):
+    config = initialized_library
+    _seed(config)
+    _seed_feed(config, url="https://blog.example.com/feed.xml")
+    bundle = export_library(config)
+    try:
+        target = _fresh_library(tmp_path)
+        # Pre-existing feed in the target with the SAME url.
+        _seed_feed(target, url="https://blog.example.com/feed.xml", title="Already Here")
+        result = import_bundle(target, bundle)
+        assert result["feeds_imported"] == 0
+        conn = get_connection(target.db_path)
+        try:
+            n = conn.execute("SELECT COUNT(*) AS n FROM feeds").fetchone()["n"]
+            title = conn.execute("SELECT title FROM feeds").fetchone()["title"]
+        finally:
+            conn.close()
+        assert n == 1  # no duplicate row
+        assert title == "Already Here"  # existing subscription untouched
+    finally:
+        bundle.unlink()
+
+
+def test_import_pre_phase4_bundle_without_feeds_key_is_noop(initialized_library, tmp_path):
+    import json
+    import zipfile
+
+    config = initialized_library
+    _seed(config)
+    bundle = export_library(config)
+    try:
+        # Simulate an older bundle: strip the feeds key from metadata.json.
+        stripped = tmp_path / "old.zip"
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(stripped, "w") as zout:
+            for item in zin.namelist():
+                data = zin.read(item)
+                if item == "metadata.json":
+                    meta = json.loads(data)
+                    meta.pop("feeds", None)
+                    data = json.dumps(meta).encode("utf-8")
+                zout.writestr(item, data)
+        target = _fresh_library(tmp_path)
+        result = import_bundle(target, stripped)
+        assert result["feeds_imported"] == 0
+        assert result["imported"] == 1
+    finally:
+        bundle.unlink()

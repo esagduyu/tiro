@@ -235,9 +235,13 @@ def _import_highlights(config: TiroConfig, article_row, highlights) -> tuple[int
             if result["status"] not in ("exact", "shifted"):
                 skipped += 1
                 continue
+            # Preserve the source app's highlight timestamp when it carried one,
+            # so imported highlights keep their real created_at rather than
+            # import wall-clock (fold-in: thread through append_highlight's now=).
+            hl_now = hl.created_at.isoformat() if hl.created_at is not None else None
             _append_anchored_highlight(
                 config, conn, article_row, body, body_hash, result,
-                note=hl.note, color="yellow",
+                note=hl.note, color="yellow", now=hl_now,
             )
             existing_quotes.add(quote)
             imported += 1
@@ -247,11 +251,14 @@ def _import_highlights(config: TiroConfig, article_row, highlights) -> tuple[int
     return (imported, skipped)
 
 
-def _append_anchored_highlight(config, conn, article_row, body, body_hash, result, *, note, color):
+def _append_anchored_highlight(config, conn, article_row, body, body_hash, result, *, note, color, now=None):
     """Given a resolved `reconcile_anchor` result (exact/shifted), build the full
     stored anchor via `make_anchor` and create ONE highlight sidecar-first through
     the shared `append_highlight` helper. Caller owns the transaction (no commit)
-    and supplies the already-read body + its content_hash."""
+    and supplies the already-read body + its content_hash. `now` (ISO string)
+    overrides the highlight's created_at — used to preserve an imported
+    highlight's original timestamp; None falls back to append_highlight's own
+    wall-clock default."""
     anchor = make_anchor(body, result["position_start"], result["position_end"])
     append_highlight(
         config,
@@ -265,6 +272,7 @@ def _append_anchored_highlight(config, conn, article_row, body, body_hash, resul
         content_hash=body_hash,
         color=color,
         note_markdown=note,
+        now=now,
     )
 
 
