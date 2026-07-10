@@ -150,9 +150,9 @@ async def update_email_settings(body: EmailSettingsUpdate, request: Request):
     await scheduler.stop_and_wait("imap")
 
     if config.imap_enabled and config.imap_sync_interval > 0:
-        from tiro.app import _imap_sync_loop
+        from tiro.app import _make_imap_task
 
-        scheduler.start("imap", _imap_sync_loop(config))
+        scheduler.start_periodic("imap", _make_imap_task(config))
         logger.info("IMAP sync restarted: every %d min", config.imap_sync_interval)
     else:
         logger.info("IMAP sync disabled")
@@ -284,8 +284,8 @@ async def update_digest_schedule(body: DigestScheduleUpdate, request: Request):
     await scheduler.stop_and_wait("digest")
 
     if body.enabled:
-        from tiro.app import _digest_schedule_loop
-        scheduler.start("digest", _digest_schedule_loop(config))
+        from tiro.app import _make_digest_task
+        scheduler.start_periodic("digest", _make_digest_task(config))
         logger.info("Digest schedule started: %s daily", body.time)
     else:
         logger.info("Digest schedule disabled")

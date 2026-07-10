@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <link href="https://atom.example.com/"/>
+  <updated>2026-07-08T12:00:00Z</updated>
+  <id>urn:uuid:atom-feed-root</id>
+  <entry>
+    <title>Atom Entry One</title>
+    <link href="https://atom.example.com/entry/one"/>
+    <id>urn:uuid:atom-entry-0001</id>
+    <updated>2026-07-08T12:00:00Z</updated>
+    <published>2026-07-08T12:00:00Z</published>
+    <content type="html">&lt;p&gt;This Atom entry has a solid paragraph of content, long enough to survive the minimum length check the ingestion pipeline applies.&lt;/p&gt;</content>
+  </entry>
+</feed>

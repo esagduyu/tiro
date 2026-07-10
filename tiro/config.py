@@ -48,6 +48,13 @@ class TiroConfig:
     decay_threshold: float = DEFAULTS["decay_threshold"]
     backup_auto_keep: int = 10  # auto-backup retention (0 = keep none)
     vector_retry_interval: int = 5  # minutes, 0 = disabled
+    # RSS/Atom recurring ingestion (Phase 4 M4.0). rss_enabled is the kill
+    # switch: the poll loop registers whenever it's true (zero subscribed
+    # feeds just means cheap no-op cycles); per-feed intervals live on the
+    # `feeds` row, rss_default_interval_minutes is the loop's wake cadence
+    # and the default for newly-subscribed feeds.
+    rss_enabled: bool = True
+    rss_default_interval_minutes: int = 60
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"
@@ -169,8 +176,20 @@ def _apply_env_overlay(config: "TiroConfig") -> None:
         setattr(config, fld.name, value)
 
 
-def load_config(config_path: str | Path = "config.yaml") -> TiroConfig:
-    """Load configuration from a YAML file, falling back to defaults."""
+def load_config(config_path: str | Path | None = None) -> TiroConfig:
+    """Load configuration from a YAML file, falling back to defaults.
+
+    Config-path precedence (ON-8 root-cause fix): explicit `config_path` arg >
+    ``TIRO_CONFIG`` env var (absolute path) > default CWD-relative
+    ``./config.yaml``. This mirrors run.py's / tiro/mcp/server.py's
+    ``_config_path()`` so a *bare* ``load_config()`` — from tiro/app.py,
+    scripts/, or any agent/script run from the repo root — can no longer
+    silently operate on the owner's real ``./config.yaml`` while
+    ``TIRO_CONFIG`` points elsewhere (which then had persist_config write to
+    the wrong file). Passing an explicit path still wins, unchanged.
+    """
+    if config_path is None:
+        config_path = os.environ.get("TIRO_CONFIG", "config.yaml")
     path = Path(config_path)
     data: dict = {}
 

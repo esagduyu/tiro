@@ -17,6 +17,51 @@ logger = logging.getLogger(__name__)
 # render them as markdown tables (common on old sites like paulgraham.com)
 _LAYOUT_TAGS = {"table", "tbody", "thead", "tfoot", "tr", "td", "th"}
 
+# Streamed byte cap for a single page fetch (Fold-in 1a, T2 fable review): the
+# RSS pipeline re-fetches the full page for EVERY entry, so an unbounded body
+# was a memory-exhaustion vector. Both fetchers stream and raise PageTooLarge
+# the moment the accumulated body crosses this, mirroring `_fetch_feed`'s
+# 10 MB feed cap. 5 MB comfortably covers real articles.
+MAX_PAGE_BYTES = 5 * 1024 * 1024
+
+
+class PageTooLarge(Exception):
+    """A page body exceeded MAX_PAGE_BYTES mid-stream."""
+
+
+def _decode_capped_sync(response) -> str:
+    """Stream a sync httpx response under MAX_PAGE_BYTES, returning decoded text."""
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes():
+        total += len(chunk)
+        if total > MAX_PAGE_BYTES:
+            raise PageTooLarge(f"page body exceeded {MAX_PAGE_BYTES} bytes")
+        chunks.append(chunk)
+    return _decode(b"".join(chunks), response)
+
+
+async def _decode_capped_async(response) -> str:
+    """Stream an async httpx response under MAX_PAGE_BYTES, returning decoded text."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_PAGE_BYTES:
+            raise PageTooLarge(f"page body exceeded {MAX_PAGE_BYTES} bytes")
+        chunks.append(chunk)
+    return _decode(b"".join(chunks), response)
+
+
+def _decode(body: bytes, response) -> str:
+    """Decode fetched bytes using the response's declared charset, falling back
+    to a lenient UTF-8 (readability/lxml tolerate imperfect input)."""
+    encoding = response.charset_encoding or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
 
 def _collect_content_images(html: str) -> list[dict]:
     """Extract content images with their surrounding text context.
@@ -210,23 +255,18 @@ def _extract_author(html: str) -> str | None:
     return None
 
 
-async def fetch_and_extract(url: str) -> dict:
-    """Fetch a web page and extract its main content as clean markdown.
+def extract_from_html(html: str, final_url: str) -> dict:
+    """Shared extraction+sanitize core for both the async and sync fetchers.
+
+    Given raw page HTML and the final (post-redirect) URL, produce the clean
+    markdown dict. This is the SINGLE place the sanitize invariant
+    (`sanitize_html` before markdownify) lives for web pages — both
+    `fetch_and_extract` (async) and `fetch_and_extract_sync` (sync, used by
+    the RSS pipeline from its worker thread) call it, so the sanitize call
+    chain is never duplicated (Phase 4 M4.0 refactor).
 
     Returns dict with keys: title, author, content_md, url
     """
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=30.0,
-        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
-    ) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
-
-    # Use the final URL after redirects (e.g. substack.com/home/post/... -> author.substack.com/p/...)
-    final_url = str(response.url)
-
     # Collect content images before readability strips them
     content_images = _collect_content_images(html)
 
@@ -265,3 +305,47 @@ async def fetch_and_extract(url: str) -> dict:
         "content_md": content_md,
         "url": final_url,
     }
+
+
+async def fetch_and_extract(url: str) -> dict:
+    """Fetch a web page and extract its main content as clean markdown.
+
+    Returns dict with keys: title, author, content_md, url
+    """
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
+    ) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            html = await _decode_capped_async(response)
+            # Use the final URL after redirects (e.g. substack.com/home/post/...
+            # -> author.substack.com/p/...)
+            final_url = str(response.url)
+
+    return extract_from_html(html, final_url)
+
+
+def fetch_and_extract_sync(url: str) -> dict:
+    """Synchronous twin of `fetch_and_extract` (Phase 4 M4.0).
+
+    The RSS pipeline (`tiro/ingestion/rss.py::check_feeds`) runs entirely on a
+    worker thread (via `asyncio.to_thread`), so it needs a blocking fetch. This
+    shares the exact extraction/sanitize core (`extract_from_html`) with the
+    async path — only the HTTP client differs (sync `httpx.Client`). Same 30s
+    timeout, redirect following, and User-Agent as the async twin.
+
+    Returns dict with keys: title, author, content_md, url
+    """
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "Tiro/0.1 (reading assistant)"},
+    ) as client:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            html = _decode_capped_sync(response)
+            final_url = str(response.url)
+
+    return extract_from_html(html, final_url)

@@ -168,11 +168,78 @@ def test_opml_endpoint(authenticated_client):
     assert "opml" in resp.headers["content-type"]
 
 
+def _seed_feed(config, *, url, title="Feed", folder=None, site_url="https://blog.example.com"):
+    """Insert a feed + its backing rss source, returning (source_id, feed_id)."""
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    conn.execute(
+        "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, 'rss')",
+        (title, "blog.example.com"),
+    )
+    source_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO feeds (uid, url, title, site_url, folder, source_id, "
+        "fetch_interval_minutes, status, last_etag, error_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, 30, 'active', 'W/\"etag\"', 4)",
+        (new_ulid(), url, title, site_url, folder, source_id),
+    )
+    feed_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.commit()
+    conn.close()
+    return source_id, feed_id
+
+
+def test_export_metadata_has_feeds_key_without_transient_state(initialized_library):
+    import json
+    import zipfile
+
+    from tiro.export import export_library
+
+    config = initialized_library
+    _seed_feed(config, url="https://blog.example.com/feed.xml", title="Blog", folder="Tech")
+
+    zip_path = export_library(config)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            meta = json.loads(zf.read("metadata.json"))
+        assert "feeds" in meta
+        row = meta["feeds"][0]
+        assert row["url"] == "https://blog.example.com/feed.xml"
+        assert row["title"] == "Blog"
+        assert row["folder"] == "Tech"
+        assert row["fetch_interval_minutes"] == 30
+        assert row["status"] == "active"
+        # spec D5: transient fetch state + feed_entries excluded.
+        for excluded in ("last_etag", "last_modified", "error_count", "last_error", "last_fetched_at"):
+            assert excluded not in row
+        assert "feed_entries" not in meta
+    finally:
+        zip_path.unlink()
+
+
+def test_opml_export_marks_feed_backed_source_with_xmlurl(initialized_library):
+    import xml.etree.ElementTree as ET
+
+    from tiro.export import export_opml
+
+    config = initialized_library
+    _seed_feed(config, url="https://blog.example.com/feed.xml", title="RSS Blog")
+
+    root = ET.fromstring(export_opml(config))
+    by_text = {o.get("text"): o for o in root.findall(".//outline")}
+    node = by_text["RSS Blog"]
+    assert node.get("type") == "rss"
+    assert node.get("xmlUrl") == "https://blog.example.com/feed.xml"
+    assert node.get("htmlUrl") == "https://blog.example.com"
+
+
 def test_export_schema_doc_lists_all_metadata_keys():
     from pathlib import Path
 
     doc = (Path(__file__).parent.parent / "EXPORT_SCHEMA.md").read_text()
-    for key in ("digests", "reading_stats", "audio", "sources.opml", "uid", "highlights", "notes"):
+    for key in ("digests", "reading_stats", "audio", "sources.opml", "uid", "highlights", "notes", "feeds"):
         assert key in doc, key
 
 

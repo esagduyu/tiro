@@ -62,7 +62,7 @@ every other sidecar write path in the codebase).
 
 Top-level: `exported_at` (ISO 8601 timestamp), `tiro_version` (string), `filters`
 (the tag/source_id/rating_min/date_from filters used, any may be `null`), plus
-the twelve data keys below. Each is a JSON array of row objects; column names match
+the thirteen data keys below. Each is a JSON array of row objects; column names match
 the row's SQL source verbatim (snake_case).
 
 | Key | Row shape | Notes |
@@ -79,6 +79,7 @@ the row's SQL source verbatim (snake_case).
 | `audio` | `article_id, voice, model, duration_seconds, file_size_bytes, generated_at` | Scoped to the exported articles. Deliberately omits the internal `file_path` column — cached MP3s are not included in the bundle. |
 | `highlights` | `id, uid, article_id, article_uid, quote_text, prefix_context, suffix_context, text_position_start, text_position_end, content_hash, color, created_at, updated_at` | Scoped to the exported articles. `article_uid` is joined in for cross-database re-keying (same rationale as `source_*` on `articles`). This is the SQLite-derived-row shape (`_get_highlights`), a fallback for importers that don't read the `annotations/<stem>.jsonl` sidecar files directly — the sidecar files are the actual source of truth. |
 | `notes` | `id, uid, article_id, article_uid, highlight_id, body_markdown, created_at, updated_at` | Scoped to the exported articles; covers BOTH note kinds. `highlight_id` set = a highlight-anchored note (inlined in that highlight's sidecar line as `note_markdown`, not a separate file); `highlight_id: null` = the one article-level note (`notes/<stem>.md`). Same sidecar-files-are-truth caveat as `highlights` above. |
+| `feeds` | `uid, url, title, site_url, folder, source_id, fetch_interval_minutes, status, created_at` | **Whole-library** (Phase 4 RSS subscriptions), not article-scoped — a feed is a library-level object. `uid` is a TEXT ULID. `source_id` references the feed's backing `sources` row (a `source_type='rss'` source). **Durable subscription state only:** the transient conditional-GET validators and backoff counters (`last_etag`, `last_modified`, `error_count`, `last_error`, `last_fetched_at`) are deliberately **excluded** — they regenerate on the next poll. The `feed_entries` dedup ledger is **not exported at all** (regenerable state, same bucket as `reading_sessions`); after an import, cross-method URL dedup prevents re-ingesting anything the bundle already carried. `tiro import` merges feeds by `url` (skip if the url already exists locally, otherwise insert with a freshly-resolved local source); older bundles that predate Phase 4 simply carry no `feeds` key and importing them is unaffected. Snapshots/restore (`tiro/backup.py`) round-trip `feeds` faithfully — the whole SQLite DB is copied, so the transient columns survive there too. |
 
 ## Markdown frontmatter fields
 
@@ -107,11 +108,14 @@ Frontmatter does **not** carry `uid` — the file's identity link to its
 ## sources.opml semantics
 
 Standard OPML 2.0, one `<outline>` per source with `text`/`title` set to
-`sources.name`. `htmlUrl` is present (`https://{domain}`) only for web sources
-with a `domain`; email sources have no `htmlUrl` and no other URL attribute.
-This is forward-looking for Phase 4 RSS support — no `xmlUrl`/feed URL exists
-in the schema yet, so treat OPML here as a source-name/site directory, not a
-subscribable feed list.
+`sources.name`. A source backed by a Phase 4 RSS feed carries `type="rss"` plus
+the feed's `xmlUrl` (the subscribable feed URL) and an `htmlUrl` (the feed's
+`site_url`, or `https://{domain}` as a fallback) — these outlines round-trip
+through any OPML-aware feed reader as real subscriptions. A plain web source
+with a `domain` carries `htmlUrl` (`https://{domain}`) only; email sources have
+no URL attribute at all. This is the whole-library source directory; the
+standalone `GET /api/feeds/export` OPML (distinct from this bundle member) is a
+feeds-only document nesting outlines one level by `folder`.
 
 ## Identity & conflict semantics
 

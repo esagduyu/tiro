@@ -506,6 +506,77 @@ def cmd_import_bundle(args):
     return 0
 
 
+def _print_import_summary(kind: str, summary: dict) -> None:
+    """Print the shared importer summary table (same fields as the API job)."""
+    print()
+    print(f"Import complete ({kind}):")
+    print(f"  imported:   {summary['imported']}")
+    print(f"  skipped:    {summary['skipped']} (already in library)")
+    print(f"  stubs:      {summary['stub_articles']} (content could not be fetched)")
+    print(f"  failed:     {summary['failed']}")
+    print(
+        f"  highlights: {summary['highlights_imported']} imported, "
+        f"{summary['highlights_skipped']} skipped"
+    )
+
+
+def _run_cli_import(config, items, *, kind: str) -> int:
+    """Drive `run_import` from a CLI verb: progress every 10 items, summary
+    table at the end. Importers always skip existing articles (no --conflicts;
+    simpler than bundle import)."""
+    from tiro.ingestion.importers.base import run_import
+
+    def progress(s):
+        if s["processed"] % 10 == 0:
+            print(
+                f"  ... {s['processed']} processed "
+                f"({s['imported']} imported, {s['skipped']} skipped, {s['failed']} failed)"
+            )
+
+    summary = run_import(config, items, kind=kind, progress_cb=progress)
+    _print_import_summary(kind, summary)
+    return 0
+
+
+def cmd_import_instapaper(args):
+    """Import an Instapaper CSV export."""
+    from tiro.config import load_config
+    from tiro.ingestion.importers import instapaper
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"Error: file not found: {path}")
+        sys.exit(1)
+    return _run_cli_import(config, instapaper.parse_export(path), kind="instapaper")
+
+
+def cmd_import_omnivore(args):
+    """Import an Omnivore export zip."""
+    from tiro.config import load_config
+    from tiro.ingestion.importers import omnivore
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"Error: file not found: {path}")
+        sys.exit(1)
+    return _run_cli_import(config, omnivore.parse_export(path), kind="omnivore")
+
+
+def cmd_import_readwise(args):
+    """Import a Readwise JSON export (articles + books; highlights anchored)."""
+    from tiro.config import load_config
+    from tiro.ingestion.importers import readwise
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"Error: file not found: {path}")
+        sys.exit(1)
+    return _run_cli_import(config, readwise.parse_export(path), kind="readwise")
+
+
 def cmd_delete(args):
     """Delete an article by id from all stores."""
     from tiro.config import load_config
@@ -820,6 +891,21 @@ def main():
         help="What to do when an article already exists (default: skip)",
     )
 
+    instapaper_parser = subparsers.add_parser(
+        "import-instapaper", help="Import an Instapaper CSV export (always skips existing)"
+    )
+    instapaper_parser.add_argument("file", help="Path to the Instapaper CSV export")
+
+    omnivore_parser = subparsers.add_parser(
+        "import-omnivore", help="Import an Omnivore export zip (always skips existing)"
+    )
+    omnivore_parser.add_argument("file", help="Path to the Omnivore export .zip")
+
+    readwise_parser = subparsers.add_parser(
+        "import-readwise", help="Import a Readwise JSON export (always skips existing)"
+    )
+    readwise_parser.add_argument("file", help="Path to the Readwise JSON export")
+
     delete_parser = subparsers.add_parser("delete", help="Delete an article by id")
     delete_parser.add_argument("id", type=int)
 
@@ -883,6 +969,12 @@ def main():
         cmd_import_emails(args)
     elif args.command == "import":
         cmd_import_bundle(args)
+    elif args.command == "import-instapaper":
+        cmd_import_instapaper(args)
+    elif args.command == "import-omnivore":
+        cmd_import_omnivore(args)
+    elif args.command == "import-readwise":
+        cmd_import_readwise(args)
     elif args.command == "delete":
         cmd_delete(args)
     elif args.command == "setup-email":

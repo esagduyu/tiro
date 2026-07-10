@@ -15,7 +15,27 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { esc, num, formatDate, timeAgo } from "../core.js";
+import { esc, num, formatDate, timeAgo, isSafeHref } from "../core.js";
+
+test("isSafeHref: allows absolute http/https, rejects active + non-absolute schemes", () => {
+    // Safe: absolute http/https.
+    assert.equal(isSafeHref("https://example.com/feed"), true);
+    assert.equal(isSafeHref("http://example.com"), true);
+    assert.equal(isSafeHref("HTTPS://EXAMPLE.COM"), true); // URL lowercases the scheme
+    // Unsafe: active schemes an <a href> would execute/handle.
+    assert.equal(isSafeHref("javascript:alert(document.cookie)"), false);
+    assert.equal(isSafeHref("javascript:alert(1)"), false);
+    assert.equal(isSafeHref("data:text/html,<script>alert(1)</script>"), false);
+    assert.equal(isSafeHref("vbscript:msgbox(1)"), false);
+    assert.equal(isSafeHref("file:///etc/passwd"), false);
+    // Unsafe: non-absolute / malformed / empty / non-string.
+    assert.equal(isSafeHref("/relative/path"), false);
+    assert.equal(isSafeHref("example.com"), false);
+    assert.equal(isSafeHref(""), false);
+    assert.equal(isSafeHref(null), false);
+    assert.equal(isSafeHref(undefined), false);
+    assert.equal(isSafeHref(42), false);
+});
 
 test("esc: table of inputs, matches the historical DOM-trick esc() byte-for-byte", () => {
     const cases = [

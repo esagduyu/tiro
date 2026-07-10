@@ -769,3 +769,129 @@ def test_m011_login_tokens_schema_columns(tmp_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(login_tokens)").fetchall()}
     assert cols == {"id", "token_hash", "created_at", "expires_at", "used_at"}
     conn.close()
+
+
+def test_m013_fresh_schema_has_feeds_tables(tmp_path):
+    """Fresh DB path: init_db() runs SCHEMA directly (no migration involved)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"feeds", "feed_entries"} <= names
+    index_names = {r[1] for r in conn.execute("PRAGMA index_list(feed_entries)").fetchall()}
+    assert "idx_feed_entries_article" in index_names
+    conn.close()
+
+
+def test_m013_legacy_db_at_version_12_gains_feeds_tables(tmp_path):
+    """A DB stamped at user_version 12 (pre-RSS) must gain feeds and
+    feed_entries via run_migrations, with no backfill (a fresh 013 DB has no
+    feeds subscribed yet)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("DROP TABLE feed_entries")
+    conn.execute("DROP TABLE feeds")
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    applied = run_migrations(db)
+    assert any("feeds" in a for a in applied)
+
+    conn = get_connection(db)
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"feeds", "feed_entries"} <= names
+    assert conn.execute("SELECT COUNT(*) FROM feeds").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM feed_entries").fetchone()[0] == 0
+    conn.close()
+
+
+def test_m013_feeds_migration_is_idempotent(tmp_path):
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)
+    assert run_migrations(db) == []  # re-run: nothing pending
+
+    conn = get_connection(db)
+    conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'rss')")
+    conn.execute(
+        "INSERT INTO feeds (uid, url, title, source_id) VALUES ('01F1', 'https://x/rss', 'X', 1)"
+    )
+    conn.execute("INSERT INTO feed_entries (feed_id, guid) VALUES (1, 'g1')")
+    conn.commit()
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    run_migrations(db)  # re-running the migration must not raise or wipe data
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM feeds").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM feed_entries").fetchone()[0] == 1
+    conn.close()
+
+
+def test_m013_fresh_schema_and_legacy_migration_produce_identical_tables(tmp_path):
+    """Cross-path schema equality: the SCHEMA path (fresh DB) and the
+    migrate_db/_m013 path (legacy DB upgraded from user_version 12) are two
+    independently-maintained copies of the same CREATE TABLE DDL."""
+    fresh_db = tmp_path / "fresh.db"
+    init_db(fresh_db)
+
+    legacy_db = tmp_path / "legacy.db"
+    init_db(legacy_db)
+    conn = get_connection(legacy_db)
+    conn.execute("DROP TABLE feed_entries")
+    conn.execute("DROP TABLE feeds")
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+    run_migrations(legacy_db)
+
+    def xinfo(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            return {(r["name"], r["type"], r["notnull"], r["dflt_value"]) for r in rows}
+        finally:
+            conn.close()
+
+    def index_list(db_path, table):
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(f"PRAGMA index_list({table})").fetchall()
+            return {(r["name"], r["unique"]) for r in rows}
+        finally:
+            conn.close()
+
+    for table in ("feeds", "feed_entries"):
+        assert xinfo(fresh_db, table) == xinfo(legacy_db, table), (
+            f"{table} column schema diverges between SCHEMA and migration paths"
+        )
+        assert index_list(fresh_db, table) == index_list(legacy_db, table), (
+            f"{table} index list diverges between SCHEMA and migration paths"
+        )
+
+
+def test_m013_feeds_schema_columns(tmp_path):
+    """Column-level check against the spec D2 exact schema (both convergence
+    paths use the same CREATE TABLE, so checking the fresh path suffices)."""
+    db = tmp_path / "tiro.db"
+    init_db(db)
+    conn = get_connection(db)
+    feed_cols = {r[1] for r in conn.execute("PRAGMA table_info(feeds)").fetchall()}
+    assert feed_cols == {
+        "id", "uid", "url", "title", "site_url", "folder", "source_id",
+        "fetch_interval_minutes", "status", "error_count", "last_error",
+        "last_fetched_at", "last_etag", "last_modified", "created_at",
+    }
+    entry_cols = {r[1] for r in conn.execute("PRAGMA table_info(feed_entries)").fetchall()}
+    assert entry_cols == {"id", "feed_id", "guid", "article_id", "first_seen_at"}
+    conn.close()

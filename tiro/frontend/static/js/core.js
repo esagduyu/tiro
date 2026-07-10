@@ -59,6 +59,29 @@ export function esc(str) {
 }
 
 /**
+ * Whether a URL is safe to use as a rendered external `href`: true ONLY for
+ * absolute http/https URLs. Guards against `javascript:`, `data:`, `vbscript:`
+ * and other active schemes reaching an `<a href>` sink for server-derived
+ * strings that are NOT scheme-validated at ingestion (feed `site_url`, in
+ * particular — article URLs already go through pydantic `HttpUrl` at ingest).
+ *
+ * Pure (uses the WHATWG `URL` parser, available in node) — parsed WITHOUT a
+ * base, so a relative URL (no scheme) or garbage throws and returns false.
+ * That's the intended posture for these sinks: they only ever render absolute
+ * external links; a non-absolute value is rejected rather than resolved.
+ */
+export function isSafeHref(url) {
+    if (typeof url !== "string" || !url) return false;
+    let proto;
+    try {
+        proto = new URL(url).protocol;
+    } catch {
+        return false;
+    }
+    return proto === "http:" || proto === "https:";
+}
+
+/**
  * Coerce to a finite number for display, falling back to "?" for
  * non-finite/non-numeric input. Matches reader.js/sources.js/wiki.js's num().
  */

@@ -165,8 +165,10 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 ### Ingestion
 
 - **Save web pages** — Paste a URL, get a clean markdown article with extracted metadata
+- **RSS & Atom feeds** — Subscribe to feeds (or any page that advertises one) and let Tiro poll them on a schedule (see [RSS & feeds](#rss--feeds) below)
 - **Import emails** — Drag .eml files or bulk import a directory of newsletters
-- **Chrome extension** — One-click save from any browser tab (see [Chrome Extension](#chrome-extension) below)
+- **Import your library** — Bring a Readwise, Instapaper, or Omnivore export in, highlights and all (see [Importing your library](#importing-your-library) below)
+- **Chrome extension** — One-click save from any browser tab, including saving a text selection as a highlight (see [Chrome Extension](#chrome-extension) below)
 - **Auto-enrichment** — Haiku extracts tags, named entities, and a 2-3 sentence summary on every save
 
 ### Intelligence (Opus 4.6)
@@ -261,6 +263,9 @@ Storage Layer (all local)
 | `uv run tiro run --cert cert.pem --key key.pem` | Serve over HTTPS (uvicorn TLS termination; both flags required together) |
 | `uv run tiro export -o backup.zip` | Export library as zip (supports `--tag`, `--source-id`, `--rating-min`, `--date-from` filters) |
 | `uv run tiro import-emails ./newsletters/` | Bulk import .eml files from a directory |
+| `uv run tiro import-readwise ./readwise.json` | Import a Readwise JSON export (articles + anchored highlights; always skips existing) |
+| `uv run tiro import-instapaper ./instapaper.csv` | Import an Instapaper CSV export (always skips existing) |
+| `uv run tiro import-omnivore ./omnivore.zip` | Import an Omnivore export zip (always skips existing) |
 | `uv run tiro backup [--output path] [--include-audio]` | Write a full library snapshot (tar.zst) |
 | `uv run tiro restore <snapshot> [--yes]` | Replace the library from a snapshot (displaces the current library to a `.bak.{ts}` sibling) |
 | `uv run tiro import <bundle> [--conflicts skip\|overwrite\|keep-both]` | Import a Tiro export bundle, merging per-article into the current library |
@@ -279,6 +284,72 @@ Storage Layer (all local)
 
 ---
 
+## RSS & feeds
+
+Subscribe to RSS/Atom feeds and Tiro polls them for you on a schedule, saving
+new entries as clean markdown articles (tagged `ingestion_method="rss"`) just
+like a manual save.
+
+- **Subscribe** from the `/feeds` page (or `POST /api/feeds`) with either a feed
+  URL *or* an ordinary page URL — Tiro autodiscovers the feed from a
+  `<link rel="alternate" type="application/rss+xml|atom+xml">` tag when you give
+  it a page. A duplicate feed URL returns a structured `already_subscribed`
+  response rather than a second subscription.
+- **Intervals** — each feed has its own fetch interval (15 / 30 / 60 / 180 /
+  360 min). A background poll loop checks due feeds and uses conditional-GET
+  (ETag / Last-Modified) so an unchanged feed costs almost nothing.
+- **Backoff & errors** — a feed that keeps failing accrues an error count and
+  surfaces its last error on the `/feeds` page (crimson status pill); one bad
+  feed never blocks the others in a cycle. Pause/resume a feed anytime;
+  resuming clears its error state.
+- **Manage** — rename, re-folder, check-now, pause, or unsubscribe per feed on
+  `/feeds`. Unsubscribing keeps your saved articles by default; you can opt to
+  delete them too (an automatic backup is taken first). Reach the page with the
+  **Shift+F** keyboard shortcut from the inbox or reader.
+- **OPML** — import an OPML file to bulk-subscribe (nested outlines flatten into
+  folders, deduped by feed URL) and export your subscriptions as OPML. OPML
+  parsing relies on Python's stdlib `xml.etree` (expat) with its built-in entity
+  bounds plus a 5 MB upload cap; there is no external XML dependency.
+
+## Importing your library
+
+Bring an existing reading library into Tiro from **Readwise** (JSON),
+**Instapaper** (CSV), or **Omnivore** (zip). Start an import from the Settings
+page's "Import library" card (a progress bar polls until it finishes) or from
+the CLI (`tiro import-readwise|import-instapaper|import-omnivore`).
+
+- **One import at a time** — the API runs a single background job; a second
+  start while one is active is rejected (`import_running`).
+- **Content re-fetch with honest fallback** — Tiro re-fetches each article's
+  full text where it can; a paywalled or dead URL falls back to a **stub
+  article tagged `import-stub`** (the original link + a short note) rather than
+  failing the import. Original save/publish timestamps are preserved.
+- **Skips existing** — an article already in your library (matched by URL, then
+  title+source) is skipped and counted, never duplicated.
+- **Highlights, anchored** — Readwise highlights and Omnivore highlights (both
+  the ones carried inline in the metadata and the ones in the export's separate
+  `highlights/{slug}.md` files) are re-anchored against the re-fetched markdown
+  body using the same machinery the reader uses. Omnivore highlight files are
+  parsed conservatively — each `>` blockquote is a quoted passage, an optional
+  following paragraph its note; anything that isn't a recognizable blockquote is
+  left alone. A highlight whose quote can't be located in the fetched text is
+  **skipped and reported in the count, never hand-placed at a guessed
+  position** — so the summary's "highlights skipped" number is an honest measure
+  of what didn't line up, not a silent loss. Note that duplicate imported
+  highlights dedupe by exact quote text, so re-importing the same export adds
+  nothing; if two highlights share identical quote text, only the first's note
+  is kept.
+
+### Forwarding newsletters to a Tiro address
+
+Tiro has no inbound SMTP server, but you can still route newsletters to it
+using **plus-addressing** on the Gmail account you already connected for IMAP
+ingestion (`tiro setup-email`). Subscribe (or forward) to
+`yourname+tiro@gmail.com` — Gmail delivers `+tiro` mail to the same inbox — then
+add a Gmail filter matching `to:yourname+tiro@gmail.com` that applies the label
+Tiro's IMAP sync watches. New newsletters then flow in through the existing
+IMAP path with no extra infrastructure.
+
 ## Chrome Extension
 
 A minimal "Save to Tiro" Chrome extension lives in the `extension/` directory.
@@ -290,6 +361,10 @@ A minimal "Save to Tiro" Chrome extension lives in the `extension/` directory.
 - Optional VIP toggle to mark the source as a favorite
 - Success confirmation with article title, source, and "Open in Tiro" link
 - Error state if the Tiro server isn't running
+- **Right-click context menu** — Save, Save as VIP, or "Save with selection as highlight" (the selected text is anchored as a yellow highlight on the saved article; if the selection can't be located in the extracted body, the article still saves — just without the highlight)
+- **Save all open tabs** — one button in the popup saves every open tab sequentially, tolerating already-saved duplicates
+
+> The extension's manual JS tests (`extension/lib.test.mjs`) run alongside the frontend suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`.
 
 ### Installation
 
@@ -456,11 +531,12 @@ Then `http://tiro.local:8000` resolves on any device on the same network that su
 | `/` | Focus search bar |
 | `f` | Toggle filter panel |
 | `d` | Go to digest |
-| `a` | Switch to articles view |
+| `a` | Toggle Library view (show read + archived rows) |
 | `c` | Classify / reclassify inbox |
 | `g` | Go to stats |
 | `v` | Go to knowledge graph |
 | `h` | Go to highlights |
+| `Shift+F` | Go to feeds |
 | `?` | Show shortcuts overlay |
 
 ### Reader
@@ -478,6 +554,7 @@ Then `http://tiro.local:8000` resolves on any device on the same network that su
 | `g` | Go to stats |
 | `v` | Go to knowledge graph |
 | `h` | Go to highlights |
+| `Shift+F` | Go to feeds |
 | `?` | Show shortcuts overlay |
 
 ### Stats
@@ -548,7 +625,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/` — 866 tests at 0.5.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/` — 1055 tests at 0.6.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
 
 ---
 

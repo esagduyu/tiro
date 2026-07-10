@@ -57,6 +57,14 @@ def export_library(
         audio = _get_audio_metadata(conn, article_ids)
         highlights = _get_highlights(conn, article_ids)
         notes = _get_notes(conn, article_ids)
+        # feeds are whole-library subscriptions (not article-filtered) — same
+        # rationale as digests/reading_stats: a feed is a library-level object,
+        # and a filtered export scoping them away would silently drop the
+        # user's subscription list. Transient fetch state (etag/last_modified/
+        # error_count/last_error/last_fetched_at) is excluded — regenerable on
+        # the next poll — and `feed_entries` is excluded entirely (regenerable
+        # dedup ledger, same bucket as reading_sessions). See spec D5.
+        feeds = _get_feeds(conn)
 
     finally:
         conn.close()
@@ -83,6 +91,7 @@ def export_library(
         "audio": audio,
         "highlights": highlights,
         "notes": notes,
+        "feeds": feeds,
     }
 
     # Create the zip
@@ -204,14 +213,40 @@ def _get_sources(conn) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _get_feeds(conn) -> list[dict]:
+    """Fetch the whole-library `feeds` subscription rows, spec D5's exact
+    column subset — durable subscription state only. Transient fetch validators
+    (last_etag/last_modified/error_count/last_error/last_fetched_at) are
+    deliberately excluded (regenerable on the next poll), and `feed_entries` is
+    not exported at all (regenerable dedup ledger)."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT uid, url, title, site_url, folder, source_id, "
+            "fetch_interval_minutes, status, created_at FROM feeds ORDER BY id"
+        ).fetchall()
+    ]
+
+
 def export_opml(config: TiroConfig) -> str:
-    """OPML 2.0 of all sources. Forward-looking for Phase 4 RSS: web sources
-    carry htmlUrl only (no feed URLs exist yet); email sources are name-only."""
+    """OPML 2.0 of all sources. A source backed by a Phase 4 RSS feed carries
+    `type="rss"` + the feed's `xmlUrl` (and `htmlUrl` from the feed's site_url
+    or the source domain); web sources carry htmlUrl only; email sources are
+    name-only."""
     import xml.etree.ElementTree as ET
 
     conn = get_connection(config.db_path)
     try:
-        sources = conn.execute("SELECT name, domain, source_type FROM sources ORDER BY name").fetchall()
+        sources = conn.execute(
+            "SELECT id, name, domain, source_type FROM sources ORDER BY name"
+        ).fetchall()
+        # source_id -> (feed url, site_url) for feed-backed sources. A source
+        # can only back one feed in practice; take the first if somehow more.
+        feed_by_source: dict[int, tuple[str, str | None]] = {}
+        for f in conn.execute(
+            "SELECT source_id, url, site_url FROM feeds WHERE source_id IS NOT NULL"
+        ).fetchall():
+            feed_by_source.setdefault(f["source_id"], (f["url"], f["site_url"]))
     finally:
         conn.close()
 
@@ -221,7 +256,16 @@ def export_opml(config: TiroConfig) -> str:
     body = ET.SubElement(opml, "body")
     for s in sources:
         attrs = {"text": s["name"], "title": s["name"]}
-        if s["domain"]:
+        feed = feed_by_source.get(s["id"])
+        if feed is not None:
+            feed_url, site_url = feed
+            attrs["type"] = "rss"
+            attrs["xmlUrl"] = feed_url
+            if site_url:
+                attrs["htmlUrl"] = site_url
+            elif s["domain"]:
+                attrs["htmlUrl"] = f"https://{s['domain']}"
+        elif s["domain"]:
             attrs["htmlUrl"] = f"https://{s['domain']}"
         ET.SubElement(body, "outline", attrs)
     return ET.tostring(opml, encoding="unicode", xml_declaration=True)
@@ -434,11 +478,12 @@ reading_time: 10 min
   "reading_stats": [ {{ "date": "2026-07-01", "articles_saved": 3, "articles_read": 1, "articles_rated": 0, "total_reading_time_min": 12 }} ],
   "audio": [ {{ "article_id": 1, "voice": "nova", "model": "tts-1", "duration_seconds": 180.5, "file_size_bytes": 204800, "generated_at": "..." }} ],
   "highlights": [ {{ "id": 1, "uid": "...", "article_id": 1, "article_uid": "...", "quote_text": "...", "color": "yellow", "text_position_start": 0, "text_position_end": 11, ... }} ],
-  "notes": [ {{ "id": 1, "uid": "...", "article_id": 1, "article_uid": "...", "highlight_id": null, "body_markdown": "...", ... }} ]
+  "notes": [ {{ "id": 1, "uid": "...", "article_id": 1, "article_uid": "...", "highlight_id": null, "body_markdown": "...", ... }} ],
+  "feeds": [ {{ "uid": "...", "url": "https://blog.example.com/feed.xml", "title": "Example", "site_url": "https://blog.example.com", "folder": "Tech", "source_id": 3, "fetch_interval_minutes": 60, "status": "active", "created_at": "..." }} ]
 }}
 ```
 
-Note: `ingenuity_analysis` is not a separate top-level key — it rides along inside each article record in `articles[*].ingenuity_analysis` (JSON string or null). `digests` and `reading_stats` are whole-library (not scoped to the export's article filters); `audio`/`highlights`/`notes` are scoped to the filtered articles. `audio` deliberately omits the internal `file_path`. `highlights`/`notes` are the derived-table fallback for an importer that can't read the `annotations/`/`notes/` sidecar files directly (see those directories above) — a `notes` row with `highlight_id` set is a highlight-anchored note, `highlight_id: null` is the one article-level note.
+Note: `ingenuity_analysis` is not a separate top-level key — it rides along inside each article record in `articles[*].ingenuity_analysis` (JSON string or null). `digests`, `reading_stats`, and `feeds` are whole-library (not scoped to the export's article filters); `audio`/`highlights`/`notes` are scoped to the filtered articles. `feeds` (Phase 4 RSS subscriptions) carries durable subscription state only — transient fetch validators (etag/last-modified/error counters) and the regenerable `feed_entries` dedup ledger are excluded. `audio` deliberately omits the internal `file_path`. `highlights`/`notes` are the derived-table fallback for an importer that can't read the `annotations/`/`notes/` sidecar files directly (see those directories above) — a `notes` row with `highlight_id` set is a highlight-anchored note, `highlight_id: null` is the one article-level note.
 
 ## Re-importing
 

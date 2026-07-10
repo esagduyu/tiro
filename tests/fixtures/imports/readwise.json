@@ -1,0 +1,39 @@
+[
+  {
+    "title": "The Alpha Essay",
+    "author": "Ada Alpha",
+    "source_url": "https://example.com/alpha",
+    "category": "articles",
+    "published_at": "2023-01-02T00:00:00Z",
+    "last_highlight_at": "2023-02-03T00:00:00Z",
+    "highlights": [
+      {
+        "text": "the first anchored quote",
+        "note": "a reader note",
+        "highlighted_at": "2023-02-03T10:00:00Z"
+      },
+      {
+        "text": "a second highlighted passage",
+        "note": null,
+        "highlighted_at": "2023-02-03T11:00:00Z"
+      }
+    ]
+  },
+  {
+    "title": "Beta Book",
+    "author": "Ben Beta",
+    "source_url": "https://example.com/beta",
+    "category": "books",
+    "highlights": [
+      { "text": "wisdom from a book", "note": "underlined twice" }
+    ]
+  },
+  {
+    "title": "No URL Orphan",
+    "author": "Nobody",
+    "category": "articles",
+    "highlights": [
+      { "text": "this can never anchor to a Tiro article" }
+    ]
+  }
+]

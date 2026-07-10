@@ -1,0 +1,5 @@
+URL,Title,Selection,Folder,Timestamp
+https://example.com/alpha,Alpha Article,This is a highlighted selection,Research,1683000000
+https://example.com/beta,Beta Article,,Reading,1683100000
+https://www.example.com/gamma?utm_source=news,Gamma Article,Another quote,Research,notanumber
+,No URL Here,,Research,1683300000

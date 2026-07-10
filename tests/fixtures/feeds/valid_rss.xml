@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Feed</title>
+    <link>https://example.com/</link>
+    <description>An example RSS 2.0 feed for tests</description>
+    <item>
+      <title>First Post About Widgets</title>
+      <link>https://example.com/posts/first-widget</link>
+      <guid isPermaLink="false">example-guid-0001</guid>
+      <pubDate>Mon, 06 Jul 2026 09:00:00 +0000</pubDate>
+      <description><![CDATA[<p>Widgets are wonderful and worth reading about at length.</p><script>alert('xss-in-feed-body')</script><p>This second paragraph gives the article enough body to pass the length check comfortably.</p>]]></description>
+    </item>
+    <item>
+      <title>Second Post About Gadgets</title>
+      <link>https://example.com/posts/second-gadget?utm_source=rss&amp;utm_campaign=feed</link>
+      <guid isPermaLink="false">example-guid-0002</guid>
+      <pubDate>Tue, 07 Jul 2026 10:30:00 +0000</pubDate>
+      <description><![CDATA[<p>Gadgets deserve their own thorough discussion here, with enough words to be a real article body worth ingesting.</p>]]></description>
+    </item>
+  </channel>
+</rss>

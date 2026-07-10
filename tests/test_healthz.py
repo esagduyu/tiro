@@ -20,7 +20,7 @@ def test_healthz_authenticated_has_detail(authenticated_client):
     assert body["stores"]["articles"] == 0
     assert body["stores"]["db_bytes"] > 0
     assert isinstance(body["uptime_seconds"], int)
-    assert set(body["tasks"]) == {"imap", "digest", "vector_retry"}
+    assert set(body["tasks"]) == {"imap", "digest", "vector_retry", "rss"}
 
 
 def test_healthz_no_password_has_detail(client):

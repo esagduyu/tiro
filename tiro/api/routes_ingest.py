@@ -11,6 +11,7 @@ from pydantic import BaseModel, HttpUrl
 from tiro.database import get_connection
 from tiro.ingestion.email import parse_eml
 from tiro.ingestion.imap import check_imap_inbox
+from tiro.ingestion.importers.base import create_highlight_from_quote
 from tiro.ingestion.processor import process_article
 from tiro.ingestion.web import fetch_and_extract
 
@@ -51,6 +52,10 @@ async def check_url(request: Request, url: str):
 class IngestURLRequest(BaseModel):
     url: HttpUrl
     ingestion_method: str = "manual"
+    # Optional selected text (Chrome extension "Save with selection as highlight",
+    # spec D10). Anchored post-ingest via the shared D7.4 helper; soft-fails when
+    # unlocatable. Never carried by the offline save-queue (queue sends only {url}).
+    highlight_text: str | None = None
 
 
 @router.post("/url")
@@ -106,7 +111,29 @@ async def ingest_url(body: IngestURLRequest, request: Request):
         logger.error("Failed to process article from %s: %s", url, e)
         raise HTTPException(status_code=500, detail=f"Failed to process article: {e}") from e
 
-    return {"success": True, "data": article}
+    response = {"success": True, "data": article}
+
+    # Selection-as-highlight (spec D10): anchor the extension-supplied text against
+    # the freshly-written body via the shared D7.4 helper. Soft-fails (no highlight,
+    # still 200) when the quote can't be located; the key appears only when the
+    # field was provided, so an absent field leaves the response shape unchanged.
+    if body.highlight_text is not None:
+        try:
+            created = await asyncio.to_thread(
+                create_highlight_from_quote, config, article["id"], body.highlight_text
+            )
+        except Exception as e:
+            # The article is already saved — a highlight-anchoring failure must
+            # never turn that success into a 500. Log and report the highlight
+            # as not created; the caller still gets its 200 + article data.
+            logger.error(
+                "Selection-as-highlight failed for article %s (non-fatal): %s",
+                article["id"], e,
+            )
+            created = False
+        response["highlight_created"] = created
+
+    return response
 
 
 @router.post("/email")

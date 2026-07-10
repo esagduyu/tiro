@@ -424,6 +424,52 @@ def _m012_device_pair_codes(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m013_feeds_tables(conn: sqlite3.Connection) -> None:
+    """feeds + feed_entries tables (Phase 4 M4.0 first commit): recurring
+    RSS/Atom ingestion. `feeds` holds subscriptions + per-feed fetch state
+    (etag/last-modified conditional-GET validators, backoff error_count);
+    `feed_entries` is a dedup LEDGER (not a content store) keyed on
+    (feed_id, guid) — a row survives its article's deletion (article_id
+    nulled by lifecycle.delete_article) so a deleted article is never
+    resurrected by the next poll.
+
+    New-table contract seventh practice (see module docstring / _m006..
+    _m012): tables + index only, no backfill — a fresh 013 DB has no feeds
+    subscribed yet."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS feeds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE,
+            url TEXT UNIQUE NOT NULL,
+            title TEXT,
+            site_url TEXT,
+            folder TEXT,
+            source_id INTEGER REFERENCES sources(id),
+            fetch_interval_minutes INTEGER NOT NULL DEFAULT 60,
+            status TEXT NOT NULL DEFAULT 'active',
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_fetched_at TEXT,
+            last_etag TEXT,
+            last_modified TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS feed_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feed_id INTEGER NOT NULL REFERENCES feeds(id),
+            guid TEXT NOT NULL,
+            article_id INTEGER,
+            first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (feed_id, guid)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feed_entries_article ON feed_entries(article_id)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -437,6 +483,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (10, "reading_sessions telemetry table", _m010_reading_sessions),
     (11, "snooze_and_login_tokens", _m011_snooze_and_login_tokens),
     (12, "device_pair_codes table", _m012_device_pair_codes),
+    (13, "feeds + feed_entries tables", _m013_feeds_tables),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

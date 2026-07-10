@@ -41,6 +41,16 @@ let cachedArticles = []; // store articles for re-sorting without re-fetching
 let selectedIndex = -1; // keyboard-selected article index
 let showArchived = false; // whether to include decayed articles
 let showSnoozed = false; // whether to include snoozed articles (M3.2)
+// Library view (owner UX wave 1). The inbox is UNREAD-FIRST by default: the
+// list fetch pins is_read=false so triage only ever surfaces what's still
+// unread. "Library view" is the escape hatch to your whole collection —
+// read + unread. Composition decision (documented): Library view = drop the
+// is_read filter AND include decayed/archived articles (so your full history
+// is reachable in one place), while "Show archived" stays a distinct, finer
+// toggle that reveals decayed/discarded rows WITHIN whichever mode is active.
+// The two are orthogonal axes: read/unread (Library) vs. active/decayed
+// (Show archived). Linkable + reload-durable via ?view=library.
+let libraryView = false;
 let showVIPOnly = false; // whether to filter to VIP articles only
 let currentPage = 1;
 let perPage = 50; // default page size
@@ -74,8 +84,17 @@ function buildQueryString() {
     // Sort
     params.set("sort", currentSort);
 
-    // Archived / decayed
-    if (!showArchived) {
+    // Unread-first default (owner UX wave 1): the inbox shows only unread
+    // articles unless the user is in Library view. An explicit filter-panel
+    // is_read choice (activeFilters.is_read, applied below) overrides this
+    // baseline. Snoozed articles are already excluded server-side by default.
+    if (!libraryView && activeFilters.is_read === undefined) {
+        params.set("is_read", "false");
+    }
+
+    // Archived / decayed. Library view forces decayed rows visible (your full
+    // history lives there); the triage inbox hides them unless "Show archived".
+    if (!showArchived && !libraryView) {
         params.set("include_decayed", "false");
     }
 
@@ -106,6 +125,8 @@ function syncURLWithFilters() {
     }
     if (currentSort !== "newest") params.set("sort", currentSort);
     if (currentPage > 1) params.set("page", currentPage);
+    // Library view (owner UX wave 1) — keep the URL linkable + reload-durable.
+    if (libraryView) params.set("view", "library");
     const qs = params.toString();
     const url = "/inbox" + (qs ? "?" + qs : "");
     window.history.replaceState({}, "", url);
@@ -125,6 +146,9 @@ function restoreFiltersFromURL() {
     }
     if (params.has("sort")) currentSort = params.get("sort");
     if (params.has("page")) currentPage = parseInt(params.get("page"), 10) || 1;
+    // Library view (owner UX wave 1) — ?view=library survives reload and makes
+    // the inbox-zero "Browse your library" link a real deep link.
+    if (params.get("view") === "library") libraryView = true;
     // Update tab indicator after restoring filters
     setTimeout(() => updateFilterTabIndicator(), 0);
 }
@@ -745,6 +769,33 @@ function toggleSnoozed() {
     loadInbox();
 }
 
+/* ---- Library view (owner UX wave 1) ----
+   Flip between the unread-first triage inbox and the whole-collection Library
+   view. Resets to page 1 and reloads; syncURLWithFilters() (called from
+   loadInbox's happy path) writes/clears ?view=library so the state is
+   linkable and survives reload. `force` lets the inbox-zero "Browse your
+   library" affordance enter Library unconditionally rather than toggling. */
+function setLibraryView(on) {
+    if (libraryView === on) {
+        // Already in the requested mode — still reload so a stale zero-state
+        // or filtered list refreshes to the right view.
+        loadInbox();
+        return;
+    }
+    libraryView = on;
+    currentPage = 1;
+    if (!libraryView) {
+        // Leaving Library: drop the ?view=library param eagerly (loadInbox's
+        // syncURLWithFilters would too, but only on its happy path).
+        window.history.replaceState({}, "", "/inbox");
+    }
+    loadInbox();
+}
+
+function toggleLibrary() {
+    setLibraryView(!libraryView);
+}
+
 // Registered once (not per render, unlike the per-card listeners in
 // attachListeners()) so clicking anywhere outside an open card menu closes
 // it. Card-menu-btn/item clicks stopPropagation() so they never reach here.
@@ -1061,6 +1112,14 @@ async function performArchive(articleId) {
         // before the swipe (un-reading an article that was read before the
         // gesture would not be a restore). opened_count and reading stats
         // are monotonic by design and are not rolled back.
+        //
+        // Unread-first inbox note (owner UX wave 1): un-reading here makes the
+        // article match the default is_read=false fetch again, so the trailing
+        // loadInbox() below re-surfaces it VISIBLY — the web analogue of iOS's
+        // "keep the row visible after undo". The one case it stays absent is
+        // wasRead=true (archiving an already-read row, only reachable in
+        // Library view): nothing changed, so nothing should reappear — the
+        // correct no-op, not a lost row.
         if (!wasRead) {
             await fetch(`/api/articles/${id}/read`, {
                 method: "PATCH",
@@ -1231,7 +1290,7 @@ function renderTriagePill() {
 function isDefaultTriageView() {
     return !searchActive
         && Object.keys(activeFilters).length === 0
-        && !showArchived && !showSnoozed && !showVIPOnly;
+        && !showArchived && !showSnoozed && !showVIPOnly && !libraryView;
 }
 
 function updateInboxZeroState() {
@@ -1342,6 +1401,17 @@ function updateToolbar(articles) {
     if (vipToggle) {
         vipToggle.classList.toggle("active", showVIPOnly);
         vipToggle.onclick = toggleVIPOnly;
+    }
+
+    // Library toggle (owner UX wave 1) — flips the whole list between the
+    // unread-first triage inbox and the whole-collection Library view. Label
+    // + active class flip on state, same pattern as the archived/snoozed
+    // toggles above.
+    const libraryToggle = document.getElementById("library-toggle");
+    if (libraryToggle) {
+        libraryToggle.textContent = libraryView ? "Back to inbox" : "Library";
+        libraryToggle.classList.toggle("active", libraryView);
+        libraryToggle.onclick = toggleLibrary;
     }
 
     // Attach handlers (safe to call multiple times — we replace onclick)
@@ -2015,6 +2085,12 @@ function handleInboxKeydown(e) {
             e.preventDefault();
             openSaveModal();
             break;
+        case "F":
+            // Shift+F -> feeds. `n` (the spec's suggested key) is already the
+            // "save new item" shortcut here, so feeds nav falls back to Shift+F.
+            e.preventDefault();
+            window.location.href = "/feeds";
+            break;
         case "j":
             e.preventDefault();
             moveSelection(cards, 1);
@@ -2083,6 +2159,14 @@ function handleInboxKeydown(e) {
         case "h":
             e.preventDefault();
             window.location.href = "/highlights";
+            break;
+        case "a":
+            // Toggle Library view (owner UX wave 1). `a` had no binding on the
+            // inbox before this wave; it now flips the whole-collection Library
+            // view on/off, coherent with the roadmap's legacy "a = articles"
+            // meaning (the read+unread collection).
+            e.preventDefault();
+            toggleLibrary();
             break;
         case "f":
             e.preventDefault();
@@ -2432,6 +2516,20 @@ document.addEventListener("DOMContentLoaded", () => {
     setupCardMenuOutsideClick();
     setupSwipe();
     setupKeyboard();
+
+    // Inbox-zero "Browse your library" affordance (owner UX wave 1). The
+    // celebratory state (#inbox-zero-state) shows once triage empties the
+    // default unread-first view; this button drops the user straight into
+    // Library view (read + unread). It's also an <a href="/inbox?view=library">
+    // so it's a real link (right-click, copy, no-JS), but we intercept the
+    // click for a smooth in-page switch with no full reload.
+    const zeroLibraryBtn = document.getElementById("inbox-zero-library-btn");
+    if (zeroLibraryBtn) {
+        zeroLibraryBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            setLibraryView(true);
+        });
+    }
 
     // Refresh after a save from the chrome-level save modal (sidebar.js).
     document.addEventListener("tiro:content-saved", () => {

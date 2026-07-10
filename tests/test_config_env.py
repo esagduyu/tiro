@@ -152,6 +152,73 @@ def test_cli_config_default_honors_tiro_config(monkeypatch, tmp_path):
     assert captured["config"] == "config.yaml"
 
 
+def test_load_config_no_arg_honors_tiro_config(tmp_path, monkeypatch):
+    """load_config() with NO explicit path must honor TIRO_CONFIG (absolute
+    path). This is the ON-8 root-cause fix: bare load_config() calls (app.py,
+    scripts/) previously defaulted to CWD-relative ./config.yaml and silently
+    operated on the owner's real config regardless of TIRO_CONFIG."""
+    from tiro.config import load_config
+
+    cfg = tmp_path / "elsewhere.yaml"
+    cfg.write_text("port: 9123\n")
+    monkeypatch.setenv("TIRO_CONFIG", str(cfg))
+    config = load_config()
+    assert config.config_path == str(cfg)
+    assert config.port == 9123
+
+
+def test_load_config_explicit_arg_beats_tiro_config(tmp_path, monkeypatch):
+    """An explicit path argument wins over TIRO_CONFIG (precedence:
+    explicit-arg > TIRO_CONFIG > default)."""
+    from tiro.config import load_config
+
+    env_cfg = tmp_path / "env.yaml"
+    env_cfg.write_text("port: 9001\n")
+    explicit_cfg = tmp_path / "explicit.yaml"
+    explicit_cfg.write_text("port: 9002\n")
+    monkeypatch.setenv("TIRO_CONFIG", str(env_cfg))
+    config = load_config(explicit_cfg)
+    assert config.config_path == str(explicit_cfg)
+    assert config.port == 9002
+
+
+def test_load_config_no_arg_unset_env_uses_default(tmp_path, monkeypatch):
+    """With TIRO_CONFIG unset, bare load_config() falls back to the historical
+    CWD-relative ./config.yaml default (behavior unchanged for the no-env
+    case)."""
+    from tiro.config import load_config
+
+    monkeypatch.delenv("TIRO_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = load_config()
+    assert config.config_path == "config.yaml"
+
+
+def test_load_persist_roundtrip_never_touches_cwd_config(tmp_path, monkeypatch):
+    """The regression that matters: with TIRO_CONFIG set, a load->persist
+    round-trip writes to the TIRO_CONFIG path and NEVER touches ./config.yaml
+    in the CWD — the exact trap that corrupted the owner's real config."""
+    from tiro.config import load_config, persist_config
+
+    cwd = tmp_path / "repo-root"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    decoy = cwd / "config.yaml"  # the owner's "real" config stand-in
+
+    real_cfg = tmp_path / "library" / "config.yaml"
+    real_cfg.parent.mkdir()
+    real_cfg.write_text("port: 8000\n")
+    monkeypatch.setenv("TIRO_CONFIG", str(real_cfg))
+
+    config = load_config()
+    persist_config(config, {"port": 9999})
+
+    # The CWD ./config.yaml was never created or touched
+    assert not decoy.exists()
+    # The write landed in the TIRO_CONFIG-targeted file
+    assert load_config().port == 9999
+
+
 def test_env_overlay_applied_before_api_key_sync(tmp_path, monkeypatch):
     """The overlay must run before the ANTHROPIC_API_KEY env-sync so that an
     env-provided anthropic_api_key still gets synced to os.environ."""

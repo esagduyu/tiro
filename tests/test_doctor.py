@@ -852,3 +852,57 @@ def test_login_tokens_purge(initialized_library):
 
     report = scan(config)
     assert report["expired_login_tokens"] == 0
+
+
+def test_scan_and_fix_feed_housekeeping(initialized_library):
+    """Phase 4 M4.0: dangling feed_entries.article_id and feeds.source_id are
+    reported (housekeeping, not structural) and --fix nulls both pointers,
+    never deleting the ledger row or the feed row."""
+    from tiro.doctor import fix, scan
+
+    config = initialized_library
+    conn = get_connection(config.db_path)
+    try:
+        # FK off for the setup so we can plant deliberately-dangling pointers
+        # (feeds.source_id REFERENCES sources(id)).
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("INSERT INTO sources (name, source_type) VALUES ('s', 'rss')")
+        conn.execute(
+            "INSERT INTO feeds (uid, url, title, source_id) VALUES ('01F1', 'https://x/rss', 'X', 1)"
+        )
+        # Dangling ledger pointer (article 999 doesn't exist).
+        conn.execute("INSERT INTO feed_entries (feed_id, guid, article_id) VALUES (1, 'g1', 999)")
+        # Dangling feed source pointer (source 42 doesn't exist).
+        conn.execute(
+            "INSERT INTO feeds (uid, url, title, source_id) VALUES ('01F2', 'https://y/rss', 'Y', 42)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = scan(config)
+    assert report["feed_entries_dangling"] == 1
+    assert report["feeds_dangling_source"] == 1
+    assert report["structurally_consistent"] is True  # housekeeping only
+    assert report["clean"] is False
+
+    result = fix(config)
+    assert any("feed_entries pointer" in a for a in result["actions"]), result["actions"]
+    assert any("feed source pointer" in a for a in result["actions"]), result["actions"]
+
+    conn = get_connection(config.db_path)
+    try:
+        # Ledger row survives, pointer nulled.
+        led = conn.execute("SELECT guid, article_id FROM feed_entries").fetchall()
+        assert len(led) == 1
+        assert led[0]["article_id"] is None
+        # Feed rows survive, dangling source nulled.
+        assert conn.execute("SELECT COUNT(*) AS n FROM feeds").fetchone()["n"] == 2
+        assert conn.execute(
+            "SELECT source_id FROM feeds WHERE uid = '01F2'"
+        ).fetchone()["source_id"] is None
+    finally:
+        conn.close()
+
+    assert scan(config)["feed_entries_dangling"] == 0
+    assert scan(config)["feeds_dangling_source"] == 0

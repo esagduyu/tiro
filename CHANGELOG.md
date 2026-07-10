@@ -10,7 +10,82 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
-### Added
+## [0.6.0] — `feeds-beta` (Phase 4: RSS & imports)
+
+Recurring ingestion arrives: subscribe to RSS/Atom feeds, bulk-import an
+existing reading library, and save straight from the browser with a selection
+captured as a highlight. `STATIC_VERSION` 66 → 67.
+
+### Added — RSS & feeds
+- **Feed subscriptions** (migration 013: `feeds` + `feed_entries`). Subscribe
+  by feed URL *or* page URL — `POST /api/feeds` autodiscovers a
+  `<link rel="alternate" type="application/rss+xml|atom+xml">` when the URL is
+  an HTML page (30s timeout, 5-redirect cap, 10 MB body cap; 409
+  `already_subscribed` on a duplicate feed URL). Feeds carry a per-feed
+  `fetch_interval_minutes`, conditional-GET validators (etag/last-modified),
+  and an `error_count` backoff.
+- **Recurring poll loop** on the new `PeriodicTask` scheduler registry
+  (`tiro/scheduler.py`, extended not replaced — the imap/digest/vector loops
+  were refactored onto it). Each poll cycle writes one audit line. New articles
+  land with `ingestion_method="rss"`; the `feed_entries` dedup ledger keeps a
+  deleted article from being resurrected by the next poll (its `article_id` is
+  nulled, the ledger row survives).
+- **Feed management** (`GET/POST /api/feeds`, `PATCH/DELETE /api/feeds/{id}`,
+  `POST /api/feeds/{id}/check`, `POST /api/feeds/check-all`) and a `/feeds`
+  management page (grouped by folder, status pills, check-now / pause / rename /
+  delete-with-or-without-articles). `DELETE ?delete_articles=true` takes an
+  `auto_backup` first, then loops the `delete_article` lifecycle coordinator
+  per article — never a raw cascade. Sidebar Library entry + **Shift+F**
+  keyboard shortcut (inbox & reader; `n` was already taken).
+- **OPML round-trip**: `GET /api/feeds/export` (standalone OPML 2.0, nested one
+  level by folder) and `POST /api/feeds/import` (multipart upload, flattens
+  nested outlines into a `folder` path, dedupes by url, returns
+  `{added, skipped, errors}`; rejects >5 MB or unparseable).
+
+### Added — library importers
+- **Three importers** — Readwise JSON, Instapaper CSV, Omnivore zip — via
+  `POST /api/import/{kind}` (single-slot background job; 409 `import_running`
+  when one is active; `GET /api/import/status` polls progress) and CLI verbs
+  `tiro import-readwise|import-instapaper|import-omnivore` (always skip
+  existing). Content is re-fetched where possible; a paywalled/failed re-fetch
+  falls back to a **stub article tagged `import-stub`**. Original timestamps are
+  preserved. Imported articles use `ingestion_method="import"`.
+- **Anchored highlight import**: Readwise highlights are anchored against the
+  re-fetched markdown body with the same D7.4 machinery the reader uses;
+  unlocatable highlights are **skipped and counted, never hand-placed**. A
+  Settings "Import library" card drives it with a live progress bar.
+
+### Added — Chrome extension advanced save
+- Background service worker registers three context-menu items (Save /
+  Save as VIP / Save with selection as highlight) and the popup gains a
+  save-all-open-tabs action. Selecting text and saving anchors it as a
+  highlight server-side via `highlight_text` on `POST /api/ingest/url`
+  (soft-fails to no-highlight, still 200, if the selection can't be located).
+
+### Added — owner UX wave
+- **Reading progress bar** in the reader (fixed, accent fill, both themes; a
+  `ResizeObserver` re-measures when late-loading images reflow the body).
+- **Unread-first inbox** with a Library view toggle (`a` key / `?view=library`)
+  that reveals read + archived rows — read/unread and active/decayed are
+  treated as orthogonal axes.
+
+### Added — export & backup
+- `metadata.json` gains an additive `feeds` key (durable subscription columns
+  only; transient fetch state and the `feed_entries` ledger excluded).
+  `sources.opml` marks feed-backed sources with `type="rss"` + `xmlUrl`.
+  `tiro import` merges bundle feeds by url; `tiro backup`/`restore` round-trips
+  feed rows wholesale. See EXPORT_SCHEMA.md.
+
+### Fixed
+- **`load_config()` now honors `TIRO_CONFIG`** (ON-8 root-cause hardening).
+  A bare `load_config()` (from `tiro/app.py`, `scripts/`, or any script run
+  from the repo root) previously ignored the `TIRO_CONFIG` env var and
+  defaulted to CWD-relative `./config.yaml`, so a load→persist round-trip
+  could silently corrupt the owner's real config. Path precedence is now
+  explicit-arg > `TIRO_CONFIG` > `./config.yaml`, matching `run.py`/`cli.py`/
+  the MCP server. No signature change (additive default → `None`).
+
+### Added — iOS device pairing
 
 - **Device pairing for the iOS client** (`/setup/qr?mode=device`,
   `POST /api/auth/pair`). The `/setup/qr` page becomes two labeled panels —

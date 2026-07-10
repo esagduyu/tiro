@@ -64,6 +64,7 @@ from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import canonical_key, new_ulid
+from tiro.tags import ensure_tag
 from tiro.wiki import mark_pages_stale
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,10 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
     if conflicts not in CONFLICT_MODES:
         raise ValueError(f"conflicts must be one of {CONFLICT_MODES}, got {conflicts!r}")
 
-    counts = {"imported": 0, "skipped": 0, "overwritten": 0, "kept_both": 0, "sources_created": 0}
+    counts = {
+        "imported": 0, "skipped": 0, "overwritten": 0, "kept_both": 0,
+        "sources_created": 0, "feeds_imported": 0,
+    }
 
     conn = get_connection(config.db_path)
     try:
@@ -242,6 +246,16 @@ def import_bundle(config: TiroConfig, zip_path: Path, *, conflicts: str = "skip"
                         local_article_id, e,
                     )
 
+            # Merge Phase 4 feed subscriptions by url (spec D5): skip a feed
+            # whose url already exists locally, otherwise insert it with a
+            # FRESH source resolution (the bundle's numeric source_id is
+            # bundle-space — resolve it to a local source the same way
+            # articles do, creating one when absent). Pre-Phase-4 bundles
+            # simply carry no `feeds` key and this is a no-op.
+            counts["feeds_imported"] = _merge_bundle_feeds(
+                conn, meta.get("feeds", []), sources_by_id
+            )
+
         sources_after = {r["id"] for r in conn.execute("SELECT id FROM sources").fetchall()}
         counts["sources_created"] = len(sources_after - sources_before)
 
@@ -267,6 +281,55 @@ def _bundle_source_for(sources_by_id: dict, art: dict, source_name: str | None) 
     if src is not None:
         return src
     return {"name": source_name or "Unknown", "source_type": art.get("source_type") or "web"}
+
+
+def _merge_bundle_feeds(
+    conn: sqlite3.Connection, feeds: list[dict], sources_by_id: dict
+) -> int:
+    """Merge the bundle's `feeds` rows into the library, deduped by feed url.
+
+    A feed whose url already exists locally is skipped (subscription state,
+    not content — no overwrite semantics). A new feed's `source_id` is
+    resolved FRESH: the bundle's numeric source_id is bundle-space, so it is
+    mapped through the bundle's `sources` array to a local source via
+    `_ensure_source` (creating one if absent), never reused verbatim. A fresh
+    `uid` is minted when the bundle didn't carry one or it already exists
+    locally. Transient fetch state isn't in the bundle, so a merged feed
+    starts clean (error_count 0, no etag) and picks up validators on its next
+    poll. Returns the count of feeds inserted."""
+    inserted = 0
+    for feed in feeds:
+        url = feed.get("url")
+        if not url:
+            continue
+        if conn.execute("SELECT 1 FROM feeds WHERE url = ?", (url,)).fetchone():
+            continue  # dedupe by url — already subscribed
+
+        local_source_id = None
+        bundle_source_id = feed.get("source_id")
+        if bundle_source_id is not None:
+            src = sources_by_id.get(bundle_source_id)
+            if src is not None:
+                local_source_id = _ensure_source(conn, src)
+
+        uid = feed.get("uid")
+        if not uid or conn.execute(
+            "SELECT 1 FROM feeds WHERE uid = ?", (uid,)
+        ).fetchone():
+            uid = new_ulid()
+
+        conn.execute(
+            "INSERT INTO feeds (uid, url, title, site_url, folder, source_id, "
+            "fetch_interval_minutes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                uid, url, feed.get("title"), feed.get("site_url"),
+                feed.get("folder"), local_source_id,
+                feed.get("fetch_interval_minutes") or 60,
+                feed.get("status") or "active",
+            ),
+        )
+        inserted += 1
+    return inserted
 
 
 def _find_existing(conn: sqlite3.Connection, art: dict, source_name: str | None) -> sqlite3.Row | None:
@@ -319,11 +382,9 @@ def _ensure_source(conn: sqlite3.Connection, src: dict) -> int:
 
 
 def _ensure_tag(conn: sqlite3.Connection, name: str) -> int:
-    row = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
-    if row is not None:
-        return row["id"]
-    cur = conn.execute("INSERT INTO tags (uid, name) VALUES (?, ?)", (new_ulid(), name))
-    return cur.lastrowid
+    # Thin wrapper over the shared helper (tiro/tags.py) — single home for the
+    # ensure-tag pattern that processor/rss/importer all needed (M4.2).
+    return ensure_tag(conn, name)
 
 
 def _ensure_entity(conn: sqlite3.Connection, name: str, entity_type: str) -> int:
