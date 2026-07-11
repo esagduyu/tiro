@@ -117,3 +117,125 @@ def test_metadata_extractor_empty_defaults_on_garbage_json(
     record_llm("this is not json at all")
     out = extract_metadata("T", "body", initialized_library)
     assert out == {"tags": [], "entities": [], "summary": ""}
+
+
+# --- PreferenceClassifier (Task 8) -----------------------------------------
+
+
+def _seed_rated_library(config):
+    """5 rated + 2 unrated articles with fully-known fields, one VIP source.
+    Direct SQL — no LLM, no chroma. Returns the unrated ids in insert order."""
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO sources (name, domain, source_type, is_vip) "
+            "VALUES ('VIP Source', 'vip.example.com', 'web', 1)")
+        vip_sid = cur.lastrowid
+        cur = conn.execute(
+            "INSERT INTO sources (name, domain, source_type) "
+            "VALUES ('Plain Source', 'plain.example.com', 'web')")
+        plain_sid = cur.lastrowid
+
+        rows = [
+            # (title, summary, rating, source_id, ingested_at)
+            ("Loved One", "sum L1", 2, vip_sid, "2026-07-01T00:00:05"),
+            ("Liked One", "sum K1", 1, plain_sid, "2026-07-01T00:00:04"),
+            ("Liked Two", "sum K2", 1, plain_sid, "2026-07-01T00:00:03"),
+            ("Disliked One", "sum D1", -1, plain_sid, "2026-07-01T00:00:02"),
+            ("Loved Two", "sum L2", 2, vip_sid, "2026-07-01T00:00:01"),
+            ("Unrated A", "sum UA", None, plain_sid, "2026-07-01T00:00:07"),
+            ("Unrated B", "sum UB", None, plain_sid, "2026-07-01T00:00:06"),
+        ]
+        unrated_ids = []
+        for title, summary, rating, sid, ts in rows:
+            slug = title.lower().replace(" ", "-")
+            cur = conn.execute(
+                """INSERT INTO articles (uid, source_id, title, url, slug,
+                   markdown_path, word_count, reading_time_min, ingested_at,
+                   rating, summary)
+                   VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?, ?)""",
+                (new_ulid(), sid, title, f"https://x.com/{slug}", slug,
+                 f"{slug}.md", ts, rating, summary),
+            )
+            if rating is None:
+                unrated_ids.append(cur.lastrowid)
+        conn.commit()
+        return unrated_ids
+    finally:
+        conn.close()
+
+
+def test_preference_classifier_transcript_golden(initialized_library, record_llm):
+    from tiro.database import get_connection
+    from tiro.intelligence.preferences import classify_articles
+    from tiro.intelligence.prompts import learned_preferences_prompt
+
+    unrated_ids = _seed_rated_library(initialized_library)
+    rec = record_llm(json.dumps({"classifications": [
+        {"article_id": unrated_ids[0], "tier": "must-read", "reason": "r1"},
+        {"article_id": unrated_ids[1], "tier": "bogus-tier", "reason": "r2"},
+    ]}))
+
+    result = classify_articles(initialized_library)
+
+    call = rec.calls[0]
+    assert call["tier"] == "heavy"
+    assert call["purpose"] == "classify"
+    assert call["max_tokens"] == 4096
+    # Exact prompt bytes: the template fed with EXACTLY the gathers the
+    # seeded data produces (ingested_at DESC ordering, entry-dict shapes).
+    expected_prompt = learned_preferences_prompt(
+        loved_articles=[
+            {"title": "Loved One", "source": "VIP Source", "summary": "sum L1"},
+            {"title": "Loved Two", "source": "VIP Source", "summary": "sum L2"},
+        ],
+        liked_articles=[
+            {"title": "Liked One", "source": "Plain Source", "summary": "sum K1"},
+            {"title": "Liked Two", "source": "Plain Source", "summary": "sum K2"},
+        ],
+        disliked_articles=[
+            {"title": "Disliked One", "source": "Plain Source", "summary": "sum D1"},
+        ],
+        vip_sources=["VIP Source"],
+        # "Unrated" here means ai_tier IS NULL, independent of the rating
+        # column — the seeded rated articles were never classified either,
+        # so the real gather includes all 7 rows, DESC by ingested_at.
+        unrated_articles=[
+            {"id": unrated_ids[0], "title": "Unrated A",
+             "source": "Plain Source", "summary": "sum UA"},
+            {"id": unrated_ids[1], "title": "Unrated B",
+             "source": "Plain Source", "summary": "sum UB"},
+            {"id": 1, "title": "Loved One",
+             "source": "VIP Source", "summary": "sum L1"},
+            {"id": 2, "title": "Liked One",
+             "source": "Plain Source", "summary": "sum K1"},
+            {"id": 3, "title": "Liked Two",
+             "source": "Plain Source", "summary": "sum K2"},
+            {"id": 4, "title": "Disliked One",
+             "source": "Plain Source", "summary": "sum D1"},
+            {"id": 5, "title": "Loved Two",
+             "source": "VIP Source", "summary": "sum L2"},
+        ],
+    )
+    assert call["prompt"] == expected_prompt
+
+    # Writeback pinned: valid tier applied, invalid tier skipped.
+    assert len(result) == 2
+    conn = get_connection(initialized_library.db_path)
+    try:
+        tiers = {r["id"]: r["ai_tier"] for r in conn.execute(
+            "SELECT id, ai_tier FROM articles WHERE rating IS NULL")}
+    finally:
+        conn.close()
+    assert tiers[unrated_ids[0]] == "must-read"
+    assert tiers[unrated_ids[1]] is None
+
+
+def test_preference_classifier_value_errors_preserved(initialized_library):
+    from tiro.intelligence.preferences import classify_articles
+
+    with pytest.raises(ValueError, match="Need at least 5 rated articles"):
+        classify_articles(initialized_library)
