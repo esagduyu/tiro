@@ -17,6 +17,14 @@ from tiro.stats import update_stat
 
 logger = logging.getLogger(__name__)
 
+
+def _meta_now() -> str:
+    """UTC timestamp for articles.meta_updated_at (sync S1 LWW clock —
+    same format as tiro/annotations.py _now_iso)."""
+    from datetime import UTC, datetime
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 
 
@@ -223,7 +231,8 @@ async def rate_article(article_id: int, body: RateRequest, request: Request):
             if row is None:
                 raise HTTPException(status_code=404, detail="Article not found")
             conn.execute(
-                "UPDATE articles SET rating = NULL WHERE id = ?", (article_id,)
+                "UPDATE articles SET rating = NULL, meta_updated_at = ? WHERE id = ?",
+                (_meta_now(), article_id),
             )
             conn.commit()
             return {"success": True, "data": {"id": article_id, "rating": None}}
@@ -243,8 +252,8 @@ async def rate_article(article_id: int, body: RateRequest, request: Request):
             raise HTTPException(status_code=404, detail="Article not found")
         first_rating = row["rating"] is None
         conn.execute(
-            "UPDATE articles SET rating = ? WHERE id = ?",
-            (body.rating, article_id),
+            "UPDATE articles SET rating = ?, meta_updated_at = ? WHERE id = ?",
+            (body.rating, _meta_now(), article_id),
         )
         conn.commit()
 
@@ -290,7 +299,8 @@ async def mark_read(article_id: int, request: Request, body: ReadRequest | None 
         was_read = bool(row["is_read"])
         if unmark:
             conn.execute(
-                "UPDATE articles SET is_read = 0 WHERE id = ?", (article_id,)
+                "UPDATE articles SET is_read = 0, meta_updated_at = ? WHERE id = ?",
+                (_meta_now(), article_id),
             )
             conn.commit()
             row = conn.execute(
@@ -306,8 +316,9 @@ async def mark_read(article_id: int, request: Request, body: ReadRequest | None 
                 },
             }
         conn.execute(
-            "UPDATE articles SET is_read = 1, opened_count = opened_count + 1 WHERE id = ?",
-            (article_id,),
+            "UPDATE articles SET is_read = 1, opened_count = opened_count + 1, "
+            "meta_updated_at = ? WHERE id = ?",
+            (_meta_now(), article_id),
         )
         conn.commit()
 
@@ -395,8 +406,8 @@ async def snooze_article(article_id: int, body: SnoozeRequest, request: Request)
             raise HTTPException(status_code=404, detail="Article not found")
 
         conn.execute(
-            "UPDATE articles SET snoozed_until = ? WHERE id = ?",
-            (snoozed_until, article_id),
+            "UPDATE articles SET snoozed_until = ?, meta_updated_at = ? WHERE id = ?",
+            (snoozed_until, _meta_now(), article_id),
         )
         conn.commit()
 
