@@ -39,9 +39,14 @@ cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
-  # ON-5 orphan assertion: nothing must survive on our port
+  # ON-5 orphan assertion: neither our server nor our fixture server may survive
+  # the kill. FIXTURE_PID is the python child directly (the subshell `exec`s it),
+  # so kill -0 on it is a true liveness check, not a stale-subshell false negative.
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "FAIL: server pid $SERVER_PID orphaned after kill"; exit 1
+  fi
+  if [ -n "$FIXTURE_PID" ] && kill -0 "$FIXTURE_PID" 2>/dev/null; then
+    echo "FAIL: fixture server pid $FIXTURE_PID orphaned after kill"; exit 1
   fi
   rm -rf "$SCRATCH"
 }
@@ -66,7 +71,10 @@ that later readers could find what mattered. This paragraph gives the extractor
 enough body text to produce a clean markdown article with real content.</p>
 </article></body></html>
 HTML
-( cd "$FIXDIR" && python3 -m http.server "$FIXPORT" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+# `exec` replaces the subshell with python so $! IS the python pid (not the
+# subshell's) — otherwise cleanup kills the shell, python re-parents to launchd
+# and lives forever (a release gate must never leak an orphan).
+( cd "$FIXDIR" && exec python3 -m http.server "$FIXPORT" --bind 127.0.0.1 >/dev/null 2>&1 ) &
 FIXTURE_PID=$!
 FIXTURE_URL="http://127.0.0.1:$FIXPORT/article.html"
 

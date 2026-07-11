@@ -81,10 +81,16 @@ def update_context(state: dict | None, current: str | None = None) -> dict:
     latest = state.get("latest_version")
     if isinstance(latest, str) and is_newer(latest, current):
         display = latest[1:] if latest[:1].lower() == "v" else latest
+        # Scheme-guard the banner href: GitHub's html_url is always https, but
+        # never emit a non-https URL into an <a href> (removes a javascript:
+        # vector were the API ever compromised). Fall back to the releases page.
+        url = state.get("html_url")
+        if not (isinstance(url, str) and url.lower().startswith("https://")):
+            url = "https://github.com/esagduyu/tiro/releases/latest"
         return {
             "update_available": True,
             "update_version": display,
-            "update_url": state.get("html_url"),
+            "update_url": url,
         }
     return {"update_available": False, "update_version": None, "update_url": None}
 
@@ -109,7 +115,9 @@ def fetch_latest(
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": f"Tiro/{__version__}",
+        # Version-string-free by design (see the module docstring / config.py):
+        # a bare product token, nothing about this install on the wire.
+        "User-Agent": "Tiro",
     }
     if new_state.get("etag"):
         headers["If-None-Match"] = new_state["etag"]

@@ -88,7 +88,8 @@ def test_request_url_and_headers(test_config):
     assert seen["url"] == RELEASES_URL
     assert seen["accept"] == "application/vnd.github+json"
     assert seen["api_version"] == "2022-11-28"
-    assert seen["user_agent"].startswith("Tiro/")
+    # Version-string-free UA: a bare product token, no version on the wire.
+    assert seen["user_agent"] == "Tiro"
 
 
 def test_200_stores_etag_and_version(test_config):

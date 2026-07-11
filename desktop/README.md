@@ -50,6 +50,17 @@ This bundle is ~830 MB (torch + ChromaDB + the seeded embedding model dominate �
 not fought, per spec D1). The `.spec` bundles the `all-MiniLM-L6-v2` snapshot and seeds it
 into the HF cache on first launch so the very first run is offline-capable.
 
+> **⚠️ Re-freeze after ANY server or version change — the frozen binary is a stale
+> snapshot.** The `.spec` reads the Python server code **and** `tiro.__version__` at
+> *build* time and bakes them into `dist/tiro-server/`. That directory does NOT track the
+> source tree: after any change to the Python server or a version bump you MUST re-run the
+> freeze (`uv run pyinstaller --noconfirm --clean tiro-server.spec`) or the `.app` will bundle
+> a **stale sidecar** — an older server and/or the wrong version. This is a real, already-hit
+> bug: a committed `dist/` can lag the tree (e.g. a `dist/` frozen at 0.6.0 shipped alongside a
+> newer source tree). `smoke.sh`'s `/healthz` version assertion is exactly the guard that
+> catches it — a version mismatch there means "re-freeze," not a smoke-test bug. Re-freeze and
+> re-run `smoke.sh` at release time.
+
 ### 2. Build the `.app` (embeds the frozen server as a resource)
 
 ```bash

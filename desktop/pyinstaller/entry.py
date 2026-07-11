@@ -45,8 +45,12 @@ def main() -> None:
     logger.info("Embedding model cache seed: %s", "copied" if seeded else "already-present-or-skipped")
 
     from tiro.config import load_config
+    from tiro.paths import platform_config_path
 
-    config_path = os.environ.get("TIRO_CONFIG", "config.yaml")
+    # A directly-launched frozen binary has no meaningful CWD, so fall back to
+    # the OS-standard config path (ON-8 consistency with the Tauri launcher)
+    # rather than a CWD-relative "config.yaml".
+    config_path = os.environ.get("TIRO_CONFIG") or str(platform_config_path())
     config = load_config(config_path)
     logger.info("Loaded config from %s (library=%s)", config_path, config.library_path)
 

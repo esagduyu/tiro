@@ -22,11 +22,14 @@ credentialed *distribution* half.
 Every "owner must do this on real hardware/accounts" item scattered across the
 M5.0–M5.2 reviews, gathered here. Tick them off as you go.
 
-- [ ] **O-1 — Offline first-boot** *(already fixed + verified in M5.0; listed for
-  completeness).* The frozen binary boots with `HF_HUB_OFFLINE=1` + an empty
-  `HF_HOME` and round-trips ingest + semantic search — proven by
-  `desktop/pyinstaller/smoke.sh`. Nothing further required; re-run the smoke
-  script after any `.spec` change (§7).
+- [ ] **O-1 — Offline first-boot; re-freeze and re-run `smoke.sh` at release time.**
+  The frozen binary boots with `HF_HUB_OFFLINE=1` + an empty `HF_HOME` and
+  round-trips ingest + semantic search — proven by
+  `desktop/pyinstaller/smoke.sh`. The offline layout was fixed + verified in
+  M5.0, but the frozen artifact is a build-time snapshot: **re-freeze the server
+  and re-run `smoke.sh` at release time** (and after any `.spec`, server, or
+  version change) so the shipped `dist/` isn't stale — the smoke script's
+  `/healthz` version assertion is the guard. See §1c and §7.
 - [ ] **O-2 — Library-migration real-data drill.** Run `tiro migrate-library`
   against a **real** library (not a scratch one), confirm the copy verifies,
   the app reads from the new location, and the **old copy is untouched**. See §6.

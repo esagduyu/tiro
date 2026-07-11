@@ -47,13 +47,13 @@ export function swRouteFor(url, method, mode) {
     if (/^\/api\/articles\/\d+$/.test(pathname)) return "article-network-first";
 
     // Everything that must NEVER fall back to the offline page, even as a
-    // top-level navigation: auth/setup flows (a stale cached /login or a
-    // surprise redirect to /offline mid-setup would be actively wrong) and
-    // every other /api/* endpoint (mutations, search, digest, etc. — none
-    // of these are cacheable page navigations either way, but a navigation
-    // -mode fetch to a JSON endpoint should still never happen here in
-    // practice; this is belt-and-suspenders).
-    const NEVER_FALLBACK_PREFIXES = ["/login", "/logout", "/setup", "/api/"];
+    // top-level navigation: auth/setup flows (a stale cached /login, the
+    // first-run /welcome wizard, or a surprise redirect to /offline mid-setup
+    // would be actively wrong) and every other /api/* endpoint (mutations,
+    // search, digest, etc. — none of these are cacheable page navigations
+    // either way, but a navigation-mode fetch to a JSON endpoint should still
+    // never happen here in practice; this is belt-and-suspenders).
+    const NEVER_FALLBACK_PREFIXES = ["/login", "/logout", "/setup", "/welcome", "/api/"];
     if (NEVER_FALLBACK_PREFIXES.some((p) => pathname.startsWith(p))) {
         return "network-only";
     }
