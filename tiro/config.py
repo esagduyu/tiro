@@ -48,6 +48,11 @@ class TiroConfig:
     decay_threshold: float = DEFAULTS["decay_threshold"]
     backup_auto_keep: int = 10  # auto-backup retention (0 = keep none)
     vector_retry_interval: int = 5  # minutes, 0 = disabled
+    # Agent runtime (Phase 6 K1): trace-file retention. Rows in agent_runs
+    # are kept forever; only the JSONL trace files under
+    # {library}/agents/traces/ are pruned (age first, then LRU size cap).
+    agent_trace_retention_days: int = 90
+    agent_trace_max_mb: int = 500
     # RSS/Atom recurring ingestion (Phase 4 M4.0). rss_enabled is the kill
     # switch: the poll loop registers whenever it's true (zero subscribed
     # feeds just means cheap no-op cycles); per-feed intervals live on the

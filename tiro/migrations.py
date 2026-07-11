@@ -470,6 +470,38 @@ def _m013_feeds_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m014_agent_runs(conn: sqlite3.Connection) -> None:
+    """Phase 6 K1: agent_runs — the queryable index over trace files
+    ({library}/agents/traces/{run_uid}.jsonl). Rows are kept forever
+    (small); trace files are pruned by retention config. Columns FROZEN
+    from the agent-runtime spec §2."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_uid TEXT UNIQUE NOT NULL,
+            agent_name TEXT NOT NULL,
+            agent_version TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            provider TEXT,
+            model TEXT,
+            input_json TEXT,
+            output_json TEXT,
+            citations_json TEXT,
+            tokens_in INTEGER,
+            tokens_out INTEGER,
+            cost_usd REAL,
+            error TEXT,
+            replay_of TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_runs_name "
+        "ON agent_runs(agent_name, started_at)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -484,6 +516,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (11, "snooze_and_login_tokens", _m011_snooze_and_login_tokens),
     (12, "device_pair_codes table", _m012_device_pair_codes),
     (13, "feeds + feed_entries tables", _m013_feeds_tables),
+    (14, "agent_runs table", _m014_agent_runs),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)
