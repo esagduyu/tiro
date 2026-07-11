@@ -679,3 +679,31 @@ def test_run_agent_serializes_via_lock(initialized_library, fake_llm, echo_regis
         assert order[:2] == ["slow-start", "slow-end"]
     finally:
         registry.unregister("slow")
+
+
+# --- Task 5 fix wave: header/context construction failures -------------
+
+
+def test_run_agent_header_failure_records_error_row(
+    initialized_library, fake_llm, echo_registered, monkeypatch,
+):
+    """trace.header()/RunContext construction happen between trace-open and
+    agent.run() — a raise there must still be caught, close the row as
+    'error', and surface as AgentRunError (never a bare exception)."""
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+
+    def raiser(self, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("tiro.agents.runtime.TraceWriter.header", raiser)
+    fake_llm("unused")
+
+    with pytest.raises(AgentRunError) as ei:
+        run_agent(initialized_library, "echo", {"text": "hi"})
+    assert ei.value.run_uid is not None
+    assert "disk full" in str(ei.value)
+
+    row = _fetch_run(initialized_library, ei.value.run_uid)
+    assert row["status"] == "error"
+    assert row["completed_at"] is not None

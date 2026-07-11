@@ -13,7 +13,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tiro.agents.base import AgentRunError
+from tiro.agents.base import AgentResult, AgentRunError
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import new_ulid
@@ -188,7 +188,7 @@ def _validate_inputs(agent, inputs: dict) -> None:
 
 def run_agent(config: TiroConfig, name: str, inputs: dict, *,
               model_override: dict | None = None,
-              replay_of: str | None = None):
+              replay_of: str | None = None) -> AgentResult:
     """Execute one agent run: validate -> lock -> row -> trace -> run ->
     close. Never raises anything but AgentRunError (original chained as
     __cause__; run_uid attached once a row exists). Spec §3 semantics."""
@@ -219,11 +219,13 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
                            error=f"trace open failed: {e}")
             raise AgentRunError(f"{name}: trace open failed: {e}",
                                 run_uid=run_uid) from e
-        trace.header(agent=agent.name, version=agent.version, inputs=inputs,
-                     provider=provider, model=model, replay_of=replay_of)
-        ctx = RunContext(config, trace=trace, run_uid=run_uid,
-                         model_override=model_override)
+        ctx = _ZeroCtx()
         try:
+            trace.header(agent=agent.name, version=agent.version,
+                         inputs=inputs, provider=provider, model=model,
+                         replay_of=replay_of)
+            ctx = RunContext(config, trace=trace, run_uid=run_uid,
+                             model_override=model_override)
             result = agent.run(ctx, **inputs)
             if not isinstance(result.outputs, agent.output_model):
                 raise AgentRunError(
