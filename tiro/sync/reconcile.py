@@ -513,7 +513,16 @@ def _apply_deleted(config: TiroConfig, scan: _Scan, report: ReconcileReport,
             _detail(report, "deleted_articles").append(
                 {"id": row["id"], "title": row["title"]})
             continue
-        if delete_article(config, row["id"]):
+        try:
+            deleted = delete_article(config, row["id"])
+        except Exception as e:
+            logger.error(
+                "Reconcile: delete_article failed for %d (%r) — will retry "
+                "next pass: %s", row["id"], row["title"], e)
+            _detail(report, "delete_errors").append(
+                {"id": row["id"], "title": row["title"]})
+            continue
+        if deleted:
             report.deleted += 1
             _detail(report, "deleted_articles").append(
                 {"id": row["id"], "title": row["title"]})
