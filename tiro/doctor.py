@@ -79,6 +79,18 @@ def scan(config: TiroConfig) -> dict:
             "SELECT COUNT(*) AS n FROM feeds WHERE source_id IS NOT NULL "
             "AND source_id NOT IN (SELECT id FROM sources)"
         ).fetchone()["n"]
+        # Agent runtime (Phase 6 K1): trace files are prunable derivatives;
+        # rows are forever. Two housekeeping classes: a trace FILE with no
+        # row (crash between file-open and row-insert, or a hand-copied
+        # file) and a row stuck at 'running' >24h (server died mid-run).
+        agent_run_uids = {
+            r["run_uid"]
+            for r in conn.execute("SELECT run_uid FROM agent_runs").fetchall()
+        }
+        agent_runs_stuck = conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_runs "
+            "WHERE status = 'running' AND started_at < datetime('now', '-1 day')"
+        ).fetchone()["n"]
         wiki_page_slugs = {
             row["slug"] for row in conn.execute("SELECT slug FROM wiki_pages").fetchall()
         }
@@ -136,6 +148,12 @@ def scan(config: TiroConfig) -> dict:
         if row["file_path"] not in audio_disk
     ]
     audio_files_without_row = sorted(audio_disk - audio_known)
+
+    from tiro.agents.runtime import traces_dir as _agent_traces_dir
+
+    _tdir = _agent_traces_dir(config)
+    _trace_stems = {p.stem for p in _tdir.glob("*.jsonl")} if _tdir.exists() else set()
+    agent_trace_orphans = sorted(_trace_stems - agent_run_uids)
 
     # Wiki index drift: derived wiki_pages rows vs. files actually on disk,
     # matched by slug (relative path minus .md). Cheap comparison, not a
@@ -208,6 +226,8 @@ def scan(config: TiroConfig) -> dict:
         "wiki_index_drift": wiki_index_drift,
         "annotations_index_drift": annotations_index_drift,
         "annotations_guarded": annotations_guarded,
+        "agent_trace_orphans": agent_trace_orphans,
+        "agent_runs_stuck": agent_runs_stuck,
     }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",
@@ -227,7 +247,8 @@ def scan(config: TiroConfig) -> dict:
         unreferenced_authors == 0 and expired_sessions == 0 and \
         expired_login_tokens == 0 and \
         feed_entries_dangling == 0 and feeds_dangling_source == 0 and \
-        wiki_index_drift == 0 and annotations_index_drift == 0
+        wiki_index_drift == 0 and annotations_index_drift == 0 and \
+        len(agent_trace_orphans) == 0 and agent_runs_stuck == 0
     return report
 
 
@@ -428,6 +449,31 @@ def fix(config: TiroConfig) -> dict:
     for name in report["audio_files_without_row"]:
         (config.library / "audio" / name).unlink(missing_ok=True)
         actions.append(f"deleted orphaned audio file {name}")
+
+    # Agent runtime housekeeping (Phase 6 K1)
+    if report["agent_trace_orphans"]:
+        from tiro.agents.runtime import traces_dir as _agent_traces_dir
+
+        _tdir = _agent_traces_dir(config)
+        for stem in report["agent_trace_orphans"]:
+            (_tdir / f"{stem}.jsonl").unlink(missing_ok=True)
+        actions.append(
+            f"deleted {len(report['agent_trace_orphans'])} orphaned agent trace file(s)"
+        )
+    if report["agent_runs_stuck"]:
+        conn = get_connection(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE agent_runs SET status = 'error', error = 'interrupted', "
+                "completed_at = datetime('now') "
+                "WHERE status = 'running' AND started_at < datetime('now', '-1 day')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        actions.append(
+            f"closed {report['agent_runs_stuck']} stuck agent run(s) as interrupted"
+        )
 
     # (f) wiki index drift -> rebuild the derived wiki_pages/wiki_page_articles
     # rows from what's on disk (files win). NEVER writes or deletes page

@@ -648,10 +648,15 @@ def cmd_doctor(args):
         housekeeping_found = False
         for key in ("unreferenced_tags", "unreferenced_entities",
                     "unreferenced_authors", "expired_sessions", "expired_login_tokens",
-                    "wiki_index_drift", "annotations_index_drift"):
+                    "wiki_index_drift", "annotations_index_drift", "agent_runs_stuck"):
             if report[key]:
                 housekeeping_found = True
                 print(f"{key}: {report[key]}")
+        if report.get("agent_trace_orphans"):
+            housekeeping_found = True
+            print(f"agent_trace_orphans: {len(report['agent_trace_orphans'])}")
+            for item in report["agent_trace_orphans"]:
+                print(f"  - {item}")
         if report.get("annotations_guarded"):
             print(
                 "annotations_guarded: a highlights/notes sidecar directory is missing or "

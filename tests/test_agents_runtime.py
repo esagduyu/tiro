@@ -707,3 +707,70 @@ def test_run_agent_header_failure_records_error_row(
     row = _fetch_run(initialized_library, ei.value.run_uid)
     assert row["status"] == "error"
     assert row["completed_at"] is not None
+
+
+# --- Task 7: doctor integration -------------------------------------------
+
+
+def test_doctor_reports_and_fixes_orphan_traces_and_stuck_runs(initialized_library):
+    from tiro.agents.runtime import traces_dir
+    from tiro.database import get_connection
+    from tiro.doctor import fix, scan
+
+    tdir = traces_dir(initialized_library)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "01ORPHAN.jsonl").write_text("{}\n")
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute(
+            """INSERT INTO agent_runs (run_uid, agent_name, agent_version,
+               started_at, status) VALUES
+               ('01STUCK', 'echo', '1', datetime('now', '-2 days'), 'running'),
+               ('01FRESH', 'echo', '1', datetime('now'), 'running')""",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = scan(initialized_library)
+    assert report["agent_trace_orphans"] == ["01ORPHAN"]
+    assert report["agent_runs_stuck"] == 1          # only the 2-day-old one
+    assert report["structurally_consistent"] is True  # housekeeping bucket
+    assert report["clean"] is False
+
+    fix(initialized_library)
+    post = scan(initialized_library)
+    assert post["agent_trace_orphans"] == []
+    assert post["agent_runs_stuck"] == 0
+    assert not (tdir / "01ORPHAN.jsonl").exists()
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, error, completed_at FROM agent_runs "
+            "WHERE run_uid = '01STUCK'"
+        ).fetchone()
+        fresh = conn.execute(
+            "SELECT status FROM agent_runs WHERE run_uid = '01FRESH'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "error" and row["error"] == "interrupted"
+    assert row["completed_at"] is not None
+    assert fresh["status"] == "running"             # young runs untouched
+
+
+def test_doctor_keeps_rows_for_expired_traces(initialized_library, fake_llm,
+                                              echo_registered):
+    """Retention prunes FILES, never rows — a row whose trace file is gone is
+    NOT an issue class (the API reads it as 'trace expired')."""
+    from tiro.agents.runtime import run_agent, traces_dir
+    from tiro.doctor import scan
+
+    fake_llm("ok")
+    res = run_agent(initialized_library, "echo", {"text": "x"})
+    (traces_dir(initialized_library) / f"{res.run_uid}.jsonl").unlink()
+    report = scan(initialized_library)
+    assert report["agent_trace_orphans"] == []
+    assert report["agent_runs_stuck"] == 0
