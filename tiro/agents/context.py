@@ -221,6 +221,90 @@ class RunContext:
         self._tool("similar_articles", {"article_uid": article_uid, "k": k}, out)
         return out
 
+    # -- kernel gather tools (K2: relocated gather SQL, + uid for citations) --
+
+    def list_rated_articles(self) -> tuple[list[dict], list[dict], list[dict]]:
+        """Rated articles grouped by rating (loved, liked, disliked) — the
+        relocated preferences._gather_rated_articles SQL. Entry dicts keep the
+        exact historical keys (title/source/summary) so prompt bytes match."""
+        conn = get_connection(self.config.db_path)
+        try:
+            rows = conn.execute("""
+                SELECT a.uid, a.title, a.summary, a.rating,
+                       s.name AS source_name
+                FROM articles a
+                LEFT JOIN sources s ON a.source_id = s.id
+                WHERE a.rating IS NOT NULL
+                ORDER BY a.ingested_at DESC
+            """).fetchall()
+        finally:
+            conn.close()
+        loved, liked, disliked = [], [], []
+        for row in rows:
+            entry = {"title": row["title"],
+                     "source": row["source_name"] or "Unknown",
+                     "summary": row["summary"] or ""}
+            if row["rating"] == 2:
+                loved.append(entry)
+            elif row["rating"] == 1:
+                liked.append(entry)
+            elif row["rating"] == -1:
+                disliked.append(entry)
+        self._cite(row["uid"] for row in rows)
+        self._tool("list_rated_articles", {},
+                   {"loved": loved, "liked": liked, "disliked": disliked})
+        return loved, liked, disliked
+
+    def list_unrated_articles(self, *, limit: int) -> list[dict]:
+        """Unclassified articles (ai_tier IS NULL) — relocated
+        preferences._gather_unrated_articles SQL, capped by the caller."""
+        conn = get_connection(self.config.db_path)
+        try:
+            rows = conn.execute("""
+                SELECT a.id, a.uid, a.title, a.summary,
+                       s.name AS source_name
+                FROM articles a
+                LEFT JOIN sources s ON a.source_id = s.id
+                WHERE a.ai_tier IS NULL
+                ORDER BY a.ingested_at DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        finally:
+            conn.close()
+        out = [{"id": r["id"], "title": r["title"],
+                "source": r["source_name"] or "Unknown",
+                "summary": r["summary"] or ""} for r in rows]
+        self._cite(r["uid"] for r in rows)
+        self._tool("list_unrated_articles", {"limit": limit}, out)
+        return out
+
+    def get_vip_names(self) -> dict:
+        """VIP source + author names (digest/classifier ranking context)."""
+        conn = get_connection(self.config.db_path)
+        try:
+            sources = [r["name"] for r in conn.execute(
+                "SELECT name FROM sources WHERE is_vip = 1").fetchall()]
+            authors = [r["name"] for r in conn.execute(
+                "SELECT name FROM authors WHERE is_vip = 1").fetchall()]
+        finally:
+            conn.close()
+        out = {"sources": sources, "authors": authors}
+        self._tool("get_vip_names", {}, out)
+        return out
+
+    # -- write tools (code agents only; personas never see these) -----------
+
+    def set_tier(self, article_id: int, tier: str) -> None:
+        """Direct ai_tier writeback (spec §4: code agent -> allowed)."""
+        conn = get_connection(self.config.db_path)
+        try:
+            conn.execute("UPDATE articles SET ai_tier = ? WHERE id = ?",
+                         (tier, article_id))
+            conn.commit()
+        finally:
+            conn.close()
+        self._tool("set_tier", {"article_id": article_id, "tier": tier}, None)
+
     # -- result assembly (OPEN decision 3) ---------------------------------
 
     def result(self, outputs: BaseModel,

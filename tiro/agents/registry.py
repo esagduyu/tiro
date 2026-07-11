@@ -42,5 +42,7 @@ def ensure_builtins() -> None:
         return
     _builtins_loaded = True
     from tiro.agents.builtin.metadata_extractor import MetadataExtractor
+    from tiro.agents.builtin.preference_classifier import PreferenceClassifier
 
     register(MetadataExtractor())
+    register(PreferenceClassifier())
