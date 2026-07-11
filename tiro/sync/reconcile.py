@@ -26,6 +26,7 @@ import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import frontmatter
@@ -306,6 +307,202 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
         conn.close()
 
 
+# --- external-file create pipeline ------------------------------------------
+
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+
+
+def _external_title(meta: dict, body: str, path: Path) -> str:
+    if meta.get("title"):
+        return str(meta["title"])
+    m = _HEADING_RE.search(body)
+    if m:
+        return m.group(1).strip()
+    return path.stem
+
+
+def _external_source_id(conn, url: str, meta: dict) -> int:
+    from urllib.parse import urlparse
+
+    from tiro.ingestion.processor import _get_or_create_source
+
+    domain = urlparse(url).netloc if url else ""
+    if domain:
+        return _get_or_create_source(conn, domain)
+    name = str(meta.get("source") or "External")
+    row = conn.execute(
+        "SELECT id FROM sources WHERE name = ? AND domain IS NULL "
+        "AND email_sender IS NULL", (name,)
+    ).fetchone()
+    if row:
+        return row["id"]
+    cursor = conn.execute(
+        "INSERT INTO sources (uid, name, source_type) VALUES (?, ?, ?)",
+        (new_ulid(), name, "web"),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def ingest_external_file(config: TiroConfig, path: Path) -> int | None:
+    """Ingest a user-created markdown file found in articles/ (S1).
+
+    The file is the USER'S: it is never rewritten, moved, or deleted — not
+    even when enrichment fails (deliberate divergence from process_article's
+    rollback-via-delete_article, which would destroy user data here).
+    Returns the article id, or None when skipped as a URL duplicate.
+    """
+    from tiro.ingestion.rss import _find_existing_article_by_url
+    from tiro.stats import update_stat
+
+    post = frontmatter.load(str(path))
+    body = post.content
+    meta = post.metadata or {}
+    url = str(meta.get("url") or "")
+    title = _external_title(meta, body, path)
+    word_count = len(body.split())
+    now = datetime.now()
+    published = str(meta["published"]) if meta.get("published") else None
+
+    conn = get_connection(config.db_path)
+    try:
+        if url and _find_existing_article_by_url(conn, url) is not None:
+            return None
+        source_id = _external_source_id(conn, url, meta)
+        slug, n = path.stem, 2
+        while conn.execute("SELECT 1 FROM articles WHERE slug = ?", (slug,)).fetchone():
+            slug = f"{path.stem}-{n}"
+            n += 1
+        cursor = conn.execute(
+            """INSERT INTO articles
+               (uid, source_id, title, author, url, slug, markdown_path,
+                word_count, reading_time_min, published_at, ingested_at,
+                ingestion_method, body_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'external', ?)""",
+            (new_ulid(), source_id, title, meta.get("author"), url, slug,
+             path.name, word_count, max(1, math.ceil(word_count / 250)),
+             published, now.isoformat(), content_hash(body)),
+        )
+        article_id = cursor.lastrowid
+        try:
+            from tiro.authors import link_article_author
+            link_article_author(conn, article_id, meta.get("author"))
+        except Exception as e:
+            logger.error("link_article_author failed for %s (non-fatal): %s", path, e)
+        if isinstance(meta.get("tags"), list):
+            _sync_tags_from_frontmatter(conn, article_id, [str(t) for t in meta["tags"]])
+        conn.commit()
+
+        try:
+            update_stat(config, "articles_saved")
+        except Exception as e:
+            logger.error("Failed to update reading stats: %s", e)
+
+        # Enrichment: SQLite only — never rewrite the user's file. Non-fatal.
+        try:
+            from tiro.ingestion.extractors import extract_metadata
+            ai = extract_metadata(title, body, config)
+            if ai["summary"]:
+                conn.execute("UPDATE articles SET summary = ? WHERE id = ?",
+                             (ai["summary"], article_id))
+            for tag_name in ai["tags"]:
+                conn.execute("INSERT OR IGNORE INTO tags (uid, name) VALUES (?, ?)",
+                             (new_ulid(), tag_name))
+                tag_row = conn.execute("SELECT id FROM tags WHERE name = ?",
+                                       (tag_name,)).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO article_tags (article_id, tag_id) "
+                    "VALUES (?, ?)", (article_id, tag_row["id"]))
+            from tiro.migrations import canonical_key
+            for entity in ai["entities"]:
+                key = canonical_key(entity["name"])
+                ent_row = conn.execute(
+                    "SELECT id FROM entities WHERE entity_type = ? AND canonical_key = ?",
+                    (entity["type"], key)).fetchone()
+                if ent_row:
+                    entity_id = ent_row["id"]
+                else:
+                    entity_id = conn.execute(
+                        "INSERT INTO entities (uid, name, entity_type, canonical_key) "
+                        "VALUES (?, ?, ?, ?)",
+                        (new_ulid(), entity["name"], entity["type"], key)).lastrowid
+                conn.execute(
+                    "INSERT OR IGNORE INTO article_entities (article_id, entity_id) "
+                    "VALUES (?, ?)", (article_id, entity_id))
+            try:
+                from tiro.wiki import mark_pages_stale
+                mark_pages_stale(config, conn, article_id)
+            except Exception as e:
+                logger.error("mark_pages_stale failed for %d (non-fatal): %s",
+                             article_id, e)
+            conn.commit()
+        except Exception as e:
+            logger.error("Enrichment failed for external %s (row kept): %s", path, e)
+
+        # ChromaDB (non-fatal: pending + retry loop, same posture as ingest).
+        try:
+            from tiro.vectorstore import get_collection
+            source_row = conn.execute(
+                "SELECT name, is_vip FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            get_collection().upsert(
+                ids=[f"article_{article_id}"],
+                documents=[body],
+                metadatas=[{
+                    "title": title,
+                    "source": source_row["name"] if source_row else "External",
+                    "is_vip": bool(source_row["is_vip"]) if source_row else False,
+                    "tags": "",
+                    "published_at": (published or now.strftime("%Y-%m-%d"))[:10],
+                    "article_id": article_id,
+                }],
+            )
+            conn.execute("UPDATE articles SET vector_status = 'indexed' WHERE id = ?",
+                         (article_id,))
+            conn.commit()
+        except Exception as e:
+            logger.error("ChromaDB add failed for external %d (will retry): %s",
+                         article_id, e)
+            conn.execute("UPDATE articles SET vector_status = 'pending' WHERE id = ?",
+                         (article_id,))
+            conn.commit()
+
+        # Relations (non-fatal; no LLM connection notes for external ingests).
+        try:
+            from tiro.search.semantic import find_related_articles, store_relations
+            relations = find_related_articles(article_id, config, limit=5)
+            if relations:
+                store_relations(article_id, relations, config)
+        except Exception as e:
+            logger.error("Related articles failed for external %d: %s", article_id, e)
+
+        return article_id
+    finally:
+        conn.close()
+
+
+def _apply_created(config: TiroConfig, scan: _Scan, report: ReconcileReport,
+                   dry_run: bool) -> None:
+    for name in scan.created:
+        if dry_run:
+            report.ingested += 1
+            _detail(report, "ingested_files").append(name)
+            continue
+        try:
+            article_id = ingest_external_file(config, scan.disk[name])
+        except Exception as e:
+            logger.error("External ingest failed for %s (file untouched): %s", name, e)
+            _detail(report, "ingest_errors").append(name)
+            continue
+        if article_id is None:
+            _detail(report, "skipped_duplicates").append(name)
+        else:
+            report.ingested += 1
+            _detail(report, "ingested_files").append(name)
+            logger.info("Ingested external file %s as article %d", name, article_id)
+
+
 # --- entry point -------------------------------------------------------------
 
 
@@ -334,4 +531,5 @@ def reconcile_library(config: TiroConfig, *, dry_run: bool = False) -> Reconcile
 
     scan = _scan_with_settle(config, report, dry_run)
     _apply_changed(config, scan, report, dry_run)
+    _apply_created(config, scan, report, dry_run)
     return report
