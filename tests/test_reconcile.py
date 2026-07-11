@@ -702,3 +702,25 @@ class TestDoctorConflictCensus:
         assert p.exists()
         assert not (initialized_library.library / ".orphaned" /
                     "keep.conflict-local-20260710.md").exists()
+
+    def test_notes_dir_conflict_file_not_annotations_drift(self, initialized_library):
+        """A notes/{stem}.conflict-local-{yyyymmdd}.md file (as written by
+        _notes_conflict_prepass) must be censused report-only, same as an
+        articles-dir conflict file -- it must NOT count toward
+        annotations_index_drift or flip clean/structurally_consistent."""
+        from tiro.annotations import notes_dir, sidecar_stem
+        from tiro.doctor import scan
+
+        article_id = _ingest(initialized_library)["id"]
+        row = _row(initialized_library, article_id)
+        stem = sidecar_stem(row)
+        dest = rec.write_conflict_file(
+            notes_dir(initialized_library), stem, "loser note body"
+        )
+
+        report = scan(initialized_library)
+
+        assert dest.name in report["conflict_files"]
+        assert report["annotations_index_drift"] == 0
+        assert report["structurally_consistent"] is True
+        assert report["clean"] is True
