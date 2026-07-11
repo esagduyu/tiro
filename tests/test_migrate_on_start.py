@@ -60,7 +60,7 @@ def test_behind_nonfresh_takes_snapshot_and_warns(tmp_path, _shared_embeddings, 
     from tiro import migrations
 
     config = _build_library(tmp_path, _shared_embeddings)
-    _set_user_version(config, 12)  # behind LATEST (13)
+    _set_user_version(config, 12)  # behind LATEST
 
     calls = {}
 
@@ -75,7 +75,10 @@ def test_behind_nonfresh_takes_snapshot_and_warns(tmp_path, _shared_embeddings, 
 
     assert calls["reason"] == "pre-migrate"
     assert result == str(tmp_path / "snap.tar.zst")
-    assert any("Migrating library schema v12 -> v13" in r.message for r in caplog.records)
+    assert any(
+        f"Migrating library schema v12 -> v{migrations.LATEST_VERSION}" in r.message
+        for r in caplog.records
+    )
 
 
 def test_fresh_install_skips_snapshot(tmp_path, _shared_embeddings, monkeypatch):

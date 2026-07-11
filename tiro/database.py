@@ -10,6 +10,7 @@ SCHEMA = """
 -- Sources (domains, newsletter senders)
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT NOT NULL,
     domain TEXT,
     email_sender TEXT,
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS articles (
     ingestion_method TEXT DEFAULT 'manual',
     vector_status TEXT DEFAULT 'pending',
     snoozed_until TEXT,
+    body_hash TEXT,
+    meta_updated_at TEXT,
     display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
 );
 
@@ -285,6 +288,7 @@ CREATE TABLE IF NOT EXISTS feed_entries (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical ON entities(entity_type, canonical_key);

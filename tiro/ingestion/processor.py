@@ -49,8 +49,8 @@ def _get_or_create_source(conn, domain: str) -> int:
 
     source_name = domain.removeprefix("www.")
     cursor = conn.execute(
-        "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, ?)",
-        (source_name, domain, "web"),
+        "INSERT INTO sources (uid, name, domain, source_type) VALUES (?, ?, ?, ?)",
+        (new_ulid(), source_name, domain, "web"),
     )
     conn.commit()
     return cursor.lastrowid
@@ -93,8 +93,8 @@ def _get_or_create_email_source(conn, sender_name: str, sender_email: str) -> in
         return row["id"]
 
     cursor = conn.execute(
-        "INSERT INTO sources (name, email_sender, source_type) VALUES (?, ?, ?)",
-        (sender_name, sender_email, "email"),
+        "INSERT INTO sources (uid, name, email_sender, source_type) VALUES (?, ?, ?, ?)",
+        (new_ulid(), sender_name, sender_email, "email"),
     )
     conn.commit()
     return cursor.lastrowid

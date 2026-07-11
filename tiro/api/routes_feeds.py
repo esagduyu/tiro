@@ -50,8 +50,8 @@ def _insert_feed(conn, *, feed_url: str, title: str, site_url: str,
     """
     domain = urlparse(site_url).netloc or urlparse(feed_url).netloc
     cur = conn.execute(
-        "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, ?)",
-        (title, domain, "rss"),
+        "INSERT INTO sources (uid, name, domain, source_type) VALUES (?, ?, ?, ?)",
+        (new_ulid(), title, domain, "rss"),
     )
     source_id = cur.lastrowid
     cur = conn.execute(

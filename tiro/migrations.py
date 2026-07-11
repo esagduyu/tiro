@@ -470,6 +470,65 @@ def _m013_feeds_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m015_sync_columns(conn: sqlite3.Connection) -> None:
+    """Sync-engine S1 change-detection columns (weekend campaign: number 015
+    is PRE-ASSIGNED; 014 is reserved for the agent track's agent_runs table
+    and may be absent on this branch — the version gap is tolerated).
+
+    - articles.body_hash: sha256 of the markdown BODY (frontmatter stripped,
+      tiro/anchors.py content_hash semantics — the same text the annotations
+      API hashes). Backfilled from disk where readable; missing/unparseable
+      file -> NULL (the reconcile pass lazily adopts a hash for NULL rows
+      without treating them as external edits).
+    - articles.meta_updated_at: LWW timestamp for the per-field meta merge
+      (spec §3/§4), bumped by the rate/read/snooze routes. Backfilled NULL
+      ("never meta-modified").
+    - sources.uid: ULID sync identity (spec §3 — sources lacked uids).
+      Backfilled here; creation sites stamp it for new rows from S1 on.
+
+    The disk backfill locates the library via PRAGMA database_list: tiro.db
+    always lives at {library}/tiro.db with articles/ as a sibling
+    (config.articles_dir invariant, unchanged by Phase 5's tiro/paths.py).
+    Migration fns only receive a connection, hence the pragma. A pathless
+    (:memory:) DB skips the backfill.
+    """
+    if not _has_column(conn, "articles", "body_hash"):
+        conn.execute("ALTER TABLE articles ADD COLUMN body_hash TEXT")
+    if not _has_column(conn, "articles", "meta_updated_at"):
+        conn.execute("ALTER TABLE articles ADD COLUMN meta_updated_at TEXT")
+    if not _has_column(conn, "sources", "uid"):
+        conn.execute("ALTER TABLE sources ADD COLUMN uid TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid)")
+    for row in conn.execute("SELECT id FROM sources WHERE uid IS NULL").fetchall():
+        conn.execute("UPDATE sources SET uid = ? WHERE id = ?", (new_ulid(), row["id"]))
+
+    row = conn.execute("PRAGMA database_list").fetchone()
+    db_file = row["file"] if row else None
+    if not db_file:
+        return
+    articles_dir = Path(db_file).resolve().parent / "articles"
+    if not articles_dir.exists():
+        return
+
+    import frontmatter
+
+    from tiro.anchors import content_hash
+
+    for art in conn.execute(
+        "SELECT id, markdown_path FROM articles WHERE body_hash IS NULL"
+    ).fetchall():
+        path = articles_dir / Path(art["markdown_path"]).name
+        try:
+            body = frontmatter.load(str(path)).content
+        except Exception as e:  # missing file, bad YAML, decode error: skip, stay NULL
+            logger.debug("body_hash backfill skipped for %s: %s", path, e)
+            continue
+        conn.execute(
+            "UPDATE articles SET body_hash = ? WHERE id = ?",
+            (content_hash(body), art["id"]),
+        )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -484,6 +543,8 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (11, "snooze_and_login_tokens", _m011_snooze_and_login_tokens),
     (12, "device_pair_codes table", _m012_device_pair_codes),
     (13, "feeds + feed_entries tables", _m013_feeds_tables),
+    # 014 RESERVED: agent-track K1 (agent_runs) — merged via main, gap tolerated.
+    (15, "sync S1 change-detection columns (body_hash/meta_updated_at/sources.uid)", _m015_sync_columns),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)
