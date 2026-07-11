@@ -29,7 +29,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "68"
+STATIC_VERSION = "69"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -722,6 +722,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         return await call_next(request)
 
     # API routers
+    from tiro.api.routes_agents import router as agents_router
     from tiro.api.routes_annotations import router as annotations_router
     from tiro.api.routes_articles import router as articles_router
     from tiro.api.routes_audio import router as audio_router
@@ -758,6 +759,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
         sessions_router, remote_router, feeds_router, import_router,
+        agents_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
@@ -1041,6 +1043,10 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     @app.get("/feeds", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
     async def feeds_page(request: Request):
         return templates.TemplateResponse(request, "feeds.html", _theme_context(request))
+
+    @app.get("/agents", response_class=HTMLResponse, dependencies=[Depends(auth.require_page_auth)])
+    async def agents_page(request: Request):
+        return templates.TemplateResponse(request, "agents.html", _theme_context(request))
 
     async def _qr_setup_response(request: Request, mode: str = "browser") -> HTMLResponse:
         config = request.app.state.config

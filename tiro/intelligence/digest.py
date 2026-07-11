@@ -1,15 +1,20 @@
-"""Daily digest generation using Claude Opus 4.6."""
+"""Daily digest generation — compat wrapper over the DigestWriter agent.
+
+The gather SQL now lives on the agent context
+(tiro/agents/context.py: gather_digest_articles / get_highlights); the
+orchestration lives in tiro/agents/builtin/digest_writer.py. This module
+keeps the historical `generate_digest` signature + exception surface for
+routes_digest.py / email_digest.py / app.py's scheduler, plus the cache
+readers/writer and split logic those (and the agent) still depend on.
+"""
 
 import json
 import logging
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.intelligence.prompts import daily_digest_prompt, highlight_recap_prompt
-from tiro.llm import llm_call
-from tiro.sanitize import sanitize_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,13 @@ def _gather_articles(
     An article counts as VIP if its source is VIP OR any linked author is VIP.
 
     Returns (articles, vip_sources, vip_authors, recent_ratings).
+
+    Kept here (a byte-identical duplicate of RunContext.gather_digest_
+    articles' SQL, minus the `uid` column/citation capture) as a back-compat
+    direct-import seam — tests/test_snooze_api.py imports this name
+    directly and predates the agent runtime; generate_digest itself no
+    longer calls it (the agent's gather goes through the context tool
+    instead).
     """
     conn = get_connection(config.db_path)
     try:
@@ -156,7 +168,15 @@ def _gather_highlights(config: TiroConfig) -> list[dict]:
     Returns a list of dicts (article_id, article_title, quote, note),
     newest-highlight-first, capped to `MAX_HIGHLIGHTS_FOR_RECAP`. Windowing
     and the cap both key on `highlights.created_at` (ISO 8601 UTC strings,
-    so lexicographic and chronological order agree)."""
+    so lexicographic and chronological order agree).
+
+    Kept here (a byte-identical duplicate of RunContext.get_highlights'
+    SQL, minus the extra highlight_uid/color/article_uid columns) as a
+    back-compat direct-import seam — tests/test_highlight_recap.py imports
+    this name directly and predates the agent runtime; the DigestWriter
+    agent's own gather goes through ctx.get_highlights(days=7, limit=50)
+    instead.
+    """
     conn = get_connection(config.db_path)
     try:
         cutoff = (datetime.now(UTC) - timedelta(days=HIGHLIGHT_RECAP_WINDOW_DAYS)).strftime(
@@ -299,80 +319,30 @@ def get_cached_digest(config: TiroConfig, today: str, digest_type: str | None = 
 
 
 def generate_digest(config: TiroConfig, unread_only: bool = False) -> dict:
-    """Generate today's digest using Opus 4.6.
+    """Generate today's digest via the digest_writer agent run.
 
-    Returns dict mapping digest_type -> {"content": str, "article_ids": list[int], "created_at": str}.
-
-    Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
+    Return shape unchanged: {digest_type: {content, article_ids, created_at}}
+    with created_at as a full datetime string (the staleness banner parses
+    it). ValueError/RuntimeError surface preserved via cause re-raise.
     """
-    articles, vip_sources, vip_authors, recent_ratings = _gather_articles(config, unread_only=unread_only)
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
 
-    if not articles:
-        raise ValueError("No articles in library — save some articles first")
-
-    # Build prompt
-    prompt = daily_digest_prompt(vip_sources, recent_ratings, articles, vip_authors)
-    article_ids = [a["id"] for a in articles]
-
-    logger.info(
-        "Generating digest with %d articles (%d VIP sources, %d rated)",
-        len(articles),
-        len(vip_sources),
-        len(recent_ratings),
-    )
-
-    # Call Opus 4.6
-    result = llm_call(
-        config, "heavy", prompt,
-        purpose="digest", max_tokens=4096,
-    )
-    raw_content = result.text
-    logger.info("Opus digest response: %d chars", len(raw_content))
-
-    # Split into sections
-    sections = _split_digest(raw_content)
-
-    # Ensure all three types exist
-    for dtype in DIGEST_TYPES:
-        if dtype not in sections:
-            sections[dtype] = "*This section was not generated. Try refreshing the digest.*"
-
-    # Sanitize Opus's markdown output before it's cached to SQLite (and
-    # returned to the caller) — surgically strips raw script/iframe HTML
-    # islands and javascript: links without touching markdown syntax.
-    sections = {dtype: sanitize_markdown(content) for dtype, content in sections.items()}
-
-    # Highlights this week: an OPTIONAL additional llm_call, made only when
-    # there's at least one highlight in the window -- zero highlights means
-    # zero extra calls (and no section), not an empty/placeholder recap.
-    # Appended to "ranked" only: the three variants are cached as three
-    # independent digests-table rows (not re-derived from one another), and
-    # duplicating the recap into all three would make it appear three times
-    # in `send_digest_email(all_sections=True)`'s combined email. "ranked"
-    # is both the digest page's default tab and what the non-all_sections
-    # email sends, so it's the one place a reader is guaranteed to see it.
-    highlights = _gather_highlights(config)
-    if highlights:
-        recap_prompt = highlight_recap_prompt(highlights)
-        recap_result = llm_call(
-            config, "heavy", recap_prompt,
-            purpose="highlight_recap", max_tokens=1024,
-        )
-        recap_content = sanitize_markdown(recap_result.text.strip())
-        sections["ranked"] = f"{sections['ranked']}\n\n---\n\n{recap_content}"
-
-    # Cache
-    today = date.today().isoformat()
-    _cache_digest(config, today, sections, article_ids)
-
+    try:
+        res = run_agent(config, "digest_writer", {"unread_only": unread_only})
+    except AgentRunError as e:
+        if e.__cause__ is not None:
+            # Deliberate bare re-raise of the ORIGINAL exception: `from ...`
+            # would rewrite its own cause chain; historical callers expect
+            # the plain ValueError/RuntimeError surface.
+            raise e.__cause__  # noqa: B904
+        raise
+    out = res.outputs
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     return {
-        dtype: {
-            "content": content,
-            "article_ids": article_ids,
-            "created_at": now,
-        }
-        for dtype, content in sections.items()
+        dtype: {"content": content, "article_ids": out.article_ids,
+                "created_at": now}
+        for dtype, content in out.sections.items()
     }
 
 

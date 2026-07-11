@@ -10,7 +10,6 @@ window/cap tests.
 from datetime import UTC, datetime, timedelta
 
 from tiro.database import get_connection
-from tiro.intelligence import digest as digest_mod
 from tiro.intelligence.digest import _gather_highlights, generate_digest, get_cached_digest
 from tiro.migrations import new_ulid
 
@@ -125,17 +124,26 @@ def test_gather_highlights_caps_at_50_by_recency(initialized_library):
 def test_zero_highlights_no_recap_section_and_no_extra_llm_call(
     initialized_library, fake_llm, monkeypatch
 ):
+    # NOTE (K2.2 adaptation): generate_digest now dispatches through the
+    # digest_writer agent, whose ctx.llm() calls tiro.llm.llm_call via
+    # module-attribute access (see tiro/agents/context.py) -- the same
+    # post-refactor seam tests/test_agents_golden.py's record_llm fixture
+    # patches. digest.py itself no longer imports/calls llm_call at all, so
+    # the spy target moves from digest_mod to tiro.llm; every assertion
+    # below is unchanged.
+    import tiro.llm as llm_mod
+
     config = initialized_library
     _seed_article(config)  # article with zero highlights
 
     calls = []
-    real_llm_call = digest_mod.llm_call
+    real_llm_call = llm_mod.llm_call
 
     def spy(cfg, tier, prompt, **kw):
         calls.append(kw.get("purpose"))
         return real_llm_call(cfg, tier, prompt, **kw)
 
-    monkeypatch.setattr(digest_mod, "llm_call", spy)
+    monkeypatch.setattr(llm_mod, "llm_call", spy)
     fake_llm(DIGEST_TEXT)
     result = generate_digest(config)
 
@@ -175,6 +183,11 @@ def test_highlights_present_recap_appended_to_ranked_only(initialized_library, f
 
 
 def test_cap_at_50_highlights_reaches_prompt(initialized_library, fake_llm, monkeypatch):
+    # NOTE (K2.2 adaptation): see the comment in
+    # test_zero_highlights_no_recap_section_and_no_extra_llm_call above --
+    # same spy-target move, same reason, assertions unchanged.
+    import tiro.llm as llm_mod
+
     config = initialized_library
     article_id = _seed_article(config)
     base = datetime.now(UTC)
@@ -183,7 +196,7 @@ def test_cap_at_50_highlights_reaches_prompt(initialized_library, fake_llm, monk
         _seed_highlight(config, article_id, quote=f"quote-{i:03d}", created_at=created)
 
     captured = {}
-    real_llm_call = digest_mod.llm_call
+    real_llm_call = llm_mod.llm_call
 
     def spy(cfg, tier, prompt, **kw):
         if kw.get("purpose") == "highlight_recap":
@@ -192,7 +205,7 @@ def test_cap_at_50_highlights_reaches_prompt(initialized_library, fake_llm, monk
 
     recap_text = "## Highlights This Week\n\nSome recap.\n"
     fake_llm(DIGEST_TEXT, recap_text)
-    monkeypatch.setattr(digest_mod, "llm_call", spy)
+    monkeypatch.setattr(llm_mod, "llm_call", spy)
     generate_digest(config)
 
     assert "prompt" in captured

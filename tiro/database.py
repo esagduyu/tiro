@@ -284,6 +284,30 @@ CREATE TABLE IF NOT EXISTS feed_entries (
     UNIQUE (feed_id, guid)
 );
 
+-- Agent runs (Phase 6 K1): the queryable index over trace files
+-- ({library}/agents/traces/{run_uid}.jsonl). Rows are kept forever
+-- (small); trace files are pruned by retention config. Columns FROZEN
+-- from the agent-runtime spec §2.
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_uid TEXT UNIQUE NOT NULL,
+    agent_name TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    provider TEXT,
+    model TEXT,
+    input_json TEXT,
+    output_json TEXT,
+    citations_json TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    cost_usd REAL,
+    error TEXT,
+    replay_of TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
@@ -309,6 +333,7 @@ CREATE INDEX IF NOT EXISTS idx_reading_sessions_article ON reading_sessions(arti
 CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_device_pair_codes_expires ON device_pair_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_feed_entries_article ON feed_entries(article_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_name ON agent_runs(agent_name, started_at);
 """
 
 

@@ -319,7 +319,15 @@ def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkey
     """A VIP author's name reaches the composed digest prompt via the new
     `vip_authors` argument, the same seam pattern as the extraction
     truncation test in test_llm.py: monkeypatch `daily_digest_prompt`
-    where digest.py imports it, capture args, delegate to the real impl."""
+    where it's actually called, capture args, delegate to the real impl.
+
+    NOTE (K2.2 adaptation): generate_digest now dispatches through the
+    digest_writer agent, which imports/calls daily_digest_prompt itself
+    (tiro/agents/builtin/digest_writer.py) -- digest.py no longer imports
+    it at all. The monkeypatch target moves accordingly; every assertion
+    below is unchanged.
+    """
+    from tiro.agents.builtin import digest_writer as digest_writer_mod
     from tiro.database import get_connection
     from tiro.intelligence import digest as digest_mod
 
@@ -341,7 +349,7 @@ def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkey
     finally:
         conn.close()
 
-    real_prompt_fn = digest_mod.daily_digest_prompt
+    real_prompt_fn = digest_writer_mod.daily_digest_prompt
     captured = {}
 
     def capture_prompt(*args, **kwargs):
@@ -351,7 +359,7 @@ def test_digest_prompt_includes_vip_author(initialized_library, fake_llm, monkey
         captured["composed"] = composed
         return composed
 
-    monkeypatch.setattr(digest_mod, "daily_digest_prompt", capture_prompt)
+    monkeypatch.setattr(digest_writer_mod, "daily_digest_prompt", capture_prompt)
 
     fake_llm(
         "## 1. Ranked by Importance\n1. T\n\n"

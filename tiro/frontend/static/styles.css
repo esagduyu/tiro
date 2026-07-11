@@ -4898,6 +4898,211 @@ main {
     }
 }
 
+/* --- Agents page (Phase 6 K2) — built on primitives + a thin page layer --- */
+.agents-view {
+    max-width: 860px;
+    margin: 0 auto;
+}
+
+.agents-header {
+    margin-bottom: 1rem;
+}
+
+.agents-sub {
+    color: var(--tiro-muted);
+    margin-top: 0.25rem;
+}
+
+.agents-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0 2rem;
+}
+
+.agents-card {
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    padding: 0.75rem 1rem;
+    background: var(--tiro-bg-surface);
+}
+
+.agents-card-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.agents-version,
+.agents-never {
+    color: var(--tiro-muted);
+    font-size: 0.85em;
+}
+
+.agents-card-last {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    font-size: 0.85em;
+    color: var(--tiro-muted);
+    align-items: center;
+}
+
+.agents-runs-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.agents-filters {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.agents-select {
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 4px;
+    background: var(--tiro-bg);
+    color: var(--tiro-fg-secondary);
+    font-size: 0.78rem;
+}
+
+.agents-runs {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0.75rem 0;
+}
+
+.agents-run-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    background: var(--tiro-bg-surface);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    font: inherit;
+    color: inherit;
+}
+
+.agents-run-row:hover {
+    border-color: var(--tiro-accent);
+}
+
+.agents-run-name {
+    font-weight: 600;
+}
+
+.agents-run-when {
+    color: var(--tiro-muted);
+}
+
+.agents-run-tokens,
+.agents-run-cost {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--tiro-muted);
+}
+
+.agents-run-cost {
+    margin-left: 0;
+}
+
+.agents-pager {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.agents-page-label {
+    color: var(--tiro-muted);
+    font-size: 0.9em;
+}
+
+.agents-detail {
+    border: 1px solid var(--tiro-border);
+    border-radius: var(--tiro-radius-md);
+    padding: 1rem;
+    margin-top: 1.5rem;
+    background: var(--tiro-bg-surface);
+}
+
+.agents-detail-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.agents-detail-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.agents-detail-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.9em;
+}
+
+.agents-detail-meta dt {
+    color: var(--tiro-muted);
+}
+
+.agents-error {
+    color: var(--tiro-tier-must-read);
+}
+
+.agents-trace-event {
+    border-top: 1px solid var(--tiro-border);
+    padding: 0.4rem 0;
+}
+
+.agents-trace-event pre {
+    overflow-x: auto;
+    background: var(--tiro-bg);
+    padding: 0.5rem;
+    border-radius: var(--tiro-radius-md);
+    font-size: 0.8em;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.agents-pill-ok {
+    background: var(--tiro-secondary);
+    color: #fff;
+}
+
+.agents-pill-error {
+    background: var(--tiro-tier-must-read);
+    color: #fff;
+}
+
+.agents-pill-running {
+    background: var(--tiro-bg-hover);
+    color: var(--tiro-muted);
+}
+
+@media (max-width: 640px) {
+    .agents-run-row {
+        flex-wrap: wrap;
+    }
+    .agents-run-tokens,
+    .agents-run-cost {
+        margin-left: 0;
+    }
+}
+
 /* --- Wiki view (/wiki) --- */
 
 .wiki-view {

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+
+{% block title %}Tiro ⁊ Agents{% endblock %}
+{% block page_title %}Agents{% endblock %}
+{% block nav_agents %}active{% endblock %}
+
+{% block content %}
+<section class="agents-view" id="agents-root">
+    <div class="agents-header">
+        <h2>Agents</h2>
+        <p class="agents-sub">Every AI feature runs as a recorded, replayable agent run.</p>
+    </div>
+
+    <div id="agents-list" class="agents-list">
+        <div class="settings-loading">
+            <div class="digest-spinner"></div>
+            <p>Loading agents…</p>
+        </div>
+    </div>
+
+    <div class="agents-runs-header">
+        <h3>Run history</h3>
+        <div class="agents-filters">
+            <select id="runs-agent-filter" class="agents-select">
+                <option value="">All agents</option>
+            </select>
+            <select id="runs-status-filter" class="agents-select">
+                <option value="">All statuses</option>
+                <option value="ok">ok</option>
+                <option value="error">error</option>
+                <option value="running">running</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="runs-list" class="agents-runs"></div>
+    <div class="agents-pager">
+        <button type="button" class="btn btn-ghost" id="runs-prev" disabled>Newer</button>
+        <span id="runs-page-label" class="agents-page-label"></span>
+        <button type="button" class="btn btn-ghost" id="runs-next" disabled>Older</button>
+    </div>
+
+    <div id="runs-empty" class="empty-state" style="display: none;">
+        {{ icon("zap", size=40) }}
+        <h2>No runs yet.</h2>
+        <p>Generate a digest, classify your inbox, or run an analysis — every run lands here with its full trace.</p>
+    </div>
+
+    <div id="run-detail" class="agents-detail" style="display: none;"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/agents.js?v={{ static_v }}"></script>
+{% endblock %}
