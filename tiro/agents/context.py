@@ -395,6 +395,14 @@ class RunContext:
                     "recent_ratings": recent_ratings})
         return articles, vip_sources, vip_authors, recent_ratings
 
+    def cache_analysis(self, article_id: int, analysis: dict) -> None:
+        """Write tool: cache an ingenuity analysis blob on the article row
+        (delegates to analysis._cache_analysis — single write owner)."""
+        from tiro.intelligence.analysis import _cache_analysis
+
+        _cache_analysis(self.config, article_id, analysis)
+        self._tool("cache_analysis", {"article_id": article_id}, None)
+
     def create_digest(self, date_str: str, sections: dict, article_ids: list[int]) -> None:
         """Write tool: cache digest sections (delegates to digest._cache_digest,
         which keeps sole ownership of the digests-table write)."""

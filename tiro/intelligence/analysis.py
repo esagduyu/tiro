@@ -2,15 +2,9 @@
 
 import json
 import logging
-from datetime import UTC, datetime
-from pathlib import Path
-
-import frontmatter
 
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.intelligence.prompts import ingenuity_analysis_prompt
-from tiro.llm import llm_call, strip_json_fences
 
 logger = logging.getLogger(__name__)
 
@@ -74,74 +68,19 @@ def _cache_analysis(config: TiroConfig, article_id: int, analysis: dict) -> None
         conn.close()
 
 
-def _load_article_for_analysis(
-    config: TiroConfig, article_id: int
-) -> tuple[str, str]:
-    """Load article text and source name for analysis.
-
-    Returns (full_text, source_name).
-    Raises ValueError if article not found.
-    """
-    conn = get_connection(config.db_path)
-    try:
-        row = conn.execute(
-            """SELECT a.markdown_path, s.name AS source_name
-               FROM articles a
-               LEFT JOIN sources s ON a.source_id = s.id
-               WHERE a.id = ?""",
-            (article_id,),
-        ).fetchone()
-        if not row:
-            raise ValueError(f"Article {article_id} not found")
-
-        # Read markdown content
-        md_path = Path(row["markdown_path"])
-        if not md_path.is_absolute():
-            md_path = config.articles_dir / md_path
-        if not md_path.exists():
-            raise ValueError(f"Markdown file not found: {md_path}")
-
-        post = frontmatter.load(str(md_path))
-        return post.content, row["source_name"] or "Unknown"
-    finally:
-        conn.close()
-
-
 def analyze_article(config: TiroConfig, article_id: int) -> dict:
-    """Run ingenuity/trust analysis on an article using Opus 4.6.
+    """Run ingenuity/trust analysis via the ingenuity_analyst agent run.
 
-    Returns the structured analysis dict.
-
-    Raises RuntimeError (via llm_call/LLMNotConfigured) if no AI provider is configured.
+    Exception surface preserved (ValueError for missing article/file,
+    RuntimeError for provider problems) via cause re-raise.
     """
-    full_text, source_name = _load_article_for_analysis(config, article_id)
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
 
-    prompt = ingenuity_analysis_prompt(full_text, source_name)
-
-    logger.info("Running ingenuity analysis for article %d (%s)", article_id, source_name)
-
-    result = llm_call(
-        config, "heavy", prompt,
-        purpose="analysis", max_tokens=2048,
-    )
-
-    raw = result.text
-    logger.info("Opus analysis response: %d chars", len(raw))
-
-    # Parse JSON — strip markdown fences if Opus wraps them
-    cleaned = strip_json_fences(raw)
-
-    analysis = json.loads(cleaned)
-
-    # Coerce dimension scores to safe numbers — Opus output has no schema
-    # validation, and a non-numeric score would otherwise propagate straight
-    # into the frontend's innerHTML rendering.
-    _coerce_analysis_scores(analysis)
-
-    # Embed timestamp before caching
-    analysis["analyzed_at"] = datetime.now(UTC).isoformat()
-
-    # Cache the result
-    _cache_analysis(config, article_id, analysis)
-
-    return analysis
+    try:
+        res = run_agent(config, "ingenuity_analyst", {"article_id": article_id})
+    except AgentRunError as e:
+        if e.__cause__ is not None:
+            raise e.__cause__  # noqa: B904
+        raise
+    return res.outputs.analysis

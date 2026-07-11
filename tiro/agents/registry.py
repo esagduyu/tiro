@@ -42,9 +42,11 @@ def ensure_builtins() -> None:
         return
     _builtins_loaded = True
     from tiro.agents.builtin.digest_writer import DigestWriter
+    from tiro.agents.builtin.ingenuity_analyst import IngenuityAnalyst
     from tiro.agents.builtin.metadata_extractor import MetadataExtractor
     from tiro.agents.builtin.preference_classifier import PreferenceClassifier
 
     register(MetadataExtractor())
     register(PreferenceClassifier())
     register(DigestWriter())
+    register(IngenuityAnalyst())
