@@ -10,6 +10,14 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+### Agent runtime (Phase 6 K1–K2)
+- New `tiro/agents/` kernel: `TiroAgent`/`AgentContext` contract, `run_agent()` with per-run JSONL traces (`{library}/agents/traces/{run_uid}.jsonl`), `agent_runs` index table (migration 014), one-agent-at-a-time run lock, typed `AgentRunError`.
+- All four AI features migrated behavior-identically (golden transcript tests pin prompt bytes): MetadataExtractor (Haiku extraction — every web/email/imap/rss/import ingest is now a recorded run), PreferenceClassifier, DigestWriter (scheduler untouched), IngenuityAnalyst. `extract_metadata`/`classify_articles`/`generate_digest`/`analyze_article` remain as compat wrappers — zero call-site churn.
+- `/agents` page: agent cards, filterable paginated run history, collapsible trace viewer, replay with cost-note confirm. Routes: `GET /api/agents`, `GET /api/agents/runs`, `GET /api/agents/runs/{run_uid}` (`?trace=1` streams JSONL), `POST /api/agents/runs/{run_uid}/replay`, `POST /api/agents/{name}/run`.
+- Trace retention (`agent_trace_retention_days`/`agent_trace_max_mb`, files pruned, rows kept); doctor gains orphan-trace vacuum + stuck-run sweep.
+- Evals harness: `tiro/evals/` fixtures + `tiro evals run [agent] [--real]` (structural mode is free/CI-gated via pytest); `tiro agent list|run`.
+- STATIC_VERSION 69.
+
 ## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
 
 Tiro becomes something you install, not just something you run from a terminal:
