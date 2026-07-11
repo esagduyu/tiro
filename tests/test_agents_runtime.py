@@ -244,3 +244,143 @@ def test_prune_traces_never_raises_when_dir_missing(test_config):
     from tiro.agents.runtime import prune_traces
 
     prune_traces(test_config)  # no agents/traces dir at all — must be a no-op
+
+
+# --- Task 4: RunContext ---------------------------------------------------
+
+
+def _make_ctx(config, tmp_path, override=None):
+    from tiro.agents.context import RunContext
+    from tiro.agents.runtime import TraceWriter
+
+    tw = TraceWriter(tmp_path / "ctx-test.jsonl")
+    tw.header(agent="t", version="1", inputs={}, provider="fake",
+              model="m", replay_of=None)
+    return RunContext(config, trace=tw, run_uid="01CTX", model_override=override), tw
+
+
+def _seed_article(config, title="Ctx Article", body="Some body text."):
+    """Insert one article row + markdown file directly (no LLM, no chroma)."""
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    uid = new_ulid()
+    fname = f"{title.lower().replace(' ', '-')}.md"
+    config.articles_dir.mkdir(parents=True, exist_ok=True)
+    (config.articles_dir / fname).write_text(f"---\ntitle: {title}\n---\n\n{body}")
+    conn = get_connection(config.db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO sources (name, domain, source_type) VALUES (?, ?, 'web')",
+            (f"src-{uid[:6]}", f"{uid[:6]}.example.com"),
+        )
+        sid = cur.lastrowid
+        cur = conn.execute(
+            """INSERT INTO articles (uid, source_id, title, url, slug,
+               markdown_path, word_count, reading_time_min, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, 3, 1, datetime('now'))""",
+            (uid, sid, title, f"https://example.com/{uid[:6]}", fname[:-3], fname),
+        )
+        aid = cur.lastrowid
+        conn.commit()
+        return aid, uid
+    finally:
+        conn.close()
+
+
+def test_ctx_llm_traces_audits_and_accumulates(initialized_library, fake_llm, tmp_path):
+    fake_llm("hello back")
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    text = ctx.llm("light", "hello", purpose="ctx_test", max_tokens=32)
+    tw.close()
+    assert text == "hello back"
+    assert ctx.tokens_in == 0 and ctx.tokens_out == 0   # fake backend reports 0
+    lines = _read_trace(tmp_path / "ctx-test.jsonl")
+    llm_line = lines[1]
+    assert llm_line["kind"] == "llm" and llm_line["name"] == "ctx_test"
+    assert llm_line["args"]["prompt"] == "hello"
+    assert llm_line["args"]["tier"] == "light"
+
+
+def test_ctx_llm_model_override_forces_provider(initialized_library, tmp_path):
+    # Override to the fake provider even though config says anthropic:
+    # proves the override path resolves the call, and no API key is needed.
+    from tiro import llm as llm_module
+
+    llm_module.queue_fake_responses("override worked")
+    ctx, tw = _make_ctx(initialized_library, tmp_path,
+                        override={"provider": "fake", "model": "fake-1"})
+    try:
+        assert ctx.llm("heavy", "p", purpose="ovr") == "override worked"
+        # the ORIGINAL config object is untouched
+        assert initialized_library.ai_heavy_provider == "anthropic"
+    finally:
+        tw.close()
+        llm_module._fake_responses.clear()
+
+
+def test_ctx_get_article_cites_and_reads_body(initialized_library, tmp_path):
+    aid, uid = _seed_article(initialized_library, body="The body.")
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    art = ctx.get_article(aid)
+    tw.close()
+    assert art["content"] == "The body."
+    assert art["uid"] == uid
+    assert ctx.citations == [uid]
+    art2 = ctx.get_article(uid)               # uid lookup path
+    assert art2["id"] == aid
+    assert ctx.citations == [uid]             # deduped, order preserved
+
+
+def test_ctx_get_article_errors_match_analysis_semantics(initialized_library, tmp_path):
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    with pytest.raises(ValueError, match="Article 999 not found"):
+        ctx.get_article(999)
+    aid, _uid = _seed_article(initialized_library, title="Gone File")
+    (initialized_library.articles_dir / "gone-file.md").unlink()
+    with pytest.raises(ValueError, match="Markdown file not found"):
+        ctx.get_article(aid)
+    tw.close()
+
+
+def test_ctx_get_highlights_window_and_citation(initialized_library, tmp_path):
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    aid, uid = _seed_article(initialized_library)
+    conn = get_connection(initialized_library.db_path)
+    try:
+        # Real `highlights` schema (tiro/database.py SCHEMA) uses
+        # prefix_context/suffix_context and text_position_start/
+        # text_position_end — not the prefix_text/position_start names
+        # from the original task brief.
+        conn.execute(
+            """INSERT INTO highlights (uid, article_id, quote_text, prefix_context,
+               suffix_context, text_position_start, text_position_end, color,
+               content_hash, created_at, updated_at)
+               VALUES (?, ?, 'Q', '', '', 0, 1, 'yellow', 'h',
+                       datetime('now'), datetime('now'))""",
+            (new_ulid(), aid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    rows = ctx.get_highlights(days=7, limit=50)
+    tw.close()
+    assert len(rows) == 1
+    assert rows[0]["quote"] == "Q" and rows[0]["article_id"] == aid
+    assert rows[0]["note"] is None
+    assert ctx.citations == [uid]
+
+
+def test_ctx_result_prune_only(initialized_library, tmp_path):
+    _aid, uid = _seed_article(initialized_library)
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    ctx.get_article(uid)
+    r = ctx.result(EchoOutput(text="x"), citations=[uid, "01FABRICATED"])
+    tw.close()
+    assert r.citations == [uid]               # fabricated uid stripped
+    assert r.run_uid == "01CTX"
+    r2 = ctx.result(EchoOutput(text="y"))     # default = all accumulated
+    assert r2.citations == [uid]
