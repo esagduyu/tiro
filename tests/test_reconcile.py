@@ -382,3 +382,88 @@ class TestScanAndChanged:
         report2 = reconcile_library(initialized_library)
         assert report2.re_anchored == 0
         assert report2.details["anchor_warnings"][0]["status"] == "hash_mismatch"
+
+
+class TestExternalCreate:
+    def test_new_file_ingested_as_external(self, initialized_library):
+        path = initialized_library.articles_dir / "2026-07-10_my-obsidian-note.md"
+        post = frontmatter.Post("# My Note\n\nWritten outside Tiro entirely.")
+        post.metadata = {
+            "title": "My Obsidian Note",
+            "tags": ["thinking"],
+            "obsidian_custom": "kept",
+        }
+        path.write_text(frontmatter.dumps(post))
+        before = path.read_bytes()
+
+        report = reconcile_library(initialized_library)
+        assert report.ingested == 1
+        assert path.read_bytes() == before  # file untouched
+
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM articles WHERE markdown_path = ?", (path.name,)
+            ).fetchone()
+            assert row is not None
+            assert row["ingestion_method"] == "external"
+            assert row["title"] == "My Obsidian Note"
+            assert row["uid"]
+            assert row["body_hash"] == content_hash(
+                "# My Note\n\nWritten outside Tiro entirely.")
+            tags = {r["name"] for r in conn.execute(
+                "SELECT t.name FROM tags t JOIN article_tags at ON t.id = at.tag_id "
+                "WHERE at.article_id = ?", (row["id"],))}
+            assert "thinking" in tags
+        finally:
+            conn.close()
+
+    def test_bare_file_without_frontmatter(self, initialized_library):
+        path = initialized_library.articles_dir / "loose-thought.md"
+        path.write_text("# A Loose Thought\n\nNo frontmatter at all here.")
+        report = reconcile_library(initialized_library)
+        assert report.ingested == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT title, ingestion_method FROM articles WHERE markdown_path = ?",
+                (path.name,),
+            ).fetchone()
+            assert row["title"] == "A Loose Thought"  # first heading
+            assert row["ingestion_method"] == "external"
+        finally:
+            conn.close()
+
+    def test_duplicate_url_is_skipped(self, initialized_library):
+        _ingest(initialized_library, url="https://example.com/dupe")
+        path = initialized_library.articles_dir / "copied-in.md"
+        post = frontmatter.Post("# Dupe\n\nSame url as an existing article.")
+        post.metadata = {"title": "Dupe", "url": "https://example.com/dupe?utm_source=x"}
+        path.write_text(frontmatter.dumps(post))
+
+        report = reconcile_library(initialized_library)
+        assert report.ingested == 0
+        assert "copied-in.md" in report.details.get("skipped_duplicates", [])
+        assert path.exists()  # never touched
+        conn = get_connection(initialized_library.db_path)
+        try:
+            n = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+            assert n == 1
+        finally:
+            conn.close()
+
+    def test_conflict_file_is_never_ingested(self, initialized_library):
+        (initialized_library.articles_dir /
+         "x.conflict-local-20260710.md").write_text("loser version body")
+        report = reconcile_library(initialized_library)
+        assert report.ingested == 0
+
+    def test_dry_run_counts_without_ingesting(self, initialized_library):
+        (initialized_library.articles_dir / "dry.md").write_text("# Dry\n\nBody.")
+        report = reconcile_library(initialized_library, dry_run=True)
+        assert report.ingested == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
+        finally:
+            conn.close()
