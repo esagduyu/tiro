@@ -36,6 +36,18 @@ def test_config_default_is_30(test_config):
     assert test_config.reconcile_interval_s == 30
 
 
+def test_get_connection_sets_busy_timeout(initialized_library):
+    """The background reconcile loop and live API writers share the DB;
+    busy_timeout must be non-zero so a colliding writer waits for the lock
+    to clear instead of immediately raising SQLITE_BUSY (see get_connection
+    in tiro/database.py)."""
+    conn = get_connection(initialized_library.db_path)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()
+
+
 class _Args:
     def __init__(self, config=None, dry_run=False, json=False):
         self.config = config

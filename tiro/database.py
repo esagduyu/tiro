@@ -322,6 +322,13 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # The background reconcile loop (tiro/sync/reconcile.py) and live API
+    # writers share this database; SQLite's default busy_timeout is 0, so a
+    # writer that collides with reconcile's write transaction gets an
+    # immediate SQLITE_BUSY -> OperationalError -> 500 instead of waiting
+    # for the lock to clear. 5s covers a normal per-file apply window
+    # without making a genuinely stuck writer hang the caller forever.
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
