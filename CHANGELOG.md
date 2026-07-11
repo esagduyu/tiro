@@ -10,6 +10,25 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+### Sync S1 — local reconcile engine (absorbed Phase 2b)
+- External edits to the library (Obsidian et al.) now reconcile into SQLite/
+  ChromaDB/anchors: changed bodies re-index + re-embed and re-check highlight
+  anchors; new `.md` files in `articles/` ingest as `ingestion_method='external'`
+  (file never rewritten — frontmatter stays user-owned); deleted files complete
+  deletion through `delete_article`, guarded against directory mishaps
+  (all-missing or > max(10, 20%) refusals).
+- Two-poll hash-settle defeats editor temp+rename/partial writes; unsettled
+  files retry next pass.
+- Notes prefer the external version when ambiguous; the losing DB version is
+  preserved as `notes/{stem}.conflict-local-{yyyymmdd}.md` — never silently
+  dropped. `tiro doctor` gains a report-only `conflict_files` census and no
+  longer treats conflict files as orphans.
+- New: migration 015 (`articles.body_hash` backfilled, `articles.meta_updated_at`,
+  `sources.uid` + stamped at creation), config `reconcile_interval_s: 30`
+  (0 = off), scheduler task `reconcile`, CLI `tiro reconcile [--dry-run|--json]`.
+- `PATCH .../rate|read|snooze` (including the M3.2 unmark paths) now bump
+  `articles.meta_updated_at` (UTC) — the LWW clock for the coming sync merge.
+
 ## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
 
 Tiro becomes something you install, not just something you run from a terminal:
