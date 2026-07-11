@@ -467,3 +467,54 @@ class TestExternalCreate:
             assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
         finally:
             conn.close()
+
+
+class TestExternalDelete:
+    def test_deleted_file_completes_deletion(self, initialized_library):
+        arts = [_ingest(initialized_library, title=f"T{i}",
+                        url=f"https://example.com/{i}") for i in range(3)]
+        _article_path(initialized_library, arts[0]).unlink()
+        report = reconcile_library(initialized_library)
+        assert report.deleted == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            ids = {r["id"] for r in conn.execute("SELECT id FROM articles")}
+            assert arts[0]["id"] not in ids
+            assert {arts[1]["id"], arts[2]["id"]} <= ids
+        finally:
+            conn.close()
+
+    def test_all_files_missing_is_guarded(self, initialized_library):
+        arts = [_ingest(initialized_library, title=f"G{i}",
+                        url=f"https://example.com/g{i}") for i in range(3)]
+        for a in arts:
+            _article_path(initialized_library, a).unlink()
+        report = reconcile_library(initialized_library)
+        assert report.deleted == 0
+        assert report.details.get("delete_guard")
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 3
+        finally:
+            conn.close()
+
+    def test_over_threshold_is_guarded(self, initialized_library):
+        arts = [_ingest(initialized_library, title=f"H{i}",
+                        url=f"https://example.com/h{i}") for i in range(12)]
+        for a in arts[:11]:  # 11 of 12 missing: > max(10, ceil(2.4)) = 10
+            _article_path(initialized_library, a).unlink()
+        report = reconcile_library(initialized_library)
+        assert report.deleted == 0
+        assert report.details.get("delete_guard")
+
+    def test_dry_run_never_deletes(self, initialized_library):
+        art = _ingest(initialized_library)
+        _ingest(initialized_library, title="Keeper", url="https://example.com/k")
+        _article_path(initialized_library, art).unlink()
+        report = reconcile_library(initialized_library, dry_run=True)
+        assert report.deleted == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 2
+        finally:
+            conn.close()
