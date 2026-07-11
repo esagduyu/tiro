@@ -138,6 +138,7 @@ export APPLE_ID="you@example.com"
 export APPLE_PASSWORD="app-specific-password"   # appleid.apple.com → App-Specific Passwords
 export APPLE_TEAM_ID="TEAMID"
 
+uv sync --group packaging   # PyInstaller lives in the `packaging` dep group
 cd desktop/pyinstaller && uv run pyinstaller --noconfirm --clean tiro-server.spec
 cd ../tauri && npm install
 npx tauri build --bundles app,dmg
@@ -365,6 +366,7 @@ bundling.
 
 **Commands.**
 ```bash
+uv sync --group packaging   # PyInstaller lives in the `packaging` dep group
 cd desktop/pyinstaller
 uv run pyinstaller --noconfirm --clean tiro-server.spec
 ./smoke.sh            # boots with HF_HUB_OFFLINE=1 + empty HF_HOME
