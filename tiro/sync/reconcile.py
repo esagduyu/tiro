@@ -232,33 +232,56 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
     try:
         for name in scan.changed:
             row = scan.rows_by_name[name]
-            post = frontmatter.load(str(scan.disk[name]))
-            body = post.content
-            meta = post.metadata or {}
-            title = str(meta.get("title") or row["title"])
-            author = meta["author"] if "author" in meta else row["author"]
-            summary = meta["summary"] if "summary" in meta else row["summary"]
-            word_count = len(body.split())
-            conn.execute(
-                "UPDATE articles SET title = ?, author = ?, summary = ?, "
-                "word_count = ?, reading_time_min = ?, body_hash = ?, "
-                "vector_status = 'pending' WHERE id = ?",
-                (title, author, summary, word_count,
-                 max(1, math.ceil(word_count / 250)), scan.hashes[name], row["id"]),
-            )
-            if isinstance(meta.get("tags"), list):
-                _sync_tags_from_frontmatter(
-                    conn, row["id"], [str(t) for t in meta["tags"]]
-                )
+            # A file can turn unreadable between the settle poll and here
+            # (deleted, permissions changed, truncated mid-write again). This
+            # loop only commits once at the end, so one bad file must not
+            # take down the whole pass and roll back every already-applied
+            # UPDATE — isolate it, log, record it, and move on.
             try:
-                from tiro.wiki import mark_pages_stale
-                mark_pages_stale(config, conn, row["id"])
+                post = frontmatter.load(str(scan.disk[name]))
+                body = post.content
+                meta = post.metadata or {}
+                # title is NOT NULL and display-critical (an empty title
+                # would break list rendering), so any falsy frontmatter
+                # value (missing key, "", None) falls back to the existing
+                # row title. author/summary are nullable, so they instead
+                # honor explicit user intent: key absent -> keep row value,
+                # key present (even as "" or null) -> overwrite with it.
+                title = str(meta.get("title") or row["title"])
+                author = meta["author"] if "author" in meta else row["author"]
+                summary = meta["summary"] if "summary" in meta else row["summary"]
+                word_count = len(body.split())
+                # Recompute from the body we just read (not the settle-time
+                # scan.hashes[name]) so the stored body_hash always matches
+                # the exact content the other row fields were derived from —
+                # closes a third-edit race between settle and apply.
+                body_hash = content_hash(body)
+                conn.execute(
+                    "UPDATE articles SET title = ?, author = ?, summary = ?, "
+                    "word_count = ?, reading_time_min = ?, body_hash = ?, "
+                    "vector_status = 'pending' WHERE id = ?",
+                    (title, author, summary, word_count,
+                     max(1, math.ceil(word_count / 250)), body_hash, row["id"]),
+                )
+                if isinstance(meta.get("tags"), list):
+                    _sync_tags_from_frontmatter(
+                        conn, row["id"], [str(t) for t in meta["tags"]]
+                    )
+                try:
+                    from tiro.wiki import mark_pages_stale
+                    mark_pages_stale(config, conn, row["id"])
+                except Exception as e:
+                    logger.error("mark_pages_stale failed for %d (non-fatal): %s",
+                                 row["id"], e)
+                _reanchor_census(conn, row["id"], body, report)
+                report.changed += 1
+                _detail(report, "changed_files").append(name)
             except Exception as e:
-                logger.error("mark_pages_stale failed for %d (non-fatal): %s",
-                             row["id"], e)
-            _reanchor_census(conn, row["id"], body, report)
-            report.changed += 1
-            _detail(report, "changed_files").append(name)
+                logger.warning(
+                    "Unreadable markdown at apply time %s: %s", name, e
+                )
+                _detail(report, "unreadable").append(name)
+                continue
         conn.commit()
     finally:
         conn.close()

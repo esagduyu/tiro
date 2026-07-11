@@ -183,6 +183,100 @@ class TestScanAndChanged:
         assert report.skipped_unsettled == 1
         assert report.changed == 0
 
+    def test_apply_time_unreadable_file_does_not_roll_back_pass(
+        self, initialized_library, monkeypatch
+    ):
+        """A file that turns unreadable between the settle poll and the apply
+        loop must not roll back other files' already-applied updates in the
+        same pass (Finding 1)."""
+        good = _ingest(initialized_library, title="Good", url="https://example.com/good")
+        bad = _ingest(initialized_library, title="Bad", url="https://example.com/bad")
+        _edit_body(initialized_library, good, "# Hello\n\nGood external edit.")
+        _edit_body(initialized_library, bad, "# Hello\n\nBad external edit.")
+
+        real_load = rec.frontmatter.load
+        bad_name = bad["markdown_path"]
+        calls = {"n": 0}
+
+        def flaky_load(path_str):
+            if Path(path_str).name == bad_name:
+                calls["n"] += 1
+                # Calls 1-2 are the scan + settle-poll re-hash (via
+                # body_hash_of_file) — let those succeed so the file makes
+                # it into scan.changed. Call 3 is the direct apply-time
+                # read in _apply_changed — fail exactly there.
+                if calls["n"] >= 3:
+                    raise OSError("simulated unreadable file at apply time")
+            return real_load(path_str)
+
+        monkeypatch.setattr(rec.frontmatter, "load", flaky_load)
+
+        report = reconcile_library(initialized_library)
+
+        # The good file's update must have survived the bad file's failure.
+        assert report.changed == 1
+        assert bad_name in report.details.get("unreadable", [])
+        good_row = _row(initialized_library, good["id"], "body_hash")
+        assert good_row["body_hash"] == content_hash("# Hello\n\nGood external edit.")
+        # The bad file's row must be untouched (still has its original hash).
+        bad_row = _row(initialized_library, bad["id"], "body_hash")
+        assert bad_row["body_hash"] != content_hash("# Hello\n\nBad external edit.")
+
+    def test_apply_time_body_hash_recomputed_from_read_body(self, initialized_library):
+        """Stored body_hash must match content_hash() of the body actually
+        read at apply time, not the settle-time hash (Finding 1, second half)."""
+        art = _ingest(initialized_library)
+        new_body = "# Hello\n\nRecomputed-hash body."
+        _edit_body(initialized_library, art, new_body)
+        report = reconcile_library(initialized_library)
+        assert report.changed == 1
+        row = _row(initialized_library, art["id"], "body_hash")
+        assert row["body_hash"] == content_hash(new_body)
+
+    def test_empty_title_falls_back_to_row_title(self, initialized_library):
+        """Finding 2: title is NOT NULL/display-critical, so an explicit
+        empty-string (or removed) frontmatter title keeps the row's title —
+        deliberately asymmetric with author/summary below."""
+        art = _ingest(initialized_library, title="Original Title")
+        path = _article_path(initialized_library, art)
+        post = frontmatter.load(str(path))
+        post.metadata["title"] = ""
+        post.content = post.content + "\n\nEdited body, empty title."
+        path.write_text(frontmatter.dumps(post))
+
+        report = reconcile_library(initialized_library)
+        assert report.changed == 1
+        row = _row(initialized_library, art["id"], "title")
+        assert row["title"] == "Original Title"
+
+    def test_author_key_absent_keeps_row_present_null_clears(self, initialized_library):
+        """Finding 2: author is nullable, so it honors explicit user intent —
+        key absent keeps the existing row value; key present as null clears
+        it. This is the opposite of title's any-falsy-value fallback."""
+        art = _ingest(initialized_library, title="Author Test")
+        path = _article_path(initialized_library, art)
+
+        # Case A: key removed entirely -> row value survives.
+        post = frontmatter.load(str(path))
+        assert "author" in post.metadata
+        del post.metadata["author"]
+        post.content = post.content + "\n\nFirst edit, no author key."
+        path.write_text(frontmatter.dumps(post))
+        report = reconcile_library(initialized_library)
+        assert report.changed == 1
+        row = _row(initialized_library, art["id"], "author")
+        assert row["author"] == "A. Writer"
+
+        # Case B: key present as explicit null -> cleared to None.
+        post2 = frontmatter.load(str(path))
+        post2.metadata["author"] = None
+        post2.content = post2.content + "\n\nSecond edit, explicit null author."
+        path.write_text(frontmatter.dumps(post2))
+        report2 = reconcile_library(initialized_library)
+        assert report2.changed == 1
+        row2 = _row(initialized_library, art["id"], "author")
+        assert row2["author"] is None
+
     def test_dry_run_reports_without_acting(self, initialized_library):
         art = _ingest(initialized_library)
         old_hash = _row(initialized_library, art["id"], "body_hash")["body_hash"]
