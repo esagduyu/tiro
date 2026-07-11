@@ -544,3 +544,138 @@ def test_ctx_get_highlights_accepts_real_production_timestamp_format(
     assert rows[0]["quote"] == "Realistic Q"
     assert rows[0]["article_id"] == aid
     assert ctx.citations == [uid]
+
+
+# --- Task 5: run_agent -----------------------------------------------------
+
+
+def _fetch_run(config, run_uid):
+    from tiro.database import get_connection
+
+    conn = get_connection(config.db_path)
+    try:
+        return conn.execute(
+            "SELECT * FROM agent_runs WHERE run_uid = ?", (run_uid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_run_agent_happy_path(initialized_library, fake_llm, echo_registered):
+    from tiro.agents.runtime import run_agent, traces_dir
+
+    fake_llm("echoed!")
+    res = run_agent(initialized_library, "echo", {"text": "hi"})
+    assert res.outputs.text == "echoed!"
+    assert res.run_uid
+
+    row = _fetch_run(initialized_library, res.run_uid)
+    assert row["status"] == "ok"
+    assert row["agent_name"] == "echo" and row["agent_version"] == "0.1"
+    assert row["provider"] == "fake"
+    assert _json.loads(row["input_json"]) == {"text": "hi"}
+    assert _json.loads(row["output_json"]) == {"text": "echoed!"}
+    assert _json.loads(row["citations_json"]) == []
+    assert row["completed_at"] is not None
+    assert row["replay_of"] is None
+
+    trace_path = traces_dir(initialized_library) / f"{res.run_uid}.jsonl"
+    lines = _read_trace(trace_path)
+    assert lines[0]["kind"] == "run" and lines[0]["agent"] == "echo"
+    assert lines[1]["kind"] == "llm" and lines[1]["name"] == "echo_test"
+
+
+def test_run_agent_unknown_agent(initialized_library):
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+
+    with pytest.raises(AgentRunError, match="unknown agent") as ei:
+        run_agent(initialized_library, "no-such-agent", {})
+    assert ei.value.run_uid is None
+
+
+def test_run_agent_input_validation(initialized_library, echo_registered):
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+
+    with pytest.raises(AgentRunError, match="missing input"):
+        run_agent(initialized_library, "echo", {})
+    with pytest.raises(AgentRunError, match="unexpected input"):
+        run_agent(initialized_library, "echo", {"text": "x", "bogus": 1})
+    with pytest.raises(AgentRunError, match="expected str"):
+        run_agent(initialized_library, "echo", {"text": 42})
+
+
+def test_run_agent_failure_records_error_row_and_chains_cause(
+    initialized_library, fake_llm, echo_registered,
+):
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+
+    # fake queue left EMPTY -> _call_fake raises RuntimeError inside run()
+    with pytest.raises(AgentRunError) as ei:
+        run_agent(initialized_library, "echo", {"text": "hi"})
+    assert ei.value.run_uid is not None
+    assert ei.value.__cause__ is not None
+    row = _fetch_run(initialized_library, ei.value.run_uid)
+    assert row["status"] == "error"
+    assert "fake LLM queue empty" in row["error"]
+    assert row["completed_at"] is not None
+
+
+def test_run_agent_replay_of_threads_through(
+    initialized_library, fake_llm, echo_registered,
+):
+    from tiro.agents.runtime import run_agent, traces_dir
+
+    fake_llm("one", "two")
+    first = run_agent(initialized_library, "echo", {"text": "hi"})
+    second = run_agent(initialized_library, "echo", {"text": "hi"},
+                       model_override={"provider": "fake", "model": "fake-2"},
+                       replay_of=first.run_uid)
+    row = _fetch_run(initialized_library, second.run_uid)
+    assert row["replay_of"] == first.run_uid
+    assert row["model"] == "fake-2"
+    # original untouched
+    assert _fetch_run(initialized_library, first.run_uid)["status"] == "ok"
+    header = _read_trace(traces_dir(initialized_library) / f"{second.run_uid}.jsonl")[0]
+    assert header["replay_of"] == first.run_uid
+
+
+def test_run_agent_serializes_via_lock(initialized_library, fake_llm, echo_registered):
+    """One agent at a time (spec §3): while a run holds the lock, a second
+    run blocks until it finishes. Proven with two threads + timestamps."""
+    import threading
+
+    from tiro.agents import registry
+    from tiro.agents.runtime import run_agent
+
+    order = []
+
+    class SlowAgent:
+        name = "slow"
+        version = "1"
+        inputs = {}
+        tier = "light"
+        output_model = EchoOutput
+
+        def run(self, ctx, **kw):
+            order.append("slow-start")
+            time.sleep(0.3)
+            order.append("slow-end")
+            return ctx.result(EchoOutput(text="slow"))
+
+    registry.register(SlowAgent())
+    try:
+        fake_llm("fast")
+        t = threading.Thread(
+            target=run_agent, args=(initialized_library, "slow", {})
+        )
+        t.start()
+        time.sleep(0.05)                      # let slow acquire the lock
+        run_agent(initialized_library, "echo", {"text": "x"})
+        order.append("echo-done")
+        t.join()
+        assert order[:2] == ["slow-start", "slow-end"]
+    finally:
+        registry.unregister("slow")
