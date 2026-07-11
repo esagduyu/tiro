@@ -1,71 +1,46 @@
-"""AI metadata extraction using Claude Haiku."""
+"""AI metadata extraction — compat wrapper over the agent runtime (K1).
 
-import json
+`extract_metadata` keeps its historical signature and its never-raises,
+empty-defaults-on-failure contract (processor.py and every ingestion path —
+web/email/imap/rss/import — call it unchanged). The orchestration now lives
+in tiro/agents/builtin/metadata_extractor.py and runs through run_agent, so
+every extraction is a recorded, traced agent run.
+"""
+
 import logging
 
+from tiro.agents.builtin.metadata_extractor import (
+    EXTRACT_CONTENT_CHARS,  # noqa: F401  (re-export, historical import site)
+)
 from tiro.config import TiroConfig
-from tiro.intelligence.prompts import extract_metadata_prompt
-from tiro.llm import LLMNotConfigured, llm_call, strip_json_fences
+from tiro.intelligence.prompts import (
+    extract_metadata_prompt,  # noqa: F401  (re-export — legacy monkeypatch
+    # seam; tests/test_llm.py::test_extraction_reads_beyond_2000_chars patches
+    # this module attribute and the agent's run() reads it back dynamically)
+)
+from tiro.llm import LLMNotConfigured
 
 logger = logging.getLogger(__name__)
 
-# Haiku 4.5 handles this easily; 12k chars ≈ 3k tokens ≈ tenths of a cent.
-# The old 2,000-char cap silently degraded summaries — and everything
-# downstream (digest ranking, classification, the future wiki) consumes them.
-EXTRACT_CONTENT_CHARS = 12000
-
 
 def extract_metadata(title: str, content_md: str, config: TiroConfig) -> dict:
-    """Extract tags, entities, and summary using Claude Haiku.
+    """Extract tags, entities, and summary via the MetadataExtractor agent.
 
-    Returns dict with keys: tags (list[str]), entities (list[dict]), summary (str).
-    Returns empty defaults if extraction fails or no API key is configured.
+    Returns dict with keys: tags (list[str]), entities (list[dict]),
+    summary (str). Returns empty defaults if extraction fails or no AI
+    provider is configured — never raises (behavior lock).
     """
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent  # lazy: avoids import cycle
+
     empty = {"tags": [], "entities": [], "summary": ""}
-
-    content_truncated = content_md[:EXTRACT_CONTENT_CHARS]
-
-    prompt = extract_metadata_prompt(title, content_truncated)
-
     try:
-        result = llm_call(
-            config, "light", prompt,
-            purpose="extract_metadata", max_tokens=1024,
-        )
-        data = json.loads(strip_json_fences(result.text))
-
-        tags = data.get("tags", [])
-        entities = data.get("entities", [])
-        summary = data.get("summary", "")
-
-        if not isinstance(tags, list):
-            tags = []
-        if not isinstance(entities, list):
-            entities = []
-        if not isinstance(summary, str):
-            summary = ""
-
-        # Normalize tags: lowercase, stripped, max 8
-        tags = [str(t).lower().strip() for t in tags if t][:8]
-
-        # Validate entity structure
-        valid_entities = []
-        for e in entities:
-            if isinstance(e, dict) and "name" in e and "type" in e:
-                valid_entities.append({
-                    "name": str(e["name"]).strip(),
-                    "type": str(e["type"]).strip().lower(),
-                })
-
-        logger.info(
-            "Extracted %d tags, %d entities for '%s'",
-            len(tags), len(valid_entities), title,
-        )
-        return {"tags": tags, "entities": valid_entities, "summary": summary}
-
-    except LLMNotConfigured as e:
-        logger.warning("AI extraction skipped: %s", e)
-        return empty
-    except Exception as e:
-        logger.error("AI extraction failed for '%s': %s", title, e)
+        res = run_agent(config, "metadata_extractor",
+                        {"title": title, "content_md": content_md})
+        return res.outputs.model_dump()
+    except AgentRunError as e:
+        if isinstance(e.__cause__, LLMNotConfigured):
+            logger.warning("AI extraction skipped: %s", e.__cause__)
+        else:
+            logger.error("AI extraction failed for '%s': %s", title, e)
         return empty

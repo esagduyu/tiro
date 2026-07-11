@@ -41,6 +41,6 @@ def ensure_builtins() -> None:
     if _builtins_loaded:
         return
     _builtins_loaded = True
-    # (populated in later tasks:)
-    # from tiro.agents.builtin.metadata_extractor import MetadataExtractor
-    # register(MetadataExtractor())
+    from tiro.agents.builtin.metadata_extractor import MetadataExtractor
+
+    register(MetadataExtractor())

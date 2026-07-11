@@ -34,10 +34,17 @@ def record_llm(monkeypatch):
 
     def _install(*responses):
         rec = _Recorder(*responses)
-        # post-refactor seam (context.py: module-attribute access)
-        monkeypatch.setattr("tiro.llm.llm_call", rec)
         # pre-refactor bound-name seams (harmless no-ops once refactored,
-        # guarded because the attribute disappears after each task):
+        # guarded because the attribute disappears after each task). These
+        # go FIRST, before the tiro.llm.llm_call patch below: a target
+        # module here may not have been imported by anything yet in this
+        # test session, and monkeypatch's string-target resolution imports
+        # it on first use — if tiro.llm.llm_call were already patched to
+        # `rec` at that moment, the module's own `from tiro.llm import
+        # llm_call` would bind directly to `rec` as a normal import side
+        # effect, and monkeypatch would then capture *that* as the
+        # "original" value to restore on teardown, permanently leaking the
+        # recorder into every later test that imports the same module.
         for target in (
             "tiro.ingestion.extractors.llm_call",
             "tiro.intelligence.preferences.llm_call",
@@ -48,6 +55,8 @@ def record_llm(monkeypatch):
                 monkeypatch.setattr(target, rec)
             except AttributeError:
                 pass
+        # post-refactor seam (context.py: module-attribute access) — last.
+        monkeypatch.setattr("tiro.llm.llm_call", rec)
         return rec
 
     return _install

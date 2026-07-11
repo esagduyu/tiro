@@ -195,6 +195,7 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
     from tiro import llm as llm_module
     from tiro.agents import registry
     from tiro.agents.context import RunContext
+    from tiro.database import init_db
 
     registry.ensure_builtins()
     try:
@@ -202,6 +203,14 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
     except KeyError:
         raise AgentRunError(f"unknown agent {name!r}") from None
     _validate_inputs(agent, inputs)
+
+    # Provenance is structural (agent_runs row + trace file), so a run must
+    # never fail merely because the caller's library was never `tiro init`-ed
+    # (compat wrappers can be invoked against a bare TiroConfig in tests, and
+    # in production the DB is always already migrated by app startup).
+    # init_db() only touches a FRESH db (checks for the `articles` table),
+    # so this is a cheap no-op once the library is real.
+    init_db(config.db_path)
 
     if model_override:
         provider, model = model_override["provider"], model_override["model"]
