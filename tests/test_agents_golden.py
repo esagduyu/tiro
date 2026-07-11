@@ -345,3 +345,72 @@ def test_digest_writer_caches_and_errors_preserved(initialized_library, record_l
     from datetime import date
     cached = get_cached_digest(initialized_library, date.today().isoformat())
     assert cached["ranked"]["content"] == "no headers at all"
+
+
+# --- IngenuityAnalyst (Task 10) ---------------------------------------------
+
+
+def _seed_analysis_article(config):
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    config.articles_dir.mkdir(parents=True, exist_ok=True)
+    (config.articles_dir / "analysis-target.md").write_text(
+        "---\ntitle: Analysis Target\n---\n\nBody worth analyzing."
+    )
+    conn = get_connection(config.db_path)
+    try:
+        sid = conn.execute(
+            "INSERT INTO sources (name, domain, source_type) "
+            "VALUES ('Trusted Source', 't.example.com', 'web')").lastrowid
+        aid = conn.execute(
+            """INSERT INTO articles (uid, source_id, title, url, slug,
+               markdown_path, word_count, reading_time_min, ingested_at)
+               VALUES (?, ?, 'Analysis Target', 'https://t.example.com/a',
+                       'analysis-target', 'analysis-target.md', 3, 1,
+                       datetime('now'))""",
+            (new_ulid(), sid)).lastrowid
+        conn.commit()
+        return aid
+    finally:
+        conn.close()
+
+
+ANALYSIS_RESPONSE = json.dumps({
+    "summary": "s",
+    "bias": {"score": "not-a-number", "reasoning": "r"},
+    "factual_confidence": {"score": 22, "reasoning": "r"},
+    "novelty": {"score": 7, "reasoning": "r"},
+})
+
+
+def test_ingenuity_analyst_transcript_golden(initialized_library, record_llm):
+    from tiro.intelligence.analysis import analyze_article, get_cached_analysis
+    from tiro.intelligence.prompts import ingenuity_analysis_prompt
+
+    aid = _seed_analysis_article(initialized_library)
+    rec = record_llm(ANALYSIS_RESPONSE)
+    analysis = analyze_article(initialized_library, aid)
+
+    call = rec.calls[0]
+    assert call["tier"] == "heavy"
+    assert call["purpose"] == "analysis"
+    assert call["max_tokens"] == 2048
+    assert call["prompt"] == ingenuity_analysis_prompt(
+        "Body worth analyzing.", "Trusted Source"
+    )
+
+    # Coercion + timestamp + cache pinned
+    assert analysis["bias"]["score"] == 5.0           # fallback for non-number
+    assert analysis["factual_confidence"]["score"] == 10.0  # clamped to [0,10]
+    assert analysis["novelty"]["score"] == 7.0
+    assert "analyzed_at" in analysis
+    cached = get_cached_analysis(initialized_library, aid)
+    assert cached["novelty"]["score"] == 7.0
+
+
+def test_ingenuity_analyst_value_errors_preserved(initialized_library):
+    from tiro.intelligence.analysis import analyze_article
+
+    with pytest.raises(ValueError, match="Article 12345 not found"):
+        analyze_article(initialized_library, 12345)
