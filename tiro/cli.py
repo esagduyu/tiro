@@ -604,6 +604,75 @@ def cmd_delete(args):
         sys.exit(1)
 
 
+def cmd_agent(args):
+    """List registered agents or run one by name."""
+    import json
+
+    from tiro.agents import registry
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+    from tiro.config import load_config
+    from tiro.database import migrate_db
+
+    config = load_config(args.config)
+    registry.ensure_builtins()
+
+    if args.agent_cmd == "list":
+        # Listing is pure static metadata (no library/DB touch needed) —
+        # unlike "run", which needs a real, migrated library to write
+        # agent_runs rows + trace files.
+        for agent in sorted(registry.all_agents().values(), key=lambda a: a.name):
+            inputs = ", ".join(f"{k}: {t.__name__}" for k, t in agent.inputs.items())
+            print(f"  {agent.name}  v{agent.version}  [{agent.tier}]  inputs: {inputs or '(none)'}")
+        return
+
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+    migrate_db(config.db_path)
+
+    inputs = {}
+    for pair in args.input:
+        if "=" not in pair:
+            print(f"--input expects KEY=VALUE, got {pair!r}")
+            sys.exit(2)
+        key, _, value = pair.partition("=")
+        try:
+            inputs[key] = json.loads(value)
+        except ValueError:
+            inputs[key] = value          # bare strings stay strings
+    try:
+        res = run_agent(config, args.name, inputs)
+    except AgentRunError as e:
+        print(f"Run failed: {e}")
+        if e.run_uid:
+            print(f"  recorded as run {e.run_uid} (see /agents)")
+        sys.exit(1)
+    print(f"ok  run={res.run_uid}  tokens={res.tokens_in}->{res.tokens_out}"
+          f"  cost=${res.cost_usd:.4f}  citations={len(res.citations)}")
+    print(res.outputs.model_dump_json(indent=2))
+
+
+def cmd_evals(args):
+    """Run the agent evals harness (structural by default; --real confirms cost)."""
+    from tiro.evals.runner import run_structural
+
+    if args.real:
+        print("Real mode hits your configured providers and SPENDS MONEY "
+              "(cost varies by provider/model — no upfront estimate).")
+        if input("Type 'yes' to proceed: ").strip().lower() != "yes":
+            print("Aborted.")
+            sys.exit(1)
+    results = run_structural(args.agent, real=args.real)
+    failed_total = 0
+    for name, r in results.items():
+        print(f"  {name}: {r['passed']} passed, {r['failed']} failed")
+        for msg in r["failures"]:
+            print(f"    FAIL {msg}")
+        failed_total += r["failed"]
+    sys.exit(1 if failed_total else 0)
+
+
 def cmd_doctor(args):
     """Check (and optionally repair) consistency across all four stores."""
     import json as _json
@@ -1019,6 +1088,22 @@ def main():
     subparsers.add_parser("check-email", help="Check IMAP inbox for new newsletters")
     subparsers.add_parser("set-password", help="Set or reset the Tiro password")
 
+    agent_parser = subparsers.add_parser("agent", help="List or run registered agents")
+    agent_sub = agent_parser.add_subparsers(dest="agent_cmd", required=True)
+    agent_sub.add_parser("list", help="List registered agents")
+    agent_run = agent_sub.add_parser("run", help="Run an agent by name")
+    agent_run.add_argument("name")
+    agent_run.add_argument("--input", action="append", default=[],
+                           metavar="KEY=VALUE",
+                           help="Agent input (JSON value or bare string); repeatable")
+
+    evals_parser = subparsers.add_parser("evals", help="Run the agent evals harness")
+    evals_sub = evals_parser.add_subparsers(dest="evals_cmd", required=True)
+    evals_run = evals_sub.add_parser("run", help="Run evals (structural/free by default)")
+    evals_run.add_argument("agent", nargs="?", default=None)
+    evals_run.add_argument("--real", action="store_true",
+                           help="Hit real providers (asks for confirmation)")
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check consistency across SQLite, ChromaDB, markdown and audio stores",
@@ -1126,6 +1211,10 @@ def main():
         cmd_migrate_library(args)
     elif args.command == "service":
         cmd_service(args)
+    elif args.command == "agent":
+        cmd_agent(args)
+    elif args.command == "evals":
+        cmd_evals(args)
     else:
         parser.print_help()
         sys.exit(1)
