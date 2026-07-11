@@ -26,7 +26,7 @@ import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import frontmatter
@@ -551,6 +551,98 @@ def _apply_created(config: TiroConfig, scan: _Scan, report: ReconcileReport,
             logger.info("Ingested external file %s as article %d", name, article_id)
 
 
+# --- sidecar (highlights/notes) reconcile -----------------------------------
+
+
+def write_conflict_file(dir_path: Path, stem: str, body: str) -> Path:
+    """Preserve a losing version as {stem}.conflict-local-{yyyymmdd}[-n].md
+    (spec §4 naming, device-short 'local' until S5 mints device ids).
+    Collision-safe; never overwrites."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    day = datetime.now(UTC).strftime("%Y%m%d")
+    dest = dir_path / f"{stem}.conflict-local-{day}.md"
+    n = 2
+    while dest.exists():
+        dest = dir_path / f"{stem}.conflict-local-{day}-{n}.md"
+        n += 1
+    dest.write_text(body)
+    return dest
+
+
+def _parse_ts(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def _notes_conflict_prepass(config: TiroConfig, report: ReconcileReport) -> None:
+    """FROZEN rule: notes prefer the external version when ambiguous — but
+    never silently. When the article-note ROW both differs from the file and
+    leads its mtime by > ROW_LEAD_SLACK_SECONDS (sidecar-first writes put the
+    row a hair after the file, hence the slack), the DB version is preserved
+    as a conflict file BEFORE reconcile_annotations applies files-win."""
+    from tiro.annotations import notes_dir, sidecar_stem
+
+    nt_dir = notes_dir(config)
+    if not nt_dir.exists():
+        return
+    conn = get_connection(config.db_path)
+    try:
+        articles = conn.execute(
+            "SELECT id, uid, markdown_path FROM articles").fetchall()
+        stem_to_article = {sidecar_stem(a): a for a in articles}
+        for path in sorted(nt_dir.glob("*.md")):
+            if is_conflict_file(path.name):
+                continue
+            article = stem_to_article.get(path.stem)
+            if article is None:
+                continue  # reconcile_annotations orphans it
+            row = conn.execute(
+                "SELECT body_markdown, updated_at FROM notes "
+                "WHERE article_id = ? AND highlight_id IS NULL",
+                (article["id"],),
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                file_body = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue  # reconcile_annotations counts it unreadable
+            if row["body_markdown"] == file_body:
+                continue
+            row_ts = _parse_ts(row["updated_at"] or "")
+            file_ts = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+            if row_ts is None:
+                continue
+            if (row_ts - file_ts).total_seconds() > ROW_LEAD_SLACK_SECONDS:
+                dest = write_conflict_file(nt_dir, path.stem, row["body_markdown"])
+                report.conflicts += 1
+                _detail(report, "conflict_files").append(str(dest))
+                logger.warning(
+                    "Note conflict for %s: external version kept, prior DB "
+                    "version preserved at %s", path.stem, dest.name)
+    finally:
+        conn.close()
+
+
+def _reconcile_sidecars(config: TiroConfig, report: ReconcileReport,
+                        dry_run: bool) -> None:
+    if dry_run:
+        report.details["annotations"] = "skipped (dry-run)"
+        return
+    _notes_conflict_prepass(config, report)
+    from tiro.annotations import reconcile_annotations
+
+    counts = reconcile_annotations(config)
+    report.details["annotations"] = counts
+    if counts.get("guarded"):
+        logger.warning(
+            "Reconcile: annotations mass-delete guard fired (%d) — sidecar "
+            "rows preserved; run tiro doctor", counts["guarded"])
+
+
 # --- entry point -------------------------------------------------------------
 
 
@@ -581,4 +673,5 @@ def reconcile_library(config: TiroConfig, *, dry_run: bool = False) -> Reconcile
     _apply_changed(config, scan, report, dry_run)
     _apply_created(config, scan, report, dry_run)
     _apply_deleted(config, scan, report, dry_run)
+    _reconcile_sidecars(config, report, dry_run)
     return report

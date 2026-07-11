@@ -589,6 +589,9 @@ def _reconcile_highlights(config: TiroConfig, conn, id_to_article: dict, counts:
 
     if dir_exists:
         for path in sorted(ann_dir.glob("*.jsonl")):
+            from tiro.sync.reconcile import is_conflict_file  # local: avoids import cycle
+            if is_conflict_file(path.name):
+                continue
             stem = path.stem
             article = stem_to_article.get(stem)
             if article is None:
@@ -664,6 +667,9 @@ def _reconcile_article_notes(config: TiroConfig, conn, id_to_article: dict, coun
 
     if dir_exists:
         for path in sorted(nt_dir.glob("*.md")):
+            from tiro.sync.reconcile import is_conflict_file  # local: avoids import cycle
+            if is_conflict_file(path.name):
+                continue
             stem = path.stem
             article = stem_to_article.get(stem)
             if article is None:
