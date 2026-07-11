@@ -83,6 +83,7 @@ Pick the path that fits how you want to run Tiro. All of them reach the same web
    tiro run
    ```
    These pull Tiro from PyPI. (The PyPI publish is a maintainer step gated on the tagged release; until it lands, use the from-source or Docker path below.)
+   > For an **always-on** install (run at login, survive reboots), use `uv tool install tiro` followed by `tiro service install` — **not** `uvx tiro run`. `uvx` is an ephemeral, run-once launcher; it resolves and caches a throwaway environment per invocation and is not a stable target for a launchd/systemd unit. See [Run at login (`tiro service`)](#run-at-login-tiro-service).
 
 3. **Docker (self-hosters)** — pull the official multi-arch image (linux/amd64 + linux/arm64) from GitHub Container Registry, no build required:
    ```bash
@@ -190,6 +191,8 @@ docker compose pull && docker compose up -d
 ```
 
 For hands-off updates, point [Watchtower](https://containrrr.dev/watchtower/) at the container: it watches the mutable tag and pulls + restarts when a new image is pushed. (Tiro ships no auto-updater of its own for the container — mutable tags + Watchtower is the documented self-hoster update path.) If you'd rather pin a version and update on your own schedule, change the image ref in `docker-compose.yml` from `:latest` to a specific tag like `:0.7.0`.
+
+> **Maintainer note (publishing the image):** `.github/workflows/docker.yml` publishes `ghcr.io/esagduyu/tiro` and derives its `X.Y.Z` / `X.Y` / `latest` tags from the git ref via `docker/metadata-action`'s `type=semver` rule. That rule only produces version tags when the workflow runs **on a tag ref** (`v0.7.0`). A `workflow_dispatch` run must therefore be launched **from the `v0.7.0` tag** (select it as the ref in the Actions "Run workflow" dropdown) — dispatched from a branch it yields no semver tags and no usable image. The normal path (`git push origin v0.7.0`) fires the `push: tags: ["v*"]` trigger automatically; `workflow_dispatch` exists only for the owner's supervised first push. Full first-push runbook: `docs/RUNBOOK-desktop.md`.
 
 ---
 
@@ -364,6 +367,42 @@ tiro service uninstall    # stop + remove (safe to run when nothing is installed
 
 Do not run the desktop app and `tiro service` at the same time — install one or
 the other.
+
+---
+
+## Where your library lives
+
+By default a from-source (`git clone`) install keeps its library in
+`./tiro-library` next to where you run `tiro` — unchanged from earlier releases,
+so no existing install ever silently re-points. New installs created through
+`tiro init` (and the desktop app's first boot) instead write a
+**platform-standard** location into the freshly-created `config.yaml`:
+
+- **macOS** — `~/Library/Application Support/Tiro`
+- **Linux** — `$XDG_DATA_HOME/tiro` (falls back to `~/.local/share/tiro`)
+- **Windows** — `%APPDATA%\Tiro`
+
+To move an existing library to the standard location (or anywhere else), stop
+the server and run:
+
+```bash
+uv run tiro migrate-library            # dest defaults to the platform-standard path
+uv run tiro migrate-library /some/dir  # or an explicit destination
+```
+
+`migrate-library` **copies** — it takes an automatic backup first, copies every
+store (articles, database, vectors, audio, annotations, notes, wiki, audit), then
+verifies the copy file-for-file and re-points `config.yaml` at the new location.
+**It never deletes, renames, or moves your old library** — once you've confirmed
+the new location works, remove the old copy yourself. An interrupted run is safe
+to re-run (the destination carries an incomplete marker and restarts from
+scratch; the source is never touched). If Tiro detects it's running from the
+legacy `./tiro-library` default, the inbox shows a one-time dismissible banner
+pointing you here.
+
+Schema migrations run automatically on every server start; when a start crosses a
+schema version on a library with real data, Tiro takes an automatic snapshot
+first and logs the version transition. Run them explicitly with `tiro migrate`.
 
 ---
 
@@ -708,7 +747,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/` — 1055 tests at 0.6.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/` — 1176 tests at 0.7.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
