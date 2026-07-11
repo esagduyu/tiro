@@ -518,3 +518,65 @@ class TestExternalDelete:
             assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 2
         finally:
             conn.close()
+
+    def test_exact_threshold_is_not_guarded(self, initialized_library):
+        # total=12, missing=10 -> max(10, ceil(0.2*12)=3) = 10; guard is a
+        # strict `>`, so missing == threshold must NOT be guarded (frozen
+        # semantics — see _delete_guarded).
+        arts = [_ingest(initialized_library, title=f"E{i}",
+                        url=f"https://example.com/e{i}") for i in range(12)]
+        for a in arts[:10]:
+            _article_path(initialized_library, a).unlink()
+        report = reconcile_library(initialized_library)
+        assert report.deleted == 10
+        assert "delete_guard" not in report.details
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 2
+        finally:
+            conn.close()
+
+    def test_single_article_carve_out(self, initialized_library):
+        # total=1, missing=1: the all-missing guard requires total > 1, so a
+        # lone article's file removal must delete cleanly, not be guarded.
+        art = _ingest(initialized_library)
+        _article_path(initialized_library, art).unlink()
+        report = reconcile_library(initialized_library)
+        assert report.deleted == 1
+        assert "delete_guard" not in report.details
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
+        finally:
+            conn.close()
+
+    def test_delete_error_isolated_per_row(self, initialized_library, monkeypatch):
+        art1 = _ingest(initialized_library, title="Fails", url="https://example.com/fail")
+        art2 = _ingest(initialized_library, title="Succeeds", url="https://example.com/ok")
+        _ingest(initialized_library, title="Keeper", url="https://example.com/keeper")
+        _article_path(initialized_library, art1).unlink()
+        _article_path(initialized_library, art2).unlink()
+
+        import tiro.lifecycle as lifecycle_mod
+        real_delete_article = lifecycle_mod.delete_article
+
+        def flaky_delete_article(config, article_id, *a, **kw):
+            if article_id == art1["id"]:
+                raise RuntimeError("simulated delete failure")
+            return real_delete_article(config, article_id, *a, **kw)
+
+        monkeypatch.setattr(lifecycle_mod, "delete_article", flaky_delete_article)
+
+        report = reconcile_library(initialized_library)  # must not raise
+
+        assert report.deleted == 1
+        errors = report.details.get("delete_errors")
+        assert errors == [{"id": art1["id"], "title": "Fails"}]
+
+        conn = get_connection(initialized_library.db_path)
+        try:
+            ids = {r["id"] for r in conn.execute("SELECT id FROM articles")}
+            assert art1["id"] in ids  # left in place for retry next pass
+            assert art2["id"] not in ids
+        finally:
+            conn.close()
