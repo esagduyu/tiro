@@ -305,6 +305,106 @@ class RunContext:
             conn.close()
         self._tool("set_tier", {"article_id": article_id, "tier": tier}, None)
 
+    def gather_digest_articles(self, *, unread_only: bool = False):
+        """The relocated digest._gather_articles (M4-era body verbatim, plus
+        a.uid in the SELECT for citation capture). Returns
+        (articles, vip_sources, vip_authors, recent_ratings)."""
+        from tiro.intelligence.digest import MAX_ARTICLES_FOR_DIGEST, RATING_LABELS
+
+        conn = get_connection(self.config.db_path)
+        try:
+            where_clause = "WHERE a.is_read = 0" if unread_only else ""
+            rows = conn.execute(f"""
+                SELECT
+                    a.id, a.uid, a.title, a.summary, a.published_at,
+                    a.ingested_at, a.is_read, a.rating, a.relevance_weight,
+                    s.name AS source_name, s.is_vip
+                FROM articles a
+                LEFT JOIN sources s ON a.source_id = s.id
+                {where_clause}
+                ORDER BY a.ingested_at DESC
+                LIMIT ?
+            """, (MAX_ARTICLES_FOR_DIGEST,)).fetchall()
+
+            if not rows:
+                self._tool("gather_digest_articles",
+                           {"unread_only": unread_only}, [])
+                return [], [], [], []
+
+            article_ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" * len(article_ids))
+            tag_rows = conn.execute(f"""
+                SELECT at.article_id, t.name
+                FROM article_tags at JOIN tags t ON t.id = at.tag_id
+                WHERE at.article_id IN ({placeholders})
+            """, article_ids).fetchall()
+            tags_by_article: dict[int, list[str]] = {}
+            for row in tag_rows:
+                tags_by_article.setdefault(row["article_id"], []).append(row["name"])
+
+            entity_rows = conn.execute(f"""
+                SELECT ae.article_id, e.name
+                FROM article_entities ae JOIN entities e ON e.id = ae.entity_id
+                WHERE ae.article_id IN ({placeholders})
+            """, article_ids).fetchall()
+            entities_by_article: dict[int, list[str]] = {}
+            for row in entity_rows:
+                entities_by_article.setdefault(row["article_id"], []).append(row["name"])
+
+            author_vip_rows = conn.execute(f"""
+                SELECT DISTINCT aa.article_id
+                FROM article_authors aa JOIN authors au ON au.id = aa.author_id
+                WHERE aa.article_id IN ({placeholders}) AND au.is_vip = 1
+            """, article_ids).fetchall()
+            vip_author_article_ids = {row["article_id"] for row in author_vip_rows}
+
+            articles, recent_ratings = [], []
+            for row in rows:
+                aid = row["id"]
+                is_vip = bool(row["is_vip"]) or aid in vip_author_article_ids
+                articles.append({
+                    "id": aid,
+                    "title": row["title"],
+                    "source": row["source_name"] or "Unknown",
+                    "is_vip": is_vip,
+                    "tags": tags_by_article.get(aid, []),
+                    "entities": entities_by_article.get(aid, []),
+                    "summary": row["summary"] or "",
+                    "published_date": row["published_at"] or row["ingested_at"],
+                    "relevance_weight": row["relevance_weight"] or 1.0,
+                })
+                if row["rating"] is not None:
+                    recent_ratings.append({
+                        "title": row["title"],
+                        "source": row["source_name"] or "Unknown",
+                        "rating_label": RATING_LABELS.get(row["rating"], "Unknown"),
+                        "summary": row["summary"] or "",
+                    })
+
+            vip_sources = [r["name"] for r in conn.execute(
+                "SELECT name FROM sources WHERE is_vip = 1").fetchall()]
+            vip_authors = [r["name"] for r in conn.execute(
+                "SELECT name FROM authors WHERE is_vip = 1").fetchall()]
+        finally:
+            conn.close()
+
+        self._cite(row["uid"] for row in rows)
+        self._tool("gather_digest_articles", {"unread_only": unread_only},
+                   {"articles": articles, "vip_sources": vip_sources,
+                    "vip_authors": vip_authors,
+                    "recent_ratings": recent_ratings})
+        return articles, vip_sources, vip_authors, recent_ratings
+
+    def create_digest(self, date_str: str, sections: dict, article_ids: list[int]) -> None:
+        """Write tool: cache digest sections (delegates to digest._cache_digest,
+        which keeps sole ownership of the digests-table write)."""
+        from tiro.intelligence.digest import _cache_digest
+
+        _cache_digest(self.config, date_str, sections, article_ids)
+        self._tool("create_digest",
+                   {"date": date_str, "types": sorted(sections),
+                    "article_count": len(article_ids)}, None)
+
     # -- result assembly (OPEN decision 3) ---------------------------------
 
     def result(self, outputs: BaseModel,
