@@ -653,17 +653,31 @@ def cmd_agent(args):
     print(res.outputs.model_dump_json(indent=2))
 
 
+_EVAL_PROVIDER_FIELDS = (
+    "ai_heavy_provider", "ai_light_provider", "ai_heavy_model", "ai_light_model",
+    "ai_openai_base_url", "ai_openai_api_key", "ai_claude_cli_path", "ai_codex_cli_path",
+    "anthropic_api_key", "openai_api_key",
+)
+
+
 def cmd_evals(args):
     """Run the agent evals harness (structural by default; --real confirms cost)."""
     from tiro.evals.runner import run_structural
 
+    providers = None
     if args.real:
+        from tiro.config import load_config
+
         print("Real mode hits your configured providers and SPENDS MONEY "
               "(cost varies by provider/model — no upfront estimate).")
         if input("Type 'yes' to proceed: ").strip().lower() != "yes":
             print("Aborted.")
             sys.exit(1)
-    results = run_structural(args.agent, real=args.real)
+        # Only --real reads the user's real config.yaml; structural mode
+        # never touches it (see tiro/evals/runner.py's isolation contract).
+        config = load_config(args.config)
+        providers = {name: getattr(config, name) for name in _EVAL_PROVIDER_FIELDS}
+    results = run_structural(args.agent, real=args.real, providers=providers)
     failed_total = 0
     for name, r in results.items():
         print(f"  {name}: {r['passed']} passed, {r['failed']} failed")
