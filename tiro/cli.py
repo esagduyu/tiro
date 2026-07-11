@@ -749,6 +749,11 @@ def cmd_doctor(args):
             )
         if report.get("reembed_failures"):
             print(f"reembed_failures: {report['reembed_failures']}")
+        if report.get("conflict_files"):
+            print(f"conflict_files: {len(report['conflict_files'])} "
+                  "(preserved losing versions — review and delete when done)")
+            for name in report["conflict_files"]:
+                print(f"  - {name}")
         if housekeeping_found:
             print("(housekeeping findings above are cleaned by --fix but do not fail this check)")
         if report["clean"]:

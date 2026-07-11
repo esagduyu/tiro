@@ -20,6 +20,7 @@ from tiro.annotations import (
 )
 from tiro.config import TiroConfig
 from tiro.database import get_connection
+from tiro.sync.reconcile import is_conflict_file, list_conflict_files
 from tiro.vectorstore import get_collection, retry_pending_vectors
 from tiro.wiki import _RESERVED_FILENAMES, reconcile_wiki_index
 
@@ -110,7 +111,10 @@ def scan(config: TiroConfig) -> dict:
     # Compare basenames, not raw values: a legacy row may store an absolute
     # markdown_path (M-1) which would never match the on-disk filename set.
     known_files = {Path(row["markdown_path"]).name for row in rows}
-    disk_files = {p.name for p in config.articles_dir.glob("*.md")}
+    disk_files = {
+        p.name for p in config.articles_dir.glob("*.md")
+        if not is_conflict_file(p.name)
+    }
 
     orphaned_markdown = sorted(disk_files - known_files)
     missing_markdown = [
@@ -228,6 +232,12 @@ def scan(config: TiroConfig) -> dict:
         "annotations_guarded": annotations_guarded,
         "agent_trace_orphans": agent_trace_orphans,
         "agent_runs_stuck": agent_runs_stuck,
+        # S1 conflict-file census: report-only. Conflict files are legitimate
+        # user-actionable review artifacts (a preserved losing version), not
+        # store corruption — they affect neither structurally_consistent nor
+        # clean, and fix() never touches them (they're excluded from
+        # orphaned_markdown above).
+        "conflict_files": list_conflict_files(config),
     }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",

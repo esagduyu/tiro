@@ -73,6 +73,22 @@ def is_conflict_file(name: str) -> bool:
     return bool(_CONFLICT_RE.search(name))
 
 
+def list_conflict_files(config: TiroConfig) -> list[str]:
+    """Census of conflict files across the library (doctor report-only)."""
+    from tiro.annotations import notes_dir
+
+    found: list[str] = []
+    for base in (config.articles_dir, notes_dir(config)):
+        if base.exists():
+            found.extend(p.name for p in base.glob("*.md") if is_conflict_file(p.name))
+    if config.wiki_dir.exists():
+        found.extend(
+            p.relative_to(config.wiki_dir).as_posix()
+            for p in config.wiki_dir.rglob("*.md") if is_conflict_file(p.name)
+        )
+    return sorted(found)
+
+
 def body_hash_of_file(path: Path) -> str | None:
     """sha256 of the markdown body (frontmatter stripped); None if unreadable."""
     try:
