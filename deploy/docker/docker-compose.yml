@@ -42,10 +42,16 @@
 
 services:
   tiro:
+    # Pull the official multi-arch image from GitHub Container Registry.
+    # `docker compose up -d` uses this image as-is (no local build needed);
+    # `docker compose build` still rebuilds it from the `build:` block below
+    # and re-tags it under this same name, so build-it-yourself keeps working.
+    # Pin to a version tag (e.g. :0.7.0) instead of :latest if you'd rather
+    # opt out of watchtower-style auto-updates on the mutable tag.
+    image: ghcr.io/esagduyu/tiro:latest
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: tiro:local
     container_name: tiro
     ports:
       - "8000:8000"

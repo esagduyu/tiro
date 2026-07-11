@@ -69,6 +69,33 @@ The hackathon build proved the product; it did not try to be safe to run anywher
 
 ---
 
+## Install Tiro
+
+Pick the path that fits how you want to run Tiro. All of them reach the same web app at `http://localhost:8000`; the first launch always sets a password.
+
+1. **Desktop app (macOS, beta)** — a double-clickable `.app` that bundles the server; no terminal, no Python. Download it from the [GitHub Releases](https://github.com/esagduyu/tiro/releases) page.
+   > **Unsigned beta.** The 0.7.0 build is not yet code-signed, so macOS Gatekeeper refuses it on first open — right-click the app → **Open** → **Open** to run it. Signing + notarization land in a later release. See [`desktop/README.md`](desktop/README.md) for the build recipe.
+
+2. **`uvx` / `uv tool` (CLI users)** — run the latest published release without cloning:
+   ```bash
+   uvx tiro run                  # run once, ephemeral (downloads on demand)
+   uv tool install tiro          # install the `tiro` command persistently
+   tiro run
+   ```
+   These pull Tiro from PyPI. (The PyPI publish is a maintainer step gated on the tagged release; until it lands, use the from-source or Docker path below.)
+
+3. **Docker (self-hosters)** — pull the official multi-arch image (linux/amd64 + linux/arm64) from GitHub Container Registry, no build required:
+   ```bash
+   docker pull ghcr.io/esagduyu/tiro:latest
+   ```
+   See the [Docker](#docker) section for the full compose setup and first-run password flow.
+
+4. **From source (developers)** — clone and run with `uv`, per [Quick Start](#quick-start) below. This is the path to use if you're contributing or want to modify Tiro.
+
+**Windows** is a documented-but-not-prebuilt path for now: install with `uvx tiro` / `uv tool install tiro` as above, or run the Docker image. A native Windows build (PyInstaller + [nssm](https://nssm.cc/) for run-at-login as a Windows service) is described in [`desktop/README.md`](desktop/README.md) but not shipped as a binary in this release.
+
+---
+
 ## Quick Start
 
 **Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/), [Anthropic API key](https://console.anthropic.com/), optionally [OpenAI API key](https://platform.openai.com/api-keys) for TTS:
@@ -111,10 +138,17 @@ Then open `http://<your-ip>:8000` on your phone. The mobile UI has a responsive 
 
 A `Dockerfile` and `deploy/docker/docker-compose.yml` are included for running Tiro as a container instead of a local `uv` install.
 
+The official multi-arch image (`linux/amd64` + `linux/arm64`) is published to GitHub Container Registry on every tagged release, so you don't have to build it yourself. The compose file references `ghcr.io/esagduyu/tiro:latest`, so `docker compose up -d` pulls it automatically:
+
 ```bash
 cd deploy/docker
-docker compose build
-docker compose up -d
+docker compose up -d           # pulls ghcr.io/esagduyu/tiro:latest
+```
+
+Prefer to build it yourself (or you've modified the source)? `docker compose build` still rebuilds from the local `Dockerfile` and re-tags it under the same image name; `docker compose up -d` then uses your local build. To pull directly without compose:
+
+```bash
+docker pull ghcr.io/esagduyu/tiro:latest
 ```
 
 **First run:** the container binds `0.0.0.0` (so it's reachable outside the container), and Tiro's Phase 0 security invariant refuses to bind a non-loopback host without a password — so the first `docker compose up -d` prints a refusal and exits. Set a password once, then bring it back up:
@@ -146,6 +180,26 @@ The compose file sets `restart: "no"` rather than `unless-stopped`: verified in 
 | `TIRO_IMAP_ENABLED` | `imap_enabled` | `true` |
 
 Uncomment `TIRO_ANTHROPIC_API_KEY` / `TIRO_OPENAI_API_KEY` in `deploy/docker/docker-compose.yml`'s `environment:` block to pass your keys through without writing them into `config.yaml`.
+
+**Non-interactive auth (headless deploys):** the interactive `set-password` flow above needs a terminal. For fully unattended provisioning, set `TIRO_AUTH_PASSWORD_HASH` in the container environment to a pre-computed **bcrypt hash** (not a plaintext password) — the `TIRO_*` env overlay applies it as `auth_password_hash` and the container boots straight to the login screen. There is deliberately no `TIRO_PASSWORD` plaintext env var. (Generate a hash with any bcrypt tool, e.g. `uv run python -c 'import bcrypt; print(bcrypt.hashpw(b"yourpassword", bcrypt.gensalt()).decode())'` on a machine that has Tiro's deps.) The hash is visible in `docker inspect`, so the interactive `set-password` flow remains the recommended path for anything beyond disposable setups.
+
+**Updating the image:** the `latest` and `X.Y` tags are mutable — they move forward as new versions publish. To update manually:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+For hands-off updates, point [Watchtower](https://containrrr.dev/watchtower/) at the container: it watches the mutable tag and pulls + restarts when a new image is pushed. (Tiro ships no auto-updater of its own for the container — mutable tags + Watchtower is the documented self-hoster update path.) If you'd rather pin a version and update on your own schedule, change the image ref in `docker-compose.yml` from `:latest` to a specific tag like `:0.7.0`.
+
+---
+
+## Updates
+
+Tiro's update story is **notify-only** — it never downloads or installs anything behind your back:
+
+- **Desktop app & server** — Tiro checks the [GitHub Releases](https://github.com/esagduyu/tiro/releases) API in the background and shows a dismissible banner with a download link when a newer version is available. It's a notification, not an auto-updater; you decide when to upgrade. Turn the check off entirely with `update_check_enabled: false` in `config.yaml` (or `TIRO_UPDATE_CHECK_ENABLED=false`).
+- **`uvx` / `uv tool`** — upgrade with `uv tool upgrade tiro` (or just re-run `uvx tiro@latest`).
+- **Docker** — see the Watchtower / `docker compose pull` note in the [Docker](#docker) section above.
 
 ---
 
