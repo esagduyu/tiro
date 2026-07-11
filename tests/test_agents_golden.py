@@ -239,3 +239,109 @@ def test_preference_classifier_value_errors_preserved(initialized_library):
 
     with pytest.raises(ValueError, match="Need at least 5 rated articles"):
         classify_articles(initialized_library)
+
+
+# --- DigestWriter (Task 9) --------------------------------------------------
+
+DIGEST_RESPONSE = (
+    "### 1. Ranked by Importance\nranked body\n"
+    "### 2. Grouped by Topic\ntopic body\n"
+    "### 3. Grouped by Entity\nentity body\n"
+)
+
+
+def _seed_digest_library(config, with_highlight=False):
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    try:
+        sid = conn.execute(
+            "INSERT INTO sources (name, domain, source_type) "
+            "VALUES ('Digest Source', 'd.example.com', 'web')").lastrowid
+        aid = conn.execute(
+            """INSERT INTO articles (uid, source_id, title, url, slug,
+               markdown_path, word_count, reading_time_min, ingested_at,
+               summary)
+               VALUES (?, ?, 'Digest Article', 'https://d.example.com/a',
+                       'digest-article', 'digest-article.md', 5, 1,
+                       '2026-07-09T12:00:00', 'digest sum')""",
+            (new_ulid(), sid)).lastrowid
+        if with_highlight:
+            conn.execute(
+                """INSERT INTO highlights (uid, article_id, quote_text,
+                   text_position_start, text_position_end, color,
+                   content_hash, created_at, updated_at)
+                   VALUES (?, ?, 'a quote', 0, 7, 'yellow', 'h',
+                           datetime('now'), datetime('now'))""",
+                (new_ulid(), aid))
+        conn.commit()
+        return aid
+    finally:
+        conn.close()
+
+
+def test_digest_writer_transcript_golden_no_highlights(
+    initialized_library, record_llm,
+):
+    from tiro.intelligence.digest import generate_digest
+    from tiro.intelligence.prompts import daily_digest_prompt
+
+    aid = _seed_digest_library(initialized_library)
+    rec = record_llm(DIGEST_RESPONSE)
+    result = generate_digest(initialized_library)
+
+    assert len(rec.calls) == 1        # zero highlights => zero recap call
+    call = rec.calls[0]
+    assert call["tier"] == "heavy"
+    assert call["purpose"] == "digest"
+    assert call["max_tokens"] == 4096
+    expected_articles = [{
+        "id": aid, "title": "Digest Article", "source": "Digest Source",
+        "is_vip": False, "tags": [], "entities": [], "summary": "digest sum",
+        "published_date": "2026-07-09T12:00:00", "relevance_weight": 1.0,
+    }]
+    assert call["prompt"] == daily_digest_prompt([], [], expected_articles, [])
+
+    assert result["ranked"]["content"] == "ranked body"
+    assert result["by_topic"]["content"] == "topic body"
+    assert result["by_entity"]["content"] == "entity body"
+    assert result["ranked"]["article_ids"] == [aid]
+    assert "created_at" in result["ranked"]
+    # len("YYYY-MM-DD HH:MM:SS") — full datetime, not a bare date (the
+    # historical staleness-banner contract)
+    assert len(result["ranked"]["created_at"]) == 19
+
+
+def test_digest_writer_recap_call_golden(initialized_library, record_llm):
+    from tiro.intelligence.digest import generate_digest
+
+    _seed_digest_library(initialized_library, with_highlight=True)
+    rec = record_llm(DIGEST_RESPONSE, "recap synthesis")
+    result = generate_digest(initialized_library)
+
+    assert len(rec.calls) == 2
+    recap = rec.calls[1]
+    assert recap["purpose"] == "highlight_recap"
+    assert recap["max_tokens"] == 1024
+    assert "a quote" in recap["prompt"]
+    assert result["ranked"]["content"].endswith("\n\n---\n\nrecap synthesis")
+    # recap lands in ranked ONLY
+    assert "recap synthesis" not in result["by_topic"]["content"]
+
+
+def test_digest_writer_caches_and_errors_preserved(initialized_library, record_llm):
+    from tiro.intelligence.digest import generate_digest, get_cached_digest
+
+    with pytest.raises(ValueError, match="No articles in library"):
+        generate_digest(initialized_library)          # empty library
+
+    _seed_digest_library(initialized_library)
+    record_llm("no headers at all")                    # split-fallback path
+    result = generate_digest(initialized_library)
+    assert result["ranked"]["content"] == "no headers at all"
+    assert result["by_topic"]["content"].startswith("*This section was not generated")
+
+    from datetime import date
+    cached = get_cached_digest(initialized_library, date.today().isoformat())
+    assert cached["ranked"]["content"] == "no headers at all"
