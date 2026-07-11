@@ -33,14 +33,16 @@ The original hackathon submission is preserved, frozen, at [esagduyu/project-tir
 - **Local-first** — Your data lives on your machine as plain markdown files, SQLite, and ChromaDB. No cloud, no lock-in.
 - **Model-agnostic data layer** — Content stored in open formats, portable and usable with any AI.
 - **Opinionated intelligence** — Opus 4.6 generates ranked digests, clusters articles by topic and entity, and flags bias and unsourced claims.
-- **Minimal friction** — One command to run, clean distraction-free reader UI, full keyboard navigation.
+- **Fills itself** — Subscribe to RSS/Atom feeds and Tiro polls them on a schedule; import your whole Readwise/Instapaper/Omnivore library, highlights and all.
+- **Runs how you want** — A one-command `uv`/`uvx` server, a signable desktop app (macOS/Linux, Tauri + a frozen Python server), a multi-arch Docker image, and an installable phone PWA — plus a native SwiftUI iOS client (TestFlight track).
+- **Minimal friction** — First-run onboarding wizard, clean distraction-free reader UI, full keyboard navigation.
 - **Own your context** — One-click export of your entire library as portable markdown + JSON.
 
 ---
 
 ## The security & integrity foundation (0.2.0)
 
-Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
+Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile), 0.6 (RSS & imports), 0.7 (installable desktop app) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
 
 The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
 
@@ -258,7 +260,7 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 
 ### Interface
 
-- **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Wiki, Highlights, Sources, Stats, Graph, Settings, plus your saved views. Collapses to icons on narrower screens, hamburger menu on mobile.
+- **Sidebar navigation** — Persistent left sidebar with Inbox, Digest, Wiki, Highlights, Sources, Stats, Graph, Settings, plus your saved views. Three-tier responsive chrome: the full 240px sidebar on desktop, a 64px icon rail on tablets, and a bottom tab bar with Library/More sheets on phones (the reader swaps in its own bottom action bar). Hand-drawn SVG icon language and editorial serif accents throughout, from the "Codex" design system.
 - **Saved views** — Save any filter-panel state as a named view in the sidebar (up to 20, reorderable) for one-click inbox slices.
 - **Filter panel** — Right-edge tab opens a slide-out panel with 11 filter facets: AI tier, rating, source, tag, read status, VIP, ingestion method, date range. Active filter pills. URL-synced state.
 - **Dark mode** — Toggle between Papyrus (warm cream) and Roman Night (warm charcoal) themes. Persists via localStorage.
@@ -747,7 +749,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/` — 1176 tests at 0.7.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), and `triage-pill.spec.js` (pill + inbox zero) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/` — 1176 tests at 0.7.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), `triage-pill.spec.js` (pill + inbox zero), and `design-pass.spec.js` (icon/chrome verification matrix across viewports and themes) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
@@ -757,15 +759,16 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.5.0 to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.7.0 to a 1.0 with an optional hosted tier. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
 - **Phase 2 — Highlights & notes (0.4): shipped.** Anchored highlights and markdown notes stored as human-readable sidecar files next to your articles, opt-in local-only reading telemetry, Obsidian-compatible frontmatter mode, and a digest highlight-recap section — Tiro becomes a place to think, not just to save.
 - **Phase 2b — Obsidian bidirectional sync (0.4.5):** your vault and your reading library become one substrate; edits in either tool reconcile into the other. Nobody in the read-it-later space offers this. (Deferred as a standalone phase — the current plan delivers its reconciliation engine as the first milestone of the Phase 7a sync work, so external edits and multi-device sync share one merge core.)
 - **Phase 3 — Private remote access (0.5): shipped.** Tailscale setup wizard, QR login, mobile PWA, swipe-triage inbox — read and highlight on your phone while the library stays on your machine. Backend (snooze, QR login, mDNS discovery, TLS run flags), the installable PWA (manifest, service worker, offline reading, offline save queue, `/setup/remote` wizard), and the swipe-triage inbox (gestures, undo, snooze UI, inbox zero) all landed.
-- **Phase 4 — RSS & imports (0.6):** feed subscriptions with OPML, plus importers for Readwise, Instapaper, and Omnivore libraries — Tiro shouldn't start you at zero.
-- **Phase 5 — Installable app (0.7):** desktop packaging, Docker image, background-service management, first-run onboarding. A native SwiftUI iPhone client (thin API client, share-sheet save, lock-screen audio) is planned as a companion — unblocked now that Phase 3 has shipped.
+- **Phase 4 — RSS & imports (0.6): shipped.** Feed subscriptions with OPML round-trip, a `/feeds` management page, and importers for Readwise, Instapaper, and Omnivore libraries (highlights re-anchored on import) — Tiro shouldn't start you at zero. Plus the Chrome-extension advanced save and an owner UX wave (reading progress, unread-first inbox).
+- **Phase 5 — Installable app (0.7): shipped.** A frozen Python server in a Tauri desktop shell, a multi-arch Docker image, `tiro service` background-service management (launchd/systemd), a `/welcome` first-run wizard, and a notify-only update check. Signing/notarization and the first public image push are owner-runbook steps (`docs/RUNBOOK-desktop.md`).
+- **Native iOS client (companion to Phase 3/5): feature-complete.** A SwiftUI thin client — QR/manual pairing, swipe-triage inbox, reader with painted highlights and a parity-tested anchoring engine, semantic search, digest, offline queue + Share Extension, and lock-screen TTS audio. Lives in a separate repo (`~/repos/tiro-ios`), TestFlight-pending on an Apple team id.
 - **Phase 6 — Agent runtime (0.8):** the ad-hoc AI calls become a library of inspectable local agents with replayable traces and cost accounting, provider adapters (Anthropic, OpenAI, local models via Ollama) making model-agnosticism shipped fact rather than aspiration, and a plugin API for community agents, connectors, and themes.
 - **Phase 7a — BYO cloud sync (0.9):** multi-device sync against storage *you* own (S3-compatible, WebDAV, or any synced folder) with client-side encryption. Tiro never holds your data.
 - **Phase 7b — Tiro Cloud (1.0):** an optional paid convenience tier — hosted sync and always-on agents — patterned on Obsidian Sync: it funds the open product and gates nothing. A user who never pays can use every feature.
