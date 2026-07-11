@@ -170,7 +170,7 @@ def scan(config: TiroConfig) -> dict:
         wiki_files = {
             p.relative_to(config.wiki_dir).with_suffix("").as_posix()
             for p in config.wiki_dir.rglob("*.md")
-            if p.name not in _RESERVED_FILENAMES
+            if p.name not in _RESERVED_FILENAMES and not is_conflict_file(p.name)
         }
     wiki_index_drift = len(wiki_files ^ wiki_page_slugs)
 
@@ -192,7 +192,10 @@ def scan(config: TiroConfig) -> dict:
     ann_dir_exists = ann_dir.exists()
     nt_dir_exists = nt_dir.exists()
     ann_file_stems = {p.stem for p in ann_dir.glob("*.jsonl")} if ann_dir_exists else set()
-    note_file_stems = {p.stem for p in nt_dir.glob("*.md")} if nt_dir_exists else set()
+    note_file_stems = (
+        {p.stem for p in nt_dir.glob("*.md") if not is_conflict_file(p.name)}
+        if nt_dir_exists else set()
+    )
     stem_by_article_id = {row["id"]: sidecar_stem(row) for row in rows}
     highlight_stems_with_rows = {
         stem_by_article_id[aid] for aid in highlight_article_ids if aid in stem_by_article_id
