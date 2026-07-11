@@ -140,6 +140,45 @@ def test_replay_sets_replay_of_and_leaves_original(agents_client):
         "/api/agents/runs/01NOPE/replay", json={}).status_code == 404
 
 
+def test_list_agents_last_run_ties_break_on_id(agents_client):
+    """Two runs of the same agent sharing the same (second-granularity)
+    started_at must resolve to the HIGHER-id run as last_run, not an
+    arbitrary one (regression for the started_at-only tie)."""
+    from tiro import llm
+    from tiro.database import get_connection
+
+    first = _run_metadata(agents_client, text="first")
+    llm.queue_fake_responses(
+        '{"tags": ["t"], "entities": [], "summary": "second"}')
+    second = _run_metadata(agents_client, text="second")
+    assert first["run_uid"] != second["run_uid"]
+
+    config = agents_client.app.state.config
+    conn = get_connection(config.db_path)
+    try:
+        # Force both rows onto the identical started_at value, simulating
+        # a same-second tie; ids remain distinct and monotonic.
+        conn.execute(
+            "UPDATE agent_runs SET started_at = '2026-01-01 00:00:00' "
+            "WHERE run_uid IN (?, ?)",
+            (first["run_uid"], second["run_uid"]),
+        )
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, run_uid FROM agent_runs WHERE run_uid IN (?, ?)",
+            (first["run_uid"], second["run_uid"]),
+        ).fetchall()
+    finally:
+        conn.close()
+    by_uid = {r["run_uid"]: r["id"] for r in rows}
+    assert by_uid[second["run_uid"]] > by_uid[first["run_uid"]]
+
+    r = agents_client.get("/api/agents")
+    last = {a["name"]: a for a in r.json()["data"]}["metadata_extractor"]["last_run"]
+    assert last["run_uid"] == second["run_uid"]
+    assert last["output"]["summary"] == "second"
+
+
 def test_agents_api_requires_auth(auth_client):
     """API half of the route-walk intent, runs now (Task 11)."""
     assert auth_client.get("/api/agents").status_code == 401

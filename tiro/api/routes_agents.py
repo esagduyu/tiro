@@ -7,7 +7,7 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from tiro.agents import registry
@@ -73,6 +73,8 @@ async def _execute(config, name: str, inputs: dict,
         if e.run_uid is None:
             # pre-run failure: unknown agent (404 handled by callers) or
             # input validation -> caller bug
+            logger.warning("agent run rejected pre-run for '%s': %s",
+                            name, e)
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"success": False,
                 "data": {"run_uid": e.run_uid, "status": "error"},
@@ -92,11 +94,12 @@ async def list_agents(request: Request):
     registry.ensure_builtins()
     conn = get_connection(config.db_path)
     try:
+        # id (AUTOINCREMENT, monotonic under the global run lock) is the
+        # true recency key -- started_at is only second-granularity and
+        # two runs of the same agent can tie on it.
         rows = conn.execute("""
-            SELECT r.* FROM agent_runs r
-            JOIN (SELECT agent_name, MAX(started_at) AS m
-                  FROM agent_runs GROUP BY agent_name) latest
-              ON latest.agent_name = r.agent_name AND latest.m = r.started_at
+            SELECT * FROM agent_runs
+            WHERE id IN (SELECT MAX(id) FROM agent_runs GROUP BY agent_name)
         """).fetchall()
     finally:
         conn.close()
@@ -162,8 +165,7 @@ async def run_detail(run_uid: str, request: Request, trace: int = 0):
         path = traces_dir(config) / f"{run_uid}.jsonl"
         if not path.exists():
             raise HTTPException(status_code=404, detail="trace expired")
-        return PlainTextResponse(path.read_text(),
-                                  media_type="application/x-ndjson")
+        return FileResponse(path, media_type="application/x-ndjson")
     return {"success": True, "data": _row_to_dict(config, row)}
 
 
