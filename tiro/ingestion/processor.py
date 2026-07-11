@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import frontmatter
 
+from tiro.anchors import content_hash
 from tiro.authors import link_article_author
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -231,6 +232,15 @@ def process_article(
             )
             article_id = cursor.lastrowid
             link_article_author(conn, article_id, author)
+            # S1 (sync): body_hash = sha256 of the markdown BODY exactly as
+            # frontmatter.load() will return it later — computed by re-loading
+            # the file just written, so the stored hash is round-trip-proof.
+            # The later frontmatter rewrites in this function keep the body
+            # byte-identical (M2.3 invariant), so the hash stays valid.
+            conn.execute(
+                "UPDATE articles SET body_hash = ? WHERE id = ?",
+                (content_hash(frontmatter.load(str(md_path)).content), article_id),
+            )
             conn.commit()
         except Exception:
             md_path.unlink(missing_ok=True)
