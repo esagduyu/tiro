@@ -55,6 +55,11 @@ class TiroConfig:
     # and the default for newly-subscribed feeds.
     rss_enabled: bool = True
     rss_default_interval_minutes: int = 60
+    # Local reconcile engine (sync S1, absorbed Phase 2b): polling scan that
+    # folds external edits to library_path (Obsidian et al.) into SQLite/
+    # Chroma/anchors. Seconds between passes; 0 = off (manual `tiro
+    # reconcile` only). Env override: TIRO_RECONCILE_INTERVAL_S.
+    reconcile_interval_s: int = 30
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"

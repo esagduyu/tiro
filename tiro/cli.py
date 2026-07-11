@@ -682,6 +682,50 @@ def cmd_doctor(args):
     sys.exit(1 if failed else 0)
 
 
+def cmd_reconcile(args):
+    """One reconcile pass: fold external library edits into SQLite/Chroma/
+    anchors (sync S1). Run with the server stopped, like doctor — the
+    server's own 30s loop covers the running case."""
+    import json as _json
+    from dataclasses import asdict
+
+    from tiro.config import load_config
+    from tiro.database import migrate_db
+    from tiro.sync.reconcile import reconcile_library
+    from tiro.vectorstore import get_collection, init_vectorstore, retry_pending_vectors
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+    migrate_db(config.db_path)
+    try:
+        get_collection()
+    except RuntimeError:
+        init_vectorstore(config.chroma_dir, config.default_embedding_model)
+
+    report = reconcile_library(config, dry_run=args.dry_run)
+    reembedded = 0
+    if not args.dry_run:
+        reembedded = retry_pending_vectors(config)
+
+    if args.json:
+        print(_json.dumps({**asdict(report), "reembedded": reembedded}, indent=2))
+    else:
+        prefix = "[dry-run] " if args.dry_run else ""
+        print(f"{prefix}{report.summary()}")
+        if reembedded:
+            print(f"re-embedded: {reembedded}")
+        if report.details.get("delete_guard"):
+            print(f"GUARDED: {report.details['delete_guard']}")
+        for name in report.details.get("conflict_files", []):
+            print(f"conflict file written: {name}")
+        for warn in report.details.get("anchor_warnings", []):
+            print(f"highlight no longer anchors: {warn['highlight_uid']} "
+                  f"({warn['status']})")
+    sys.exit(0)
+
+
 def cmd_migrate_library(args):
     """Copy the library to a new location (spec D3). The old copy is NEVER
     deleted — the user removes it manually after verifying."""
@@ -1028,6 +1072,16 @@ def main():
     doctor_parser.add_argument("--json", action="store_true",
                                help="Machine-readable report")
 
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Fold external library edits (Obsidian etc.) into the index "
+             "(server stopped)",
+    )
+    reconcile_parser.add_argument("--dry-run", action="store_true",
+                                  help="Report what would change; act on nothing")
+    reconcile_parser.add_argument("--json", action="store_true",
+                                  help="Machine-readable report")
+
     subparsers.add_parser("status", help="Show library status and store sizes")
 
     subparsers.add_parser("migrate", help="Apply pending database migrations")
@@ -1114,6 +1168,8 @@ def main():
         cmd_set_password(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "reconcile":
+        cmd_reconcile(args)
     elif args.command == "token":
         cmd_token(args)
     elif args.command == "audit":
