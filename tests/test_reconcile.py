@@ -1,4 +1,6 @@
 """Sync S1: local reconcile engine (write-path plumbing + reconcile_library)."""
+import os
+import time as _time
 from pathlib import Path
 
 import frontmatter
@@ -580,3 +582,99 @@ class TestExternalDelete:
             assert art2["id"] not in ids
         finally:
             conn.close()
+
+
+class TestSidecarReconcile:
+    def test_external_note_edit_wins_files_win(self, initialized_library):
+        art = _ingest(initialized_library)
+        from tiro.annotations import sidecar_stem, write_note
+        conn = get_connection(initialized_library.db_path)
+        try:
+            arow = conn.execute("SELECT * FROM articles WHERE id = ?",
+                                (art["id"],)).fetchone()
+        finally:
+            conn.close()
+        stem = sidecar_stem(arow)
+        write_note(initialized_library, stem, "original note")
+        # Row exists too (reconcile_annotations inserts it on the next pass).
+        reconcile_library(initialized_library)
+        # External edit: file newer than row -> plain files-win, no conflict.
+        note_path = initialized_library.library / "notes" / f"{stem}.md"
+        note_path.write_text("edited in Obsidian")
+        report = reconcile_library(initialized_library)
+        assert report.conflicts == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT body_markdown FROM notes WHERE article_id = ? "
+                "AND highlight_id IS NULL", (art["id"],)).fetchone()
+            assert row["body_markdown"] == "edited in Obsidian"
+        finally:
+            conn.close()
+
+    def test_ambiguous_note_prefers_external_and_writes_conflict(
+            self, initialized_library):
+        art = _ingest(initialized_library)
+        from tiro.annotations import sidecar_stem, write_note
+        conn = get_connection(initialized_library.db_path)
+        try:
+            arow = conn.execute("SELECT * FROM articles WHERE id = ?",
+                                (art["id"],)).fetchone()
+        finally:
+            conn.close()
+        stem = sidecar_stem(arow)
+        write_note(initialized_library, stem, "file version")
+        reconcile_library(initialized_library)  # index the row
+
+        # Simulate row leading the file: row body differs AND row.updated_at
+        # is far newer than the file's mtime.
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute(
+                "UPDATE notes SET body_markdown = 'db-only version', "
+                "updated_at = ? WHERE article_id = ? AND highlight_id IS NULL",
+                ("2099-01-01T00:00:00Z", art["id"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        note_path = initialized_library.library / "notes" / f"{stem}.md"
+        old = _time.time() - 3600
+        os.utime(note_path, (old, old))
+
+        report = reconcile_library(initialized_library)
+        assert report.conflicts == 1
+        conflict = list((initialized_library.library / "notes").glob(
+            f"{stem}.conflict-local-*.md"))
+        assert len(conflict) == 1
+        assert conflict[0].read_text() == "db-only version"
+        # External (file) version won in the index:
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT body_markdown FROM notes WHERE article_id = ? "
+                "AND highlight_id IS NULL", (art["id"],)).fetchone()
+            assert row["body_markdown"] == "file version"
+        finally:
+            conn.close()
+
+    def test_annotations_counts_surface_in_details(self, initialized_library):
+        _ingest(initialized_library)
+        report = reconcile_library(initialized_library)
+        assert "annotations" in report.details
+        assert "highlights_matched" in report.details["annotations"]
+
+    def test_dry_run_skips_sidecar_phase(self, initialized_library):
+        _ingest(initialized_library)
+        report = reconcile_library(initialized_library, dry_run=True)
+        assert report.details.get("annotations") == "skipped (dry-run)"
+
+
+class TestConflictWriter:
+    def test_collision_safe_naming(self, tmp_path):
+        from tiro.sync.reconcile import write_conflict_file
+        p1 = write_conflict_file(tmp_path, "stem", "one")
+        p2 = write_conflict_file(tmp_path, "stem", "two")
+        assert p1 != p2
+        assert is_conflict_file(p1.name) and is_conflict_file(p2.name)
+        assert p1.read_text() == "one" and p2.read_text() == "two"
