@@ -722,6 +722,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         return await call_next(request)
 
     # API routers
+    from tiro.api.routes_agents import router as agents_router
     from tiro.api.routes_annotations import router as annotations_router
     from tiro.api.routes_articles import router as articles_router
     from tiro.api.routes_audio import router as audio_router
@@ -758,6 +759,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
         sessions_router, remote_router, feeds_router, import_router,
+        agents_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
