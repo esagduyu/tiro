@@ -93,6 +93,10 @@
                     {{ icon("rss", size=17) }}
                     <span class="sidebar-label">Feeds</span>
                 </a>
+                <a href="/agents" class="sidebar-item {% block nav_agents %}{% endblock %}" title="Agents">
+                    {{ icon("zap", size=17) }}
+                    <span class="sidebar-label">Agents</span>
+                </a>
                 <a href="/graph" class="sidebar-item {% block nav_graph %}{% endblock %}" title="Graph">
                     {{ icon("graph", size=17) }}
                     <span class="sidebar-label">Graph</span>
@@ -211,6 +215,7 @@
         <a href="/highlights">{{ icon("highlighter", size=22) }}<span>Highlights</span></a>
         <a href="/sources">{{ icon("library", size=22) }}<span>Sources</span></a>
         <a href="/feeds">{{ icon("rss", size=22) }}<span>Feeds</span></a>
+        <a href="/agents">{{ icon("zap", size=22) }}<span>Agents</span></a>
         <a href="/graph">{{ icon("graph", size=22) }}<span>Graph</span></a>
         <a href="/stats">{{ icon("bar-chart", size=22) }}<span>Stats</span></a>
       </div>

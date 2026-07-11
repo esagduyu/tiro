@@ -184,7 +184,18 @@ def test_agents_api_requires_auth(auth_client):
     assert auth_client.get("/api/agents").status_code == 401
 
 
-@pytest.mark.skip(reason="/agents page lands in Task 12 (K2.5)")
 def test_agents_page_requires_auth(auth_client):
     """Page half — deferred until the /agents page route exists (Task 12)."""
     assert auth_client.get("/agents").status_code == 302
+
+
+def test_agents_page_renders(agents_client):
+    r = agents_client.get("/agents")
+    assert r.status_code == 200
+    assert 'id="agents-root"' in r.text
+    assert "agents.js" in r.text
+
+
+def test_base_nav_has_agents_entry(agents_client):
+    r = agents_client.get("/inbox")
+    assert 'href="/agents"' in r.text
