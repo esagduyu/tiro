@@ -222,6 +222,59 @@ class TestScanAndChanged:
         bad_row = _row(initialized_library, bad["id"], "body_hash")
         assert bad_row["body_hash"] != content_hash("# Hello\n\nBad external edit.")
 
+    def test_post_read_failure_rolls_back_and_reports_apply_error(
+        self, initialized_library, monkeypatch
+    ):
+        """Fix wave 2: a failure AFTER the row UPDATE has executed (e.g.
+        inside tag sync) must roll back to the per-file SAVEPOINT — the row
+        must be untouched, the failure must land in details["apply_errors"]
+        (not "unreadable", which is reserved for read/extraction failures),
+        and the other file in the same pass must still succeed."""
+        good = _ingest(initialized_library, title="Good", url="https://example.com/good")
+        bad = _ingest(initialized_library, title="Bad", url="https://example.com/bad")
+        _edit_body(initialized_library, good, "# Hello\n\nGood external edit.")
+        _edit_body(initialized_library, bad, "# Hello\n\nBad external edit.")
+
+        bad_title_before = _row(initialized_library, bad["id"], "title")["title"]
+        bad_hash_before = _row(initialized_library, bad["id"], "body_hash")["body_hash"]
+
+        real_sync = rec._sync_tags_from_frontmatter
+
+        def flaky_sync(conn, article_id, tag_names):
+            if article_id == bad["id"]:
+                raise RuntimeError("simulated tag-sync failure")
+            return real_sync(conn, article_id, tag_names)
+
+        monkeypatch.setattr(rec, "_sync_tags_from_frontmatter", flaky_sync)
+
+        # Give both articles frontmatter tags so _sync_tags_from_frontmatter
+        # is actually invoked for each (it's gated on isinstance(..., list)).
+        for art in (good, bad):
+            path = _article_path(initialized_library, art)
+            post = frontmatter.load(str(path))
+            post.metadata["tags"] = ["x"]
+            frontmatter.dump(post, str(path))
+
+        report = reconcile_library(initialized_library)
+
+        # Only the good file counts as changed.
+        assert report.changed == 1
+        assert good["markdown_path"] in report.details.get("changed_files", [])
+        assert bad["markdown_path"] not in report.details.get("changed_files", [])
+        assert bad["markdown_path"] in report.details.get("apply_errors", [])
+        assert bad["markdown_path"] not in report.details.get("unreadable", [])
+
+        # The bad article's row is completely unchanged (title AND body_hash),
+        # proving the UPDATE that ran before the tag-sync failure was rolled
+        # back, not swept into the final commit.
+        bad_row = _row(initialized_library, bad["id"], "title, body_hash")
+        assert bad_row["title"] == bad_title_before
+        assert bad_row["body_hash"] == bad_hash_before
+
+        # The good article's update survives.
+        good_row = _row(initialized_library, good["id"], "body_hash")
+        assert good_row["body_hash"] == content_hash("# Hello\n\nGood external edit.")
+
     def test_apply_time_body_hash_recomputed_from_read_body(self, initialized_library):
         """Stored body_hash must match content_hash() of the body actually
         read at apply time, not the settle-time hash (Finding 1, second half)."""

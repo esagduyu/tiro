@@ -233,10 +233,9 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
         for name in scan.changed:
             row = scan.rows_by_name[name]
             # A file can turn unreadable between the settle poll and here
-            # (deleted, permissions changed, truncated mid-write again). This
-            # loop only commits once at the end, so one bad file must not
-            # take down the whole pass and roll back every already-applied
-            # UPDATE — isolate it, log, record it, and move on.
+            # (deleted, permissions changed, truncated mid-write again).
+            # This is a pure read/extraction step — no DB writes yet — so a
+            # failure here means we genuinely never touched the row.
             try:
                 post = frontmatter.load(str(scan.disk[name]))
                 body = post.content
@@ -256,6 +255,22 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
                 # the exact content the other row fields were derived from —
                 # closes a third-edit race between settle and apply.
                 body_hash = content_hash(body)
+            except Exception as e:
+                logger.warning(
+                    "Unreadable markdown at apply time %s: %s", name, e
+                )
+                _detail(report, "unreadable").append(name)
+                continue
+
+            # DB work is isolated per-file behind a SAVEPOINT so a failure
+            # partway through (e.g. tag sync) rolls back everything this
+            # file already did — the whole-pass conn.commit() below must
+            # never sweep a half-applied file into durable state. Executed
+            # as raw SQL (not sqlite3's high-level begin/commit) since the
+            # connection's default deferred-transaction handling nests
+            # cleanly under an explicit SAVEPOINT/RELEASE/ROLLBACK TO.
+            conn.execute("SAVEPOINT apply_file")
+            try:
                 conn.execute(
                     "UPDATE articles SET title = ?, author = ?, summary = ?, "
                     "word_count = ?, reading_time_min = ?, body_hash = ?, "
@@ -274,14 +289,18 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
                     logger.error("mark_pages_stale failed for %d (non-fatal): %s",
                                  row["id"], e)
                 _reanchor_census(conn, row["id"], body, report)
-                report.changed += 1
-                _detail(report, "changed_files").append(name)
             except Exception as e:
+                conn.execute("ROLLBACK TO apply_file")
+                conn.execute("RELEASE apply_file")
                 logger.warning(
-                    "Unreadable markdown at apply time %s: %s", name, e
+                    "apply failed for %s (rolled back, will retry next pass): %s",
+                    name, e,
                 )
-                _detail(report, "unreadable").append(name)
+                _detail(report, "apply_errors").append(name)
                 continue
+            conn.execute("RELEASE apply_file")
+            report.changed += 1
+            _detail(report, "changed_files").append(name)
         conn.commit()
     finally:
         conn.close()
