@@ -678,3 +678,27 @@ class TestConflictWriter:
         assert p1 != p2
         assert is_conflict_file(p1.name) and is_conflict_file(p2.name)
         assert p1.read_text() == "one" and p2.read_text() == "two"
+
+
+class TestDoctorConflictCensus:
+    def test_conflict_files_not_orphaned_and_censused(self, initialized_library):
+        from tiro.doctor import scan
+        _ingest(initialized_library)
+        (initialized_library.articles_dir /
+         "old.conflict-local-20260710.md").write_text("loser body")
+        report = scan(initialized_library)
+        assert "old.conflict-local-20260710.md" not in report["orphaned_markdown"]
+        assert "old.conflict-local-20260710.md" in report["conflict_files"]
+        # Report-only: census never flips the health verdicts.
+        assert report["structurally_consistent"] is True
+        assert report["clean"] is True
+
+    def test_fix_leaves_conflict_files_in_place(self, initialized_library):
+        from tiro.doctor import fix
+        _ingest(initialized_library)
+        p = initialized_library.articles_dir / "keep.conflict-local-20260710.md"
+        p.write_text("loser body")
+        fix(initialized_library)
+        assert p.exists()
+        assert not (initialized_library.library / ".orphaned" /
+                    "keep.conflict-local-20260710.md").exists()
