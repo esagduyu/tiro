@@ -482,6 +482,45 @@ def ingest_external_file(config: TiroConfig, path: Path) -> int | None:
         conn.close()
 
 
+def _delete_guarded(total: int, missing: int) -> bool:
+    """Refuse a pass's deletes when the missing set smells like a directory
+    mishap, not an editor delete: all-missing (>1, doctor's rule) or more
+    than max(MASS_DELETE_FLOOR, 20% of the library) at once (spec §4)."""
+    if missing == 0:
+        return False
+    if missing == total and total > 1:
+        return True
+    return missing > max(MASS_DELETE_FLOOR, math.ceil(MASS_DELETE_FRACTION * total))
+
+
+def _apply_deleted(config: TiroConfig, scan: _Scan, report: ReconcileReport,
+                   dry_run: bool) -> None:
+    if not scan.missing:
+        return
+    total = len(scan.rows_by_name)
+    if _delete_guarded(total, len(scan.missing)):
+        report.details["delete_guard"] = (
+            f"{len(scan.missing)}/{total} article files missing — refusing to "
+            "delete (directory mishap? fix library_path or run tiro doctor)"
+        )
+        logger.warning("Reconcile: %s", report.details["delete_guard"])
+        return
+    from tiro.lifecycle import delete_article
+
+    for row in scan.missing:
+        if dry_run:
+            report.deleted += 1
+            _detail(report, "deleted_articles").append(
+                {"id": row["id"], "title": row["title"]})
+            continue
+        if delete_article(config, row["id"]):
+            report.deleted += 1
+            _detail(report, "deleted_articles").append(
+                {"id": row["id"], "title": row["title"]})
+            logger.info("Reconcile: completed deletion of article %d (%r) — "
+                        "markdown removed externally", row["id"], row["title"])
+
+
 def _apply_created(config: TiroConfig, scan: _Scan, report: ReconcileReport,
                    dry_run: bool) -> None:
     for name in scan.created:
@@ -532,4 +571,5 @@ def reconcile_library(config: TiroConfig, *, dry_run: bool = False) -> Reconcile
     scan = _scan_with_settle(config, report, dry_run)
     _apply_changed(config, scan, report, dry_run)
     _apply_created(config, scan, report, dry_run)
+    _apply_deleted(config, scan, report, dry_run)
     return report
