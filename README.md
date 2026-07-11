@@ -44,6 +44,8 @@ The original hackathon submission is preserved, frozen, at [esagduyu/project-tir
 
 Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile), 0.6 (RSS & imports), 0.7 (installable desktop app) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
 
+**In development (on `main`, unreleased):** the road to **1.0 — the fully local, fully owned product** — is a local **agent runtime** (inspectable, replayable AI agents over your library; → 0.8) and **bring-your-own-cloud sync** (multi-device sync where you own the storage, and Obsidian as a co-equal editor; → 0.9). The runtime kernel and the local reconcile engine have landed on `main`; see [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)'s "Path to v1.0" for the full plan and [`VISION.md`](VISION.md) for the five principles the whole product is judged against. Tiro Cloud (optional paid hosted convenience) is a post-1.0 track — a user who never pays gets every feature.
+
 The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
 
 **Security spine**
