@@ -600,9 +600,24 @@ Tiro's articles are already plain markdown files with YAML frontmatter, so an [O
 - `related: ["[[stem]]", ...]` — Tiro's auto-computed related articles, written as Obsidian `[[wikilinks]]` (by markdown filename stem) instead of `/articles/{id}` URLs, so they're clickable inside Obsidian's own graph and backlink views.
 - `tags:` was already a plain YAML list before this flag existed — nothing changes there.
 
-**Format-only, and existing articles are untouched.** Flipping the flag only changes how future ingests write frontmatter; it does not rewrite your library, and it does not require Obsidian to be installed — it just lays out files so Obsidian opens them cleanly if you want. There's no live sync yet: if Tiro recomputes an article's related articles later (e.g. after a fresh ingest, or `POST /api/recompute-relations`), older articles' `related:` frontmatter is **not** retroactively rewritten — only newly-written frontmatter reflects it. Full bidirectional sync (a background file watcher that reconciles edits made directly in Obsidian) is planned for a later phase (Phase 2b in `PRODUCT_ROADMAP.md`) and does not exist yet. One more honest edge case: the `related:` key can be silently **absent** (not an empty `related: []`) on a freshly-ingested article if the non-fatal related-articles step raises before that write happens — a rare failure mode, but if you notice a missing `related:` key on a new note, that's why.
+**Format-only, and existing articles are untouched.** Flipping the flag only changes how future ingests write frontmatter; it does not rewrite your library, and it does not require Obsidian to be installed — it just lays out files so Obsidian opens them cleanly if you want. If Tiro recomputes an article's related articles later (e.g. after a fresh ingest, or `POST /api/recompute-relations`), older articles' `related:` frontmatter is **not** retroactively rewritten — only newly-written frontmatter reflects it. One more honest edge case: the `related:` key can be silently **absent** (not an empty `related: []`) on a freshly-ingested article if the non-fatal related-articles step raises before that write happens — a rare failure mode, but if you notice a missing `related:` key on a new note, that's why.
 
 To use Tiro and Obsidian together today, point `library_path` in `config.yaml` at a subdirectory of an existing Obsidian vault (e.g. `~/ObsidianVault/tiro/`) — **Tiro owns that subdirectory** (its SQLite database, ChromaDB vectors, and audio cache live there too, alongside the markdown), so don't point it at your vault root if you'd rather keep those out of Obsidian's way.
+
+### Editing your library externally (Obsidian)
+
+Tiro now reconciles edits made directly in your vault (Obsidian or any other editor) back into its own SQLite/ChromaDB/highlight-anchor state — a background pass, not a one-time import:
+
+- **Edit an article's body** — the change is picked up, the article re-indexes and re-embeds, and any highlights in that article are re-checked against the new text (shifted anchors follow the edit; anchors that can no longer be located are flagged, never silently dropped or guessed at).
+- **Add a new `.md` file** to `articles/` — it's ingested as a new article (`ingestion_method: external`) and shows up in your inbox.
+- **Delete a file** — the corresponding article is fully removed from Tiro (same cleanup path as deleting from the UI), *unless* the pass looks like a directory got moved or wiped — see the guard below.
+- **Edit a note** — if Tiro's own copy of a note has also changed since the file was last read, the external (vault) version wins; Tiro's version is never discarded, only set aside as `notes/{stem}.conflict-local-{yyyymmdd}.md` for you to review and merge by hand.
+
+This runs automatically every 30 seconds (`reconcile_interval_s` in `config.yaml`, `0` disables it), or on demand via `uv run tiro reconcile [--dry-run] [--json]`. Edits are given two polls to "settle" before being processed, so an editor's temp-file-then-rename save (or a save that's still mid-write) doesn't get picked up half-written.
+
+**External files are never rewritten** — Tiro only reads them. That means your own YAML frontmatter and comments are always safe, but it also means Tiro's AI-derived tags/summary/analysis for an externally-created or externally-edited article live only inside Tiro (SQLite), not written back into the file.
+
+**Guard:** if an entire `articles/` directory appears to have gone missing, or more than `max(10, 20%)` of articles vanish in one pass, reconcile refuses to delete anything and logs a warning instead — protecting you from an accidentally unmounted drive or moved folder being misread as a mass deletion. `tiro doctor` surfaces the resulting drift, and any conflict files it finds, as a report-only census.
 
 ---
 
