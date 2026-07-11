@@ -318,6 +318,15 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
             conn.execute("RELEASE apply_file")
             report.changed += 1
             _detail(report, "changed_files").append(name)
+        # Verified empirically (two-connection test against sqlite3's
+        # legacy transaction handling): since this SAVEPOINT is never
+        # nested inside an explicit BEGIN, SQLite treats it as the
+        # outermost savepoint, so each success-path RELEASE above already
+        # commits that file's writes at the SQLite level (a second
+        # connection can read the update and acquire BEGIN IMMEDIATE
+        # before this line ever runs). This trailing commit() is therefore
+        # a no-op backstop, not the thing making the per-file writes
+        # durable -- the lock window is per-file, not per-pass.
         conn.commit()
     finally:
         conn.close()
@@ -626,6 +635,14 @@ def _notes_conflict_prepass(config: TiroConfig, report: ReconcileReport) -> None
                 file_body = path.read_text()
             except (OSError, UnicodeDecodeError):
                 continue  # reconcile_annotations counts it unreadable
+            # Exact-string coupling: this compares the raw on-disk bytes to
+            # the DB's stored body_markdown verbatim. Any future
+            # newline/whitespace normalization divergence between this
+            # write path and the note write paths (API, importers) could
+            # make an unmodified note look "changed" and spuriously emit a
+            # conflict file here. The equality short-circuit plus the
+            # ROW_LEAD_SLACK_SECONDS check below mitigate false positives
+            # in the common case but don't eliminate this class of bug.
             if row["body_markdown"] == file_body:
                 continue
             row_ts = _parse_ts(row["updated_at"] or "")
