@@ -224,6 +224,102 @@ body.has-lan-banner .content {
     }
 }
 
+/* --- Legacy-library-path suggestion banner (Phase 5 D3) ---
+   Unlike the LAN banner above, this is a NON-fixed, in-flow strip: it scrolls
+   with the page and needs no body-offset math, so it can never collide with
+   the fixed LAN banner's layout reservations if both happen to render. A softer
+   informational look (secondary/olive tone, not the crimson must-read alarm) --
+   this is a one-time nudge, not a security warning. */
+.libmove-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    position: relative;
+    padding: 0.5rem 2.75rem;
+    background: var(--tiro-secondary, #6B7F4E);
+    color: #fff;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    text-align: center;
+}
+
+.libmove-banner-text code {
+    background: rgba(255, 255, 255, 0.18);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.libmove-banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #fff;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    opacity: 0.85;
+}
+
+.libmove-banner-dismiss:hover {
+    opacity: 1;
+}
+
+/* --- Notify-only update banner (Phase 5 D5) ---
+   Same non-fixed, in-flow strip as the libmove banner (scrolls with the page,
+   no body-offset math, can never collide with the fixed LAN banner). A warm
+   gold "an update is available" tone (the link/VIP accent), distinct from the
+   olive one-time nudge and the crimson security warning. Dismissal is
+   per-version (localStorage `tiro-update-dismissed-<version>`), so a new
+   release re-banners. */
+.update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    position: relative;
+    padding: 0.5rem 2.75rem;
+    background: var(--tiro-gold, #B8943E);
+    color: #fff;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    text-align: center;
+}
+
+.update-banner-text a {
+    color: #fff;
+    font-weight: 600;
+    text-decoration: underline;
+}
+
+.update-banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #fff;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    opacity: 0.85;
+}
+
+.update-banner-dismiss:hover {
+    opacity: 1;
+}
+
 /* ============ chrome (sidebar, icon rail, tab bar, mobile header, sheets) === */
 
 /* --- Layout: Sidebar --- */
@@ -5214,4 +5310,168 @@ main {
     display: flex;
     justify-content: center;
     margin-top: 1.5rem;
+}
+
+/* ============================================================================
+   First-run onboarding wizard (welcome.html / welcome.js — Phase 5 M5.1).
+   Standalone page layer (no sidebar chrome), built on the shared primitives
+   (.btn / .onb-field-label) + the --tiro-* theme tokens. Namespaced `onb-` to
+   avoid the remote-access `.wizard-*` classes.
+   ============================================================================ */
+.onb-body {
+    min-height: 100vh;
+    margin: 0;
+    padding: 2rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: var(--tiro-bg);
+    color: var(--tiro-fg);
+    font-family: var(--tiro-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+}
+.onb-card {
+    width: min(92vw, 460px);
+    padding: 2rem 2rem 1.75rem;
+    background: var(--tiro-bg-surface);
+    border: 1px solid var(--tiro-border);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+}
+.onb-head {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+.onb-mark {
+    font-family: var(--tiro-font-serif, Georgia, serif);
+    font-size: 2.25rem;
+    line-height: 1;
+    color: var(--tiro-accent);
+}
+.onb-progress {
+    list-style: none;
+    display: flex;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    flex-wrap: wrap;
+}
+.onb-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--tiro-border);
+    transition: background 0.15s;
+}
+.onb-dot.done { background: var(--tiro-secondary); }
+.onb-dot.active { background: var(--tiro-accent); }
+.onb-error {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.8rem;
+    background: var(--tiro-bg);
+    border-left: 3px solid var(--tiro-tier-must-read);
+    border-radius: 0 6px 6px 0;
+    color: var(--tiro-tier-must-read);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+.onb-error:empty { display: none; }
+.onb-step h1 {
+    margin: 0 0 0.5rem;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-family: var(--tiro-font-serif, Georgia, serif);
+    color: var(--tiro-fg);
+}
+.onb-icon {
+    color: var(--tiro-accent);
+    margin-bottom: 0.5rem;
+}
+.onb-lead {
+    margin: 0 0 1.25rem;
+    font-size: 0.95rem;
+    line-height: 1.55;
+    color: var(--tiro-fg-secondary);
+}
+.onb-field-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tiro-muted);
+    margin-bottom: 0.35rem;
+}
+.onb-input {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    background: var(--tiro-bg);
+    color: var(--tiro-fg);
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.onb-input:focus {
+    border-color: var(--tiro-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tiro-accent) 15%, transparent);
+}
+.onb-hint {
+    margin: -0.5rem 0 1rem;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--tiro-muted);
+}
+.onb-hint code, .onb-lead code {
+    font-size: 0.85em;
+    background: var(--tiro-bg);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+}
+.onb-done {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0 0 1rem;
+    font-size: 0.88rem;
+    color: var(--tiro-secondary);
+}
+.onb-linkcard {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.75rem 0.9rem;
+    margin-bottom: 1.25rem;
+    border: 1px solid var(--tiro-border);
+    border-radius: 10px;
+    background: var(--tiro-bg);
+    color: var(--tiro-accent);
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: border-color 0.15s, background 0.15s;
+}
+.onb-linkcard:hover {
+    border-color: var(--tiro-accent);
+    background: var(--tiro-bg-hover);
+}
+.onb-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+}
+.onb-footer {
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.75rem;
+    font-style: italic;
+    color: var(--tiro-muted);
 }

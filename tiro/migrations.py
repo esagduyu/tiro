@@ -493,6 +493,75 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
 
 
+def pre_migrate_snapshot(config) -> str | None:
+    """Full-library snapshot before a version-crossing migration (spec D4).
+
+    Called from the server-start lifespan and `tiro migrate` BEFORE
+    `run_migrations`. If the DB is behind `LATEST_VERSION` AND already holds
+    real data (an `articles` table — a fresh install is stamped at
+    `LATEST_VERSION` on creation and has nothing to snapshot), take an
+    `auto_backup(config, "pre-migrate")` snapshot and log a prominent WARNING
+    naming the version jump + snapshot path.
+
+    Best-effort by design: a failed snapshot logs a WARNING and returns None —
+    the caller proceeds to migrate regardless, because refusing to start the
+    server (or run the CLI) over a backup hiccup is worse, and
+    `run_migrations` still takes its own pre-migrate `tiro.db` file-copy no
+    matter what. Returns the snapshot path as a string, or None (fresh /
+    up-to-date / snapshot failed). Never raises.
+
+    Note: `auto_backup` returns None BOTH when a snapshot fails AND when
+    backups are disabled by config (`backup_auto_keep <= 0`); the two are
+    distinguished in the logged message so the failure path isn't
+    misread as an error when the user has simply turned auto-backups off.
+    """
+    from tiro.backup import auto_backup
+    from tiro.database import get_connection
+
+    db_path = config.db_path
+    if not db_path.exists():
+        return None
+    conn = get_connection(db_path)
+    try:
+        current = schema_version(conn)
+        has_articles = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
+
+    if current >= LATEST_VERSION or not has_articles:
+        return None
+
+    snapshot = auto_backup(config, "pre-migrate")
+    if snapshot is None:
+        if getattr(config, "backup_auto_keep", 0) <= 0:
+            logger.warning(
+                "Migrating library schema v%d -> v%d: auto-backups are disabled "
+                "(backup_auto_keep=0), so NO pre-migrate snapshot was taken. "
+                "The tiro.db file-copy backup inside run_migrations still applies. "
+                "Proceeding with migration.",
+                current, LATEST_VERSION,
+            )
+        else:
+            logger.warning(
+                "Migrating library schema v%d -> v%d: pre-migrate snapshot FAILED "
+                "— proceeding with migration anyway (the tiro.db file-copy backup "
+                "inside run_migrations still applies).",
+                current, LATEST_VERSION,
+            )
+        return None
+
+    logger.warning(
+        "Migrating library schema v%d -> v%d (snapshot: %s)",
+        current, LATEST_VERSION, snapshot,
+    )
+    return str(snapshot)
+
+
 def run_migrations(db_path: Path, *, backup: bool = True) -> list[str]:
     """Apply pending migrations. Returns list of applied '00N name' strings."""
     from tiro.database import get_connection

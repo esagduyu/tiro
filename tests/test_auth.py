@@ -369,6 +369,22 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         # server-side user data flows through this route. See the route's
         # docstring in tiro/app.py.
         "/offline",
+        # Phase 5 M5.1 (spec D6): the first-run onboarding wizard + its three
+        # setup routes are DELIBERATE, three-way-tested allowlist entries
+        # (full three-way coverage in tests/test_setup_wizard.py). They open
+        # ONLY while `auth_password_hash` is unset — the wizard IS how the
+        # password gets set, exactly the same trust window POST /api/auth/setup
+        # has accepted since Phase 0 (server loopback-bound, passwordless-by-
+        # definition at this moment). The moment a password exists the surface
+        # closes: /welcome then 302s an anonymous visitor to /login, and each
+        # /api/setup/* route 401s (require_auth) — which is why the route-walk
+        # below (run against a CONFIGURED library) sees them gated. They're
+        # allowlisted here so the walk documents them as intentional rather
+        # than silently passing on the configured behavior alone. Security for
+        # the unconfigured window lives in the gate itself (require_setup_access
+        # / the /welcome three-way check), not in a blanket require_auth.
+        "/welcome",
+        "/api/setup/library-path", "/api/setup/ai", "/api/setup/samples",
     }
     ALLOWED_PREFIXES = ("/static", "/library/themes")
     failures = []

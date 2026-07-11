@@ -1,0 +1,176 @@
+{% from "_icons.html" import icon %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tiro ⁊ Welcome</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#C45B3E">
+  <link rel="apple-touch-icon" href="/static/icons/tiro-192.png" sizes="192x192">
+  <link id="theme-css" rel="stylesheet" href="{{ theme_light_href }}"
+        data-light-href="{{ theme_light_href }}" data-dark-href="{{ theme_dark_href }}">
+  <link rel="stylesheet" href="/static/styles.css?v={{ static_v }}">
+  <script>
+    (function () {
+      var mode = localStorage.getItem('tiro-mode');
+      if (!mode) mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      var link = document.getElementById('theme-css');
+      if (mode === 'dark') link.href = link.getAttribute('data-dark-href');
+      document.documentElement.setAttribute('data-theme', mode);
+    })();
+  </script>
+</head>
+<body class="onb-body">
+  <main class="onb-card" data-library-path="{{ library_path }}">
+    <header class="onb-head">
+      <div class="onb-mark" aria-hidden="true">⁊</div>
+      <ol class="onb-progress" id="onb-progress" aria-label="Setup progress"></ol>
+    </header>
+
+    <p class="onb-error" id="onb-error"></p>
+
+    <!-- Step 1: Welcome -->
+    <section class="onb-step" data-step="welcome">
+      <h1>Welcome to Tiro</h1>
+      <p class="onb-lead">A local-first reading OS for the AI age. Let's get your
+        library set up — it takes a minute, and you can skip anything you like.</p>
+      <div class="onb-actions">
+        <button class="btn btn-primary" data-next>Get started</button>
+      </div>
+    </section>
+
+    <!-- Step 2: Library location -->
+    <section class="onb-step" data-step="library" hidden>
+      <div class="onb-icon">{{ icon("library", size=28) }}</div>
+      <h1>Library location</h1>
+      <p class="onb-lead">Your articles live as plain Markdown files in this folder.
+        You own them — with or without Tiro.</p>
+      <label class="onb-field-label" for="library-path-input">Library folder</label>
+      <input type="text" id="library-path-input" class="onb-input" spellcheck="false"
+             autocapitalize="off" autocomplete="off">
+      <p class="onb-hint">You can change this now (before you save anything), or
+        later in <code>config.yaml</code>.</p>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>Skip</button>
+        <button class="btn btn-primary" id="library-save-btn" data-next>Use this folder</button>
+      </div>
+    </section>
+
+    <!-- Step 3: Password (required) -->
+    <section class="onb-step" data-step="password" hidden>
+      <div class="onb-icon">{{ icon("logout", size=28) }}</div>
+      <h1>Set a password</h1>
+      <p class="onb-lead">Tiro requires a password to protect your library. You'll
+        use it to sign in.</p>
+      <div id="password-fields">
+        <label class="onb-field-label" for="onb-password">Password</label>
+        <input type="password" id="onb-password" class="onb-input"
+               placeholder="At least 8 characters" autocomplete="new-password">
+        <label class="onb-field-label" for="onb-confirm">Confirm password</label>
+        <input type="password" id="onb-confirm" class="onb-input"
+               placeholder="Re-enter your password" autocomplete="new-password">
+      </div>
+      <p class="onb-done" id="password-done" hidden>{{ icon("check", size=15) }} Password already set.</p>
+      <div class="onb-actions">
+        <button class="btn btn-primary" id="password-next-btn" data-next>Set password &amp; continue</button>
+      </div>
+    </section>
+
+    <!-- Step 4: AI provider -->
+    <section class="onb-step" data-step="ai" hidden>
+      <div class="onb-icon">{{ icon("zap", size=28) }}</div>
+      <h1>AI provider</h1>
+      <p class="onb-lead">Tiro can use an AI model for digests, tags, and analysis.
+        You choose which — including local ones. This is optional.</p>
+      <label class="onb-field-label" for="ai-provider-select">Provider</label>
+      <select id="ai-provider-select" class="onb-input">
+        <option value="skip">Skip for now</option>
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai-compatible">OpenAI-compatible</option>
+        <option value="claude-cli">Claude CLI (subscription)</option>
+        <option value="codex-cli">Codex CLI (subscription)</option>
+      </select>
+      <div id="ai-key-wrap" hidden>
+        <label class="onb-field-label" for="ai-key-input">API key</label>
+        <input type="password" id="ai-key-input" class="onb-input"
+               placeholder="Paste your API key" autocomplete="off" spellcheck="false">
+        <p class="onb-hint">Stored locally in your config, never sent anywhere but the
+          provider you chose.</p>
+      </div>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>Skip</button>
+        <button class="btn btn-primary" id="ai-save-btn" data-next>Continue</button>
+      </div>
+    </section>
+
+    <!-- Step 5: Email (optional) -->
+    <section class="onb-step" data-step="email" hidden>
+      <div class="onb-icon">{{ icon("message", size=28) }}</div>
+      <h1>Newsletters by email</h1>
+      <p class="onb-lead">Connect a Gmail account and Tiro pulls in the newsletters you
+        subscribe to. Optional — you can set this up any time in Settings.</p>
+      <label class="onb-field-label" for="email-address">Gmail address</label>
+      <input type="email" id="email-address" class="onb-input" placeholder="you@gmail.com"
+             autocomplete="off" spellcheck="false">
+      <label class="onb-field-label" for="email-app-password">App password</label>
+      <input type="password" id="email-app-password" class="onb-input"
+             placeholder="Gmail app password" autocomplete="off">
+      <p class="onb-hint">Use a Gmail app password, not your account password.</p>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>Skip</button>
+        <button class="btn btn-primary" id="email-save-btn" data-next>Connect</button>
+      </div>
+    </section>
+
+    <!-- Step 6: Remote access pointer -->
+    <section class="onb-step" data-step="remote" hidden>
+      <div class="onb-icon">{{ icon("external", size=28) }}</div>
+      <h1>Read from anywhere</h1>
+      <p class="onb-lead">Want to reach your library from your phone or another device?
+        The remote-access wizard walks you through Tailscale or a reverse proxy.</p>
+      <a class="onb-linkcard" href="/setup/remote">
+        <span>Open the remote-access wizard</span>
+        {{ icon("external", size=16) }}
+      </a>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>Skip</button>
+        <button class="btn btn-primary" data-next>Continue</button>
+      </div>
+    </section>
+
+    <!-- Step 7: Chrome extension -->
+    <section class="onb-step" data-step="extension" hidden>
+      <div class="onb-icon">{{ icon("bookmark", size=28) }}</div>
+      <h1>Save from the web</h1>
+      <p class="onb-lead">The Tiro Chrome extension saves the page you're reading with
+        one click. Load it as an unpacked extension from the <code>extension/</code> folder.</p>
+      <a class="onb-linkcard" href="https://github.com/esagduyu/tiro/tree/main/extension"
+         target="_blank" rel="noopener">
+        <span>Extension setup instructions</span>
+        {{ icon("external", size=16) }}
+      </a>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>Skip</button>
+        <button class="btn btn-primary" data-next>Continue</button>
+      </div>
+    </section>
+
+    <!-- Step 8: Sample articles -->
+    <section class="onb-step" data-step="samples" hidden>
+      <div class="onb-icon">{{ icon("file-text", size=28) }}</div>
+      <h1>Start with a couple of samples</h1>
+      <p class="onb-lead">Add two short sample articles so your inbox isn't empty — a
+        quick guide to Tiro and a letter from Cicero to Tiro himself.</p>
+      <p class="onb-done" id="samples-done" hidden>{{ icon("check", size=15) }} Samples added.</p>
+      <div class="onb-actions">
+        <button class="btn btn-ghost" data-skip>No thanks</button>
+        <button class="btn btn-primary" id="samples-add-btn" data-next>Add samples &amp; finish</button>
+      </div>
+    </section>
+  </main>
+
+  <p class="onb-footer">&ldquo;...without you the oracle was dumb.&rdquo; &mdash; Cicero to Tiro, 53 BC</p>
+
+  <script type="module" src="/static/js/welcome.js?v={{ static_v }}"></script>
+</body>
+</html>

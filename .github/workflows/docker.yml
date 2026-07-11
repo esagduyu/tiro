@@ -1,0 +1,60 @@
+name: Docker image
+
+# Publishes the official multi-arch (amd64 + arm64) image to
+# ghcr.io/esagduyu/tiro. Runs ONLY on a version tag push (v*) — never on
+# branch pushes, so a merge to main never publishes. workflow_dispatch is
+# included for the owner's first supervised run (see the Phase 5 owner
+# runbook: the FIRST live push also requires verifying the repo's Actions
+# package-write permission + package visibility).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/esagduyu/tiro
+          # From a git tag v0.7.0 this yields the mutable, watchtower-friendly
+          # tags: 0.7.0, 0.7, and latest. `latest` only moves on non-prerelease
+          # semver tags (a v0.7.0-rc1 tag would publish 0.7.0-rc1 but not bump
+          # latest), so an rc never becomes the default self-hoster pull.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

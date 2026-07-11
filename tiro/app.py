@@ -14,10 +14,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from tiro import __version__, auth
+from tiro import __version__, auth, update_check
 from tiro.config import TiroConfig, load_config
 from tiro.database import dir_bytes, get_connection, init_db, migrate_db
 from tiro.decay import recalculate_decay
+from tiro.migrations import pre_migrate_snapshot
+from tiro.paths import platform_default_library
 from tiro.scheduler import PeriodicTask, Scheduler
 from tiro.vectorstore import init_vectorstore
 
@@ -27,7 +29,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "67"
+STATIC_VERSION = "68"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -56,11 +58,34 @@ def _theme_context(request: Request) -> dict:
     page-context flag rather than threading a new kwarg through every route
     handler individually."""
     config = request.app.state.config
-    return {
+    ctx = {
         "theme_light_href": _theme_href(config, config.theme_light, "papyrus"),
         "theme_dark_href": _theme_href(config, config.theme_dark, "roman-night"),
         "insecure_lan_http": getattr(request.app.state, "insecure_lan_http", False),
+        "library_at_legacy_default": _library_at_legacy_default(config),
     }
+    # Notify-only update banner (Phase 5 D5): reads app.state.update_state
+    # (populated by the run-first update_check PeriodicTask) and injects
+    # update_available/update_version/update_url — positive only when a
+    # strictly-newer release than __version__ is held, so base.html renders
+    # zero banner DOM otherwise (LAN-banner pattern).
+    ctx.update(update_check.update_context(getattr(request.app.state, "update_state", None)))
+    return ctx
+
+
+def _library_at_legacy_default(config: TiroConfig) -> bool:
+    """True when the effective library resolves to the legacy CWD-relative
+    `./tiro-library` default AND the platform-standard location is not in use
+    (spec D3). Drives base.html's dismissible migrate-library suggestion banner.
+    The check is purely cosmetic — a resolve() comparison against the CWD, never
+    a filesystem mutation — so any surprise (e.g. a symlink oddity) degrades to
+    "no banner", never an error on a page render."""
+    try:
+        lib = config.library
+        legacy = (Path.cwd() / "tiro-library").resolve()
+        return lib == legacy and lib != platform_default_library().resolve()
+    except OSError:
+        return False
 
 
 def _qr_svg(data: str) -> str:
@@ -264,6 +289,34 @@ def _make_rss_task(config: TiroConfig) -> PeriodicTask:
     return PeriodicTask("rss", run_once, next_delay)
 
 
+def _make_update_check_task(app: FastAPI, config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the notify-only update check (Phase 5 D5).
+
+    Run-first (`first_delay=False`) so a fresh start learns about a release
+    within seconds; a fixed 24 h delay thereafter. `backoff=False`: at one
+    check/day a loop-level backoff multiplier buys nothing, and `fetch_latest`
+    already absorbs its own failures (never raises, leaves state unchanged), so
+    the loop should keep its steady daily cadence. The work runs in a thread
+    (blocking httpx). State lives on `app.state.update_state`; read fresh each
+    cycle and written back so `_theme_context` sees the latest held result."""
+
+    def next_delay() -> float:
+        return float(update_check.UPDATE_CHECK_INTERVAL_SECONDS)
+
+    async def run_once() -> None:
+        # Module-attribute access (not a bound import) so the test-suite autouse
+        # stub of update_check.fetch_latest takes effect and the suite stays
+        # offline.
+        new_state = await asyncio.to_thread(
+            update_check.fetch_latest, config, getattr(app.state, "update_state", None)
+        )
+        app.state.update_state = new_state
+
+    return PeriodicTask(
+        "update_check", run_once, next_delay, first_delay=False, backoff=False
+    )
+
+
 def _compute_sleep_until(time_str: str, tz_offset_minutes: int) -> float:
     """Compute seconds until next occurrence of HH:MM in user's timezone.
 
@@ -356,8 +409,13 @@ async def lifespan(app: FastAPI):
     (config.library / "audio").mkdir(parents=True, exist_ok=True)
     config.wiki_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize SQLite + run migrations
+    # Initialize SQLite + run migrations. Before migrating an existing library
+    # that is behind the latest schema, take a full auto_backup snapshot and log
+    # a prominent WARNING (spec D4) — best-effort: a failed snapshot warns and
+    # migration proceeds (refusing to start the server over a backup hiccup is
+    # worse; run_migrations still takes its own tiro.db file-copy regardless).
     init_db(config.db_path)
+    pre_migrate_snapshot(config)
     migrate_db(config.db_path)
 
     # Reconcile the wiki derived index (Phase 1b) from what's on disk (files
@@ -401,6 +459,11 @@ async def lifespan(app: FastAPI):
     app.state.digest_task = None
     app.state.vector_retry_task = None
     app.state.rss_task = None
+    app.state.update_check_task = None
+    # In-memory update-check result (Phase 5 D5): {etag, latest_version,
+    # html_url, checked_at}. Always present (even with the check disabled) so
+    # _theme_context/healthz/`tiro status` can read it unconditionally.
+    app.state.update_state = {}
     # Single-slot background importer job report (M4.2); None until one runs.
     app.state.import_job = None
 
@@ -426,6 +489,14 @@ async def lifespan(app: FastAPI):
     if config.rss_enabled:
         scheduler.start_periodic("rss", _make_rss_task(config))
         logger.info("RSS poll started: every %d minutes", config.rss_default_interval_minutes)
+
+    # Notify-only update check (Phase 5 D5). Registered only when
+    # update_check_enabled (default True) — the kill switch. Run-first, so the
+    # first check fires shortly after startup, then daily.
+    if config.update_check_enabled:
+        scheduler.start_periodic("update_check", _make_update_check_task(app, config))
+        logger.info("Update check started: every %d hours",
+                    update_check.UPDATE_CHECK_INTERVAL_SECONDS // 3600)
 
     # mDNS/Bonjour advertisement (Phase 3 M3.0): opt-in, and only meaningful
     # when the server is actually reachable from other devices on the LAN
@@ -671,6 +742,8 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_search import router as search_router
     from tiro.api.routes_sessions import router as sessions_router
     from tiro.api.routes_settings import router as settings_router
+    from tiro.api.routes_setup import require_setup_access
+    from tiro.api.routes_setup import router as setup_router
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
     from tiro.api.routes_tokens import router as tokens_router
@@ -688,6 +761,13 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])
+
+    # First-run onboarding setup routes (Phase 5 M5.1): gated
+    # unconfigured-OR-authenticated (see routes_setup.require_setup_access) —
+    # the pre-password steps must work with no session, exactly the trust
+    # window POST /api/auth/setup already accepts, and the surface closes the
+    # moment a password exists.
+    app.include_router(setup_router, dependencies=[Depends(require_setup_access)])
 
     # Static files and templates
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
@@ -838,6 +918,14 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         # `tasks` above stays as the back-compat boolean liveness readout.
         sched = getattr(app.state, "scheduler", None)
         body["periodic"] = sched.periodic_status() if sched else {}
+        # Additive (Phase 5 D5): notify-only update-check state.
+        us = getattr(app.state, "update_state", None) or {}
+        body["update"] = {
+            **update_check.update_context(us),
+            "enabled": config.update_check_enabled,
+            "latest_version": us.get("latest_version"),
+            "checked_at": us.get("checked_at"),
+        }
         return body
 
     @app.get("/login", response_class=HTMLResponse)
@@ -872,10 +960,42 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/welcome", response_class=HTMLResponse)
+    async def welcome_page(request: Request):
+        """First-run onboarding wizard (Phase 5 M5.1, spec D6). Three-way gate,
+        a DELIBERATE allowlist entry in tests/test_auth.py (documented like
+        /login/qr):
+          - unconfigured  -> serve to anyone (the wizard IS how the password
+            gets set; the server is loopback-bound and passwordless-by-
+            definition at this moment — the same trust window POST
+            /api/auth/setup already accepts);
+          - configured + authenticated -> serve (revisitable; later steps stay
+            useful post-setup);
+          - configured + no session -> 302 /login (the wizard is not a bypass).
+        The password step posts to the existing POST /api/auth/setup unchanged,
+        which mints the session every step after it rides."""
+        from fastapi.responses import RedirectResponse
+
+        config = request.app.state.config
+        if config.auth_password_hash and not auth._cookie_authenticated(request):
+            return RedirectResponse(url="/login", status_code=302)
+        return templates.TemplateResponse(
+            request,
+            "welcome.html",
+            {"library_path": str(config.library), **_theme_context(request)},
+        )
+
     @app.exception_handler(auth.NotAuthenticated)
     async def _not_authenticated(request: Request, exc: auth.NotAuthenticated):
+        """Page-auth redirect. Phase 5 D6: an UNCONFIGURED visitor (no password
+        set yet) lands in the first-run wizard at /welcome rather than /login —
+        a login page would only bounce them, since there's no password to enter.
+        Once a password exists, the normal /login redirect applies."""
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/login", status_code=302)
+
+        config = request.app.state.config
+        target = "/login" if config.auth_password_hash else "/welcome"
+        return RedirectResponse(url=target, status_code=302)
 
     @app.get("/", response_class=HTMLResponse)
     async def index_redirect():

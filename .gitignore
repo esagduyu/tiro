@@ -16,8 +16,9 @@ tiro-library/
 .envrc
 config.yaml
 
-# docs for superpower plans
-docs/
+# docs for superpower plans (local-only), except the committed owner runbook
+docs/*
+!docs/RUNBOOK-desktop.md
 
 # Playwright
 playwright-tests/*
@@ -42,3 +43,10 @@ tmp/
 
 # Design reference (local-only, not shipped)
 Tiro Design System.html
+# Phase 5 desktop build artifacts (M5.0) — root build//dist/ already covered above
+desktop/pyinstaller/build/
+desktop/pyinstaller/dist/
+# Tauri shell build artifacts (M5.1) — sources tracked, build output not
+desktop/tauri/node_modules/
+desktop/tauri/src-tauri/target/
+desktop/tauri/src-tauri/gen/

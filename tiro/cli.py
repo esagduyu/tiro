@@ -21,7 +21,8 @@ def cmd_init(args):
 
     # Generate config.yaml from example template if it doesn't exist
     root_config = Path(args.config)
-    if not root_config.exists():
+    created_new = not root_config.exists()
+    if created_new:
         example = Path(__file__).resolve().parent.parent / "config.example.yaml"
         if example.exists():
             shutil.copy(example, root_config)
@@ -35,6 +36,19 @@ def cmd_init(args):
             print(f"Created {root_config}")
 
     config = load_config(args.config)
+
+    # D2: a NEWLY created config gets the platform-standard library location
+    # written into it (both the template-copy and minimal-fallback paths above).
+    # Existing config files are NEVER touched — their library_path is
+    # authoritative. DEFAULTS["library_path"] deliberately stays ./tiro-library
+    # (see tiro/paths.py); the platform default enters only through this writer.
+    if created_new:
+        from tiro.config import persist_config
+        from tiro.paths import platform_default_library
+
+        persist_config(config, {"library_path": str(platform_default_library())})
+        config = load_config(args.config)  # reload so config.library reflects it
+        print(f"Library location set to {config.library}")
 
     config.library.mkdir(parents=True, exist_ok=True)
     config.articles_dir.mkdir(parents=True, exist_ok=True)
@@ -663,16 +677,86 @@ def cmd_doctor(args):
     sys.exit(1 if failed else 0)
 
 
+def cmd_migrate_library(args):
+    """Copy the library to a new location (spec D3). The old copy is NEVER
+    deleted — the user removes it manually after verifying."""
+    import socket
+
+    from tiro.config import load_config
+    from tiro.library_move import MigrationError, migrate_library
+    from tiro.paths import platform_default_library
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    dest = Path(args.dest).resolve() if args.dest else platform_default_library()
+    source = config.library
+
+    if dest == source:
+        print(f"Library is already at {dest} — nothing to migrate.")
+        sys.exit(0)
+
+    # Best-effort port-in-use warning: copying a live library corrupts it.
+    try:
+        with socket.create_connection((config.host, config.port), timeout=1):
+            print(
+                f"WARNING: something is listening on {config.host}:{config.port}. "
+                "Stop the Tiro server before migrating — copying a live "
+                "ChromaDB/SQLite mid-write can corrupt the copy."
+            )
+    except OSError:
+        pass
+
+    if not args.yes:
+        answer = input(
+            f"Copy the library from {source} to {dest}?\n"
+            "The OLD copy is never deleted — you remove it yourself after "
+            "verifying the new location. [y/N] "
+        )
+        if answer.strip().lower() != "y":
+            print("Aborted.")
+            sys.exit(1)
+
+    try:
+        report = migrate_library(config, dest)
+    except MigrationError as e:
+        print(f"Migration aborted: {e}")
+        sys.exit(1)
+
+    if report["status"] == "already_at_destination":
+        print(f"Library is already at {dest} — nothing to migrate.")
+        sys.exit(0)
+
+    print(
+        f"Copied {report['files_copied']} files ({report['bytes_copied']} bytes) "
+        f"to {dest}."
+    )
+    if report.get("config_relocated_to"):
+        print(
+            f"Your config lived inside the library and was relocated to "
+            f"{report['config_relocated_to']} — it is safe to remove the old library."
+        )
+    print(
+        f"Old library preserved at {report['source']} — verify the new "
+        "location, then remove the old copy yourself."
+    )
+    sys.exit(0)
+
+
 def cmd_migrate(args):
     """Apply pending database migrations."""
     from tiro.config import load_config
-    from tiro.migrations import run_migrations
+    from tiro.migrations import pre_migrate_snapshot, run_migrations
 
     config = getattr(args, "_config_override", None) or load_config(args.config)
     if not config.db_path.exists():
         print("No Tiro library found. Run `uv run tiro init` first.")
         sys.exit(1)
 
+    # Symmetry with server-start (spec D4): full snapshot before a
+    # version-crossing migration. Best-effort; prints the snapshot path when one
+    # was taken so the user knows the rollback point.
+    snapshot = pre_migrate_snapshot(config)
+    if snapshot:
+        print(f"Pre-migrate snapshot: {snapshot}")
     applied = run_migrations(config.db_path)
     if applied:
         for line in applied:
@@ -680,6 +764,22 @@ def cmd_migrate(args):
     else:
         print("No pending migrations.")
     sys.exit(0)
+
+
+def cmd_service(args):
+    """Install/manage Tiro as a background service (launchd / systemd user unit).
+
+    Targets the CLI/uv install — the Tauri desktop app manages its own sidecar
+    and must not also be run as a service (install one or the other).
+    """
+    from tiro import service
+    from tiro.config import load_config
+
+    config = getattr(args, "_config_override", None) or load_config(args.config)
+    rc = service.dispatch(
+        args.service_command, config, follow=getattr(args, "follow", False)
+    )
+    sys.exit(rc)
 
 
 def cmd_audit(args):
@@ -764,7 +864,8 @@ def cmd_status(args):
           f"Digest schedule: {'on' if config.digest_schedule_enabled else 'off'}")
     mdns_status = f"on ({config.mdns_hostname}.local)" if config.mdns_enabled else "disabled"
     remote_status = config.remote_url if config.remote_url else "not set"
-    print(f"mDNS: {mdns_status} | Remote URL: {remote_status}")
+    update_status = "on" if config.update_check_enabled else "off"
+    print(f"mDNS: {mdns_status} | Remote URL: {remote_status} | Update check: {update_status}")
 
     from tiro.llm import resolve_tier
     from tiro.llm_cli import check_cli_backend
@@ -926,6 +1027,29 @@ def main():
 
     subparsers.add_parser("migrate", help="Apply pending database migrations")
 
+    migrate_lib_parser = subparsers.add_parser(
+        "migrate-library",
+        help="Copy the library to a new location (old copy is never deleted)",
+    )
+    migrate_lib_parser.add_argument(
+        "dest", nargs="?",
+        help="Destination directory (default: platform-standard location)",
+    )
+    migrate_lib_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt",
+    )
+
+    service_parser = subparsers.add_parser(
+        "service",
+        help="Run Tiro at login as a background service (launchd / systemd)",
+    )
+    service_sub = service_parser.add_subparsers(dest="service_command", required=True)
+    service_sub.add_parser("install", help="Install + start the service (survives reboot)")
+    service_sub.add_parser("uninstall", help="Stop + remove the service")
+    service_sub.add_parser("status", help="Show service state + /healthz probe")
+    service_logs = service_sub.add_parser("logs", help="Show the service log")
+    service_logs.add_argument("--follow", "-f", action="store_true", help="Stream new log lines")
+
     audit_parser = subparsers.add_parser("audit", help="Show the external-API audit log")
     audit_group = audit_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--date", help="Day to show (YYYY-MM-DD, default today)")
@@ -993,6 +1117,10 @@ def main():
         cmd_status(args)
     elif args.command == "migrate":
         cmd_migrate(args)
+    elif args.command == "migrate-library":
+        cmd_migrate_library(args)
+    elif args.command == "service":
+        cmd_service(args)
     else:
         parser.print_help()
         sys.exit(1)

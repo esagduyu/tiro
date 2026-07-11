@@ -700,6 +700,60 @@ function setupLanBanner() {
     });
 }
 
+/* ---- Legacy-library-path suggestion banner (Phase 5 D3) ----
+   Nudges an existing install whose library still sits at the old CWD-relative
+   ./tiro-library default toward `tiro migrate-library`. The element only exists
+   in the DOM when the server decided library_at_legacy_default is true
+   (base.html Jinja conditional) -- so this just wires the dismiss button and
+   hides it after a prior dismissal. Dismissal is PERMANENT per-browser
+   (localStorage, unlike the LAN banner's sessionStorage): this is a one-time
+   suggestion, not a per-session security warning that should keep reappearing. */
+
+const LIBMOVE_BANNER_DISMISSED_KEY = "tiro-libmove-dismissed";
+
+function setupLibmoveBanner() {
+    const banner = document.getElementById("libmove-banner");
+    if (!banner) return;
+
+    if (localStorage.getItem(LIBMOVE_BANNER_DISMISSED_KEY) === "1") {
+        banner.style.display = "none";
+        return;
+    }
+
+    document.getElementById("libmove-banner-dismiss")?.addEventListener("click", () => {
+        localStorage.setItem(LIBMOVE_BANNER_DISMISSED_KEY, "1");
+        banner.style.display = "none";
+    });
+}
+
+/* ---- Notify-only update banner (Phase 5 D5) ----
+   The element only exists in the DOM when the server decided a strictly-newer
+   release is available (base.html Jinja conditional). Dismissal is keyed PER
+   VERSION (`tiro-update-dismissed-<version>`, from the banner's
+   data-update-version): a dismissed release stays dismissed, but the NEXT
+   release re-banners because its key differs. localStorage (not sessionStorage)
+   so a dismissal persists across sessions for that one version. */
+
+const UPDATE_BANNER_DISMISSED_PREFIX = "tiro-update-dismissed-";
+
+function setupUpdateBanner() {
+    const banner = document.getElementById("update-banner");
+    if (!banner) return;
+
+    const version = banner.dataset.updateVersion || "";
+    const key = UPDATE_BANNER_DISMISSED_PREFIX + version;
+
+    if (localStorage.getItem(key) === "1") {
+        banner.style.display = "none";
+        return;
+    }
+
+    document.getElementById("update-banner-dismiss")?.addEventListener("click", () => {
+        localStorage.setItem(key, "1");
+        banner.style.display = "none";
+    });
+}
+
 /* ---- Add-to-Home-Screen hint (M3.1 Task 3) ----
    A one-time, dismissable nudge -- NOT a beforeinstallprompt capture (that
    event is Chromium-only, non-standard, and effectively unsupported on iOS
@@ -906,6 +960,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // LAN-over-HTTP warning banner
     setupLanBanner();
+
+    // Legacy-library-path suggestion banner (Phase 5 D3)
+    setupLibmoveBanner();
+
+    // Notify-only update banner (Phase 5 D5)
+    setupUpdateBanner();
 
     // Offline save queue (M3.1 Task 3): reflect whatever survived from a
     // prior page load, then try to drain it right away -- covers the "user

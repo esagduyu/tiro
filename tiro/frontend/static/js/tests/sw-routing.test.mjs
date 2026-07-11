@@ -49,6 +49,9 @@ test("swRouteFor: auth/setup surfaces never fall back to /offline, even as navig
     assert.equal(swRouteFor("https://tiro.local/logout", "GET", "navigate"), "network-only");
     assert.equal(swRouteFor("https://tiro.local/setup/qr", "GET", "navigate"), "network-only");
     assert.equal(swRouteFor("https://tiro.local/setup/remote", "GET", "navigate"), "network-only");
+    // /welcome is the first-run onboarding wizard — a failed nav must NOT
+    // serve /offline mid-setup (M3.1 NEVER_FALLBACK convention).
+    assert.equal(swRouteFor("https://tiro.local/welcome", "GET", "navigate"), "network-only");
 });
 
 test("swRouteFor: non-navigation same-origin fetches to app pages are network-only (not fallback-eligible)", () => {

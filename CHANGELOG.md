@@ -10,6 +10,97 @@ day the release was tagged.
 - Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
   decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
 
+## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
+
+Tiro becomes something you install, not just something you run from a terminal:
+a double-clickable macOS app that bundles the whole server, a first-run
+onboarding wizard, platform-standard library locations with a safe migration
+tool, a background service for run-at-login, and an official multi-arch Docker
+image on GitHub Container Registry. `STATIC_VERSION` 67 → 68.
+
+### Added — Desktop app (macOS beta)
+- **PyInstaller server binary** (`desktop/pyinstaller/`) — the full FastAPI
+  server frozen as a onedir bundle (`tiro-server`), embedding-model included so
+  the first launch reaches a working, offline vector store with no unexplained
+  Hugging Face download. The `all-MiniLM-L6-v2` snapshot is staged into the
+  bundle and copied into the standard HF hub cache on first launch **iff
+  absent** (`tiro/model_cache.py`); overriding `default_embedding_model` still
+  downloads normally. The `.spec` stages the snapshot under its **true file
+  names** (not blob hashes), so it loads fully offline — enforced by
+  `desktop/pyinstaller/smoke.sh`, which boots the binary with
+  `HF_HUB_OFFLINE=1` and an empty `HF_HOME` and round-trips an ingest +
+  semantic search.
+- **Tauri desktop shell** (`desktop/tauri/`) — a native window wrapping the
+  bundled server as a sidecar. It bootstraps a platform config, prefers port
+  8000 (falls back to a free port if occupied — the one case the Chrome
+  extension's hardcoded `localhost:8000` can't reach, documented), polls
+  `/healthz` before opening the window, and kills the sidecar's whole process
+  group on quit. Built **unsigned** for 0.7.0 (Gatekeeper right-click-Open);
+  Developer ID signing + notarization ship as an owner runbook.
+- **First-run onboarding wizard** (`GET /welcome`, `js/welcome.js`,
+  `welcome.html`) — a web-served, skippable wizard that extends the existing
+  `/login` setup spine: Welcome → Library location → Password (required) → AI
+  provider + key → Email → Remote-access pointer → Chrome-extension card →
+  Sample articles → Finish. New setup routes under `tiro/api/routes_setup.py`
+  (`POST /api/setup/library-path`, `/api/setup/ai`, `/api/setup/samples`) share
+  an unconfigured-OR-authenticated gate. Unconfigured page-auth redirects now
+  land at `/welcome` rather than a `/login` that would only bounce.
+
+### Added — Library location & migration
+- **Platform-default library paths** (`tiro/paths.py`) — `tiro init` and the
+  desktop app write a platform-standard `library_path` into newly-created
+  config files (macOS `~/Library/Application Support/Tiro`, Linux
+  `$XDG_DATA_HOME/tiro`, Windows `%APPDATA%\Tiro`). The dataclass default stays
+  `./tiro-library`, so **no existing install is ever silently re-pointed**.
+- **`tiro migrate-library [dest]`** (`tiro/library_move.py`) — copy-then-
+  confirm, **never-remove** migration: `auto_backup` first (a failed backup
+  aborts), copy every store, verify path-set + per-file size equality, then the
+  single `persist_config` write re-pointing `library_path`. Interrupted runs
+  leave a marker and restart cleanly from scratch; the source is never touched.
+  A dismissible inbox banner points legacy-default installs at the command.
+
+### Added — Migrate-on-start & update check
+- **Migrate-on-start hardening** — before applying schema migrations, a start
+  that crosses a schema version on a library with real data takes an
+  `auto_backup("pre-migrate")` snapshot and logs the `vN → vM` transition.
+  Non-interactive by design (a double-clicked app has no TTY); `tiro migrate`
+  gained the same snapshot for symmetry.
+- **Notify-only update check** (`tiro/update_check.py`) — a scheduler-registered
+  daily `PeriodicTask` queries the GitHub Releases API (ETag-cached, 10s
+  timeout, one audit line per check), compares against `tiro.__version__`, and
+  surfaces a dismissible "update available" banner (per-version dismissal),
+  plus the authenticated `/healthz` detail and `tiro status`. Notify-only — it
+  never downloads. Kill switch: `update_check_enabled: false` (default True);
+  documented as the app's only phone-home.
+
+### Added — Service & distribution
+- **`tiro service install|uninstall|status|logs`** — run Tiro at login as a
+  background service: a launchd user agent (macOS), a systemd **user** unit
+  (Linux), and a printed nssm recipe (Windows, documented-not-built). Targets
+  the resolved absolute executable + absolute `--config`, so it's
+  working-directory-independent.
+- **Official Docker image on ghcr** (`.github/workflows/docker.yml`) — a
+  tag-triggered (`push: tags: ["v*"]`, plus `workflow_dispatch` for the owner's
+  supervised first push) multi-arch (amd64 + arm64) build publishing
+  `ghcr.io/esagduyu/tiro` with `X.Y.Z` / `X.Y` / `latest` tags. `ci.yml`
+  untouched; the compose template now references the registry image (build-it-
+  yourself still works). Container auth without a TTY: set
+  `TIRO_AUTH_PASSWORD_HASH` (a bcrypt hash) via the `TIRO_*` env overlay.
+
+### Changed
+- Version `0.6.0` → `0.7.0`; `STATIC_VERSION` 67 → 68 (the phase's one bump).
+- README gained "Install Tiro", "Where your library lives", "Run at login", and
+  "Updates" sections; CLAUDE.md gained a Desktop packaging (Phase 5) conventions
+  bullet, the new endpoint/CLI rows, and a 0.7.0 status line.
+
+### Fixed
+- **Long-standing `test_backup` flake resolved** (`tests/conftest.py`) — the
+  intermittent mid-suite ChromaDB failure was rooted in chromadb's
+  process-wide `SharedSystemClient` cache holding System objects past a test's
+  lifetime and hitting a file-descriptor ceiling. The fixture now clears the
+  cache after each test (`SharedSystemClient.clear_system_cache()`, guarded),
+  freeing the held clients — a real test-durability win, not just a re-roll.
+
 ## [0.6.0] — `feeds-beta` (Phase 4: RSS & imports)
 
 Recurring ingestion arrives: subscribe to RSS/Atom feeds, bulk-import an

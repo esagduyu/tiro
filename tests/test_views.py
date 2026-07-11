@@ -254,5 +254,7 @@ def test_static_version_bumped_for_saved_views_ui():
     # under the old "64" pin), then 65 -> 66 in the design-pass Task 11
     # closeout sweep (final glyph sweep landed under the old "65" pin), then
     # 66 -> 67 in the Phase 4 (0.6.0 feeds-beta) closeout (feeds/import UI +
-    # reader progress ResizeObserver landed under the old "66" pin).
-    assert STATIC_VERSION == "67"
+    # reader progress ResizeObserver landed under the old "66" pin), then
+    # 67 -> 68 in Phase 5 M5.0 Task 2 (legacy-library-path suggestion banner
+    # landed in sidebar.js/base.html/styles.css under the old "67" pin).
+    assert STATIC_VERSION == "68"

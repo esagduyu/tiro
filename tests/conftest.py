@@ -19,6 +19,39 @@ def _no_external_apis(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_update_check(monkeypatch):
+    # The update-check loop (Phase 5 D5) runs run-first on every app startup and
+    # unconditionally does a GET to GitHub. Stub the network worker so the whole
+    # suite stays offline — no test accidentally phones home (and no GitHub rate
+    # limit / flake). Patches the MODULE ATTRIBUTE, which app.py reads via
+    # `update_check.fetch_latest(...)` (module access, not a bound import), so
+    # the stub takes effect. The dedicated update-check tests capture the real
+    # function at import time and call it directly with an injected transport.
+    monkeypatch.setattr(
+        "tiro.update_check.fetch_latest",
+        lambda config, state, **kw: dict(state or {}),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_chroma_system_cache():
+    # Root fix for the months-old test_backup flake family (Phase 5 T3 fold-in):
+    # chromadb's SharedSystemClient keeps a process-wide cache of System objects
+    # keyed by settings; across many isolated temp-library tests those leak and
+    # their background tokio threads accumulate, occasionally surfacing as a
+    # spurious ChromaDB error mid-suite. Clearing the cache after each test frees
+    # the held clients. Guarded try/except: this is best-effort hygiene and must
+    # never itself fail a test (the API is internal and could move).
+    yield
+    try:
+        from chromadb.api.client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="session")
 def shared_embedding_fn():
     # Loading all-MiniLM-L6-v2 takes seconds; share one instance per session.
