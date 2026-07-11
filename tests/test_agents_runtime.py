@@ -5,6 +5,7 @@ import ast
 import json as _json
 import os
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -384,3 +385,162 @@ def test_ctx_result_prune_only(initialized_library, tmp_path):
     assert r.run_uid == "01CTX"
     r2 = ctx.result(EchoOutput(text="y"))     # default = all accumulated
     assert r2.citations == [uid]
+
+
+# --- Task 4 fix wave: search/wiki/similar coverage ---
+
+
+def test_ctx_search_backfills_uids_and_cites_in_order(
+    initialized_library, tmp_path, monkeypatch
+):
+    aid1, uid1 = _seed_article(initialized_library, title="First Hit")
+    aid2, uid2 = _seed_article(initialized_library, title="Second Hit")
+
+    fake_results = [
+        {"id": aid1, "title": "First Hit", "similarity_score": 0.9},
+        {"id": aid2, "title": "Second Hit", "similarity_score": 0.5},
+    ]
+
+    def fake_search_articles(q, config, limit=10):
+        assert q == "foo"
+        assert limit == 3
+        return fake_results
+
+    monkeypatch.setattr(
+        "tiro.search.semantic.search_articles", fake_search_articles
+    )
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    results = ctx.search("foo", limit=3)
+    tw.close()
+
+    assert [r["uid"] for r in results] == [uid1, uid2]
+    assert ctx.citations == [uid1, uid2]
+
+    lines = _read_trace(tmp_path / "ctx-test.jsonl")
+    tool_lines = [ln for ln in lines if ln["kind"] == "tool"]
+    assert tool_lines[0]["name"] == "search"
+    assert tool_lines[0]["args"] == {"q": "foo", "limit": 3}
+
+
+def test_ctx_get_wiki_page_cites_article_uids(
+    initialized_library, tmp_path, monkeypatch
+):
+    _aid, uid = _seed_article(initialized_library, title="Wiki Subject")
+
+    fake_page = {
+        "slug": "entities/some-person",
+        "title": "Some Person",
+        "article_uids": [uid],
+    }
+
+    monkeypatch.setattr(
+        "tiro.wiki.read_page",
+        lambda config, slug: fake_page if slug == "entities/some-person" else None,
+    )
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    page = ctx.get_wiki_page("entities/some-person")
+    tw.close()
+
+    assert page == fake_page
+    assert ctx.citations == [uid]
+
+    lines = _read_trace(tmp_path / "ctx-test.jsonl")
+    tool_lines = [ln for ln in lines if ln["kind"] == "tool"]
+    assert tool_lines[0]["name"] == "get_wiki_page"
+    assert tool_lines[0]["args"] == {"slug": "entities/some-person"}
+
+
+def test_ctx_get_wiki_page_none_cites_nothing_but_still_traces(
+    initialized_library, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("tiro.wiki.read_page", lambda config, slug: None)
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    page = ctx.get_wiki_page("entities/missing")
+    tw.close()
+
+    assert page is None
+    assert ctx.citations == []
+
+    lines = _read_trace(tmp_path / "ctx-test.jsonl")
+    tool_lines = [ln for ln in lines if ln["kind"] == "tool"]
+    assert tool_lines[0]["name"] == "get_wiki_page"
+    assert tool_lines[0]["args"] == {"slug": "entities/missing"}
+
+
+def test_ctx_similar_articles_maps_similarity_and_cites_both(
+    initialized_library, tmp_path, monkeypatch
+):
+    aid1, uid1 = _seed_article(initialized_library, title="Anchor Article")
+    aid2, uid2 = _seed_article(initialized_library, title="Related Article")
+
+    def fake_find_related_articles(article_id, config, limit=5):
+        assert article_id == aid1
+        assert limit == 5
+        return [{"related_article_id": aid2, "similarity_score": 0.87}]
+
+    monkeypatch.setattr(
+        "tiro.search.semantic.find_related_articles", fake_find_related_articles
+    )
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    out = ctx.similar_articles(uid1, k=5)
+    tw.close()
+
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["id"] == aid2
+    assert entry["uid"] == uid2
+    assert entry["title"] == "Related Article"
+    assert "summary" in entry
+    assert entry["similarity"] == 0.87
+
+    # anchor article's uid is cited (via the internal get_article call),
+    # then the related article's uid, in that order.
+    assert ctx.citations == [uid1, uid2]
+
+    lines = _read_trace(tmp_path / "ctx-test.jsonl")
+    tool_lines = [ln for ln in lines if ln["kind"] == "tool"]
+    tool_names = [ln["name"] for ln in tool_lines]
+    assert "get_article" in tool_names
+    assert "similar_articles" in tool_names
+    similar_line = [ln for ln in tool_lines if ln["name"] == "similar_articles"][0]
+    assert similar_line["args"] == {"article_uid": uid1, "k": 5}
+
+
+def test_ctx_get_highlights_accepts_real_production_timestamp_format(
+    initialized_library, tmp_path
+):
+    """created_at rows in production are written via
+    tiro.annotations._now_iso() as '%Y-%m-%dT%H:%M:%SZ' (real 'T'/'Z' ISO,
+    not SQLite's datetime('now') space-separated format used by the sibling
+    test above). Guards the days= cutoff string comparison against the
+    actual row shape highlights land in."""
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    aid, uid = _seed_article(initialized_library)
+    recent = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute(
+            """INSERT INTO highlights (uid, article_id, quote_text, prefix_context,
+               suffix_context, text_position_start, text_position_end, color,
+               content_hash, created_at, updated_at)
+               VALUES (?, ?, 'Realistic Q', '', '', 0, 1, 'yellow', 'h', ?, ?)""",
+            (new_ulid(), aid, recent, recent),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    rows = ctx.get_highlights(days=7, limit=50)
+    tw.close()
+
+    assert len(rows) == 1
+    assert rows[0]["quote"] == "Realistic Q"
+    assert rows[0]["article_id"] == aid
+    assert ctx.citations == [uid]
