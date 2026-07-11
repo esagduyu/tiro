@@ -10,6 +10,7 @@ SCHEMA = """
 -- Sources (domains, newsletter senders)
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT,
     name TEXT NOT NULL,
     domain TEXT,
     email_sender TEXT,
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS articles (
     ingestion_method TEXT DEFAULT 'manual',
     vector_status TEXT DEFAULT 'pending',
     snoozed_until TEXT,
+    body_hash TEXT,
+    meta_updated_at TEXT,
     display_date TEXT GENERATED ALWAYS AS (COALESCE(published_at, ingested_at)) VIRTUAL
 );
 
@@ -309,6 +312,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical ON entities(entity_type, canonical_key);
@@ -343,6 +347,13 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # The background reconcile loop (tiro/sync/reconcile.py) and live API
+    # writers share this database; SQLite's default busy_timeout is 0, so a
+    # writer that collides with reconcile's write transaction gets an
+    # immediate SQLITE_BUSY -> OperationalError -> 500 instead of waiting
+    # for the lock to clear. 5s covers a normal per-file apply window
+    # without making a genuinely stuck writer hang the caller forever.
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 

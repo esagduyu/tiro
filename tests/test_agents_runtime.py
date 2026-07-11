@@ -154,10 +154,15 @@ def test_migration_014_upgrades_existing_db(tmp_path):
     assert _table_columns(db, "agent_runs") == AGENT_RUNS_COLUMNS
 
 
-def test_latest_migration_is_014():
-    from tiro.migrations import LATEST_VERSION
+def test_agent_runs_is_migration_014():
+    # The agent track claimed exactly migration 014 (agent_runs). Assert that
+    # specific claim rather than "014 is newest": sync S1 (015) landed on merge,
+    # and later milestones add more — the durable invariant is the number, not
+    # the ceiling.
+    from tiro.migrations import MIGRATIONS
 
-    assert LATEST_VERSION == 14  # 015/016 reserved for sync S1/S2, 017 for K3
+    by_version = {v: desc for v, desc, _ in MIGRATIONS}
+    assert "agent_runs" in by_version[14]
 
 
 def test_trace_retention_config_defaults(test_config):

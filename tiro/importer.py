@@ -375,8 +375,9 @@ def _ensure_source(conn: sqlite3.Connection, src: dict) -> int:
     email_sender = src.get("email_sender")
     is_vip = src.get("is_vip", False)
     cur = conn.execute(
-        "INSERT INTO sources (name, domain, email_sender, source_type, is_vip) VALUES (?, ?, ?, ?, ?)",
-        (name, domain, email_sender, source_type, bool(is_vip)),
+        "INSERT INTO sources (uid, name, domain, email_sender, source_type, is_vip) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (new_ulid(), name, domain, email_sender, source_type, bool(is_vip)),
     )
     return cur.lastrowid
 

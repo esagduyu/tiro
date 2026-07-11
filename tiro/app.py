@@ -289,6 +289,28 @@ def _make_rss_task(config: TiroConfig) -> PeriodicTask:
     return PeriodicTask("rss", run_once, next_delay)
 
 
+def _make_reconcile_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the local reconcile engine (sync S1). Interval is
+    re-read each cycle (settings-file changes apply next cycle); <= 0 stops
+    the loop (registration is also gated on it, mirroring imap). Keeps
+    interval-loop backoff. The pass itself is synchronous (file hashing +
+    SQLite) and runs in a thread."""
+    from tiro.sync.reconcile import reconcile_library
+
+    def next_delay() -> float:
+        return float(config.reconcile_interval_s)
+
+    async def run_once() -> None:
+        report = await asyncio.to_thread(reconcile_library, config)
+        if (report.changed or report.ingested or report.deleted
+                or report.conflicts or report.skipped_unsettled):
+            logger.info("Reconcile: %s", report.summary())
+        else:
+            logger.debug("Reconcile: no external changes")
+
+    return PeriodicTask("reconcile", run_once, next_delay)
+
+
 def _make_update_check_task(app: FastAPI, config: TiroConfig) -> PeriodicTask:
     """PeriodicTask for the notify-only update check (Phase 5 D5).
 
@@ -459,6 +481,7 @@ async def lifespan(app: FastAPI):
     app.state.digest_task = None
     app.state.vector_retry_task = None
     app.state.rss_task = None
+    app.state.reconcile_task = None
     app.state.update_check_task = None
     # In-memory update-check result (Phase 5 D5): {etag, latest_version,
     # html_url, checked_at}. Always present (even with the check disabled) so
@@ -489,6 +512,13 @@ async def lifespan(app: FastAPI):
     if config.rss_enabled:
         scheduler.start_periodic("rss", _make_rss_task(config))
         logger.info("RSS poll started: every %d minutes", config.rss_default_interval_minutes)
+
+    # Start local reconcile engine background task (sync S1). Interval is
+    # re-read each cycle by the task itself; reconcile_interval_s <= 0 is the
+    # kill switch (manual `tiro reconcile` still works with the loop off).
+    if config.reconcile_interval_s > 0:
+        scheduler.start_periodic("reconcile", _make_reconcile_task(config))
+        logger.info("Reconcile loop started: every %d seconds", config.reconcile_interval_s)
 
     # Notify-only update check (Phase 5 D5). Registered only when
     # update_check_enabled (default True) — the kill switch. Run-first, so the
