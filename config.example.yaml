@@ -43,6 +43,10 @@ default_embedding_model: "all-MiniLM-L6-v2"
 # background loop on this interval.
 # vector_retry_interval: 5   # minutes (0 = disable the background retry)
 
+# Local reconcile engine (sync S1): seconds between scans for external edits
+# to the library (Obsidian etc.). 0 disables the background scan.
+# reconcile_interval_s: 30
+
 # Intelligence
 opus_model: "claude-opus-4-6"
 haiku_model: "claude-haiku-4-5-20251001"
