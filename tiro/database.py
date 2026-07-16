@@ -323,6 +323,20 @@ CREATE TABLE IF NOT EXISTS sync_shadow (
     hlc TEXT,
     deleted_at TEXT,
     PRIMARY KEY (kind, uid)
+
+-- Suggestions (Phase 6 K3): persona (and probabilistic code-agent) outputs
+-- pending user accept/dismiss. Columns FROZEN from the agent-runtime spec
+-- §5. Accept runs the standard validated writes; rows are derived output,
+-- excluded from export bundles.
+CREATE TABLE IF NOT EXISTS suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE NOT NULL,
+    persona TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    citations_json TEXT,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
@@ -352,6 +366,7 @@ CREATE INDEX IF NOT EXISTS idx_login_tokens_expires ON login_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_device_pair_codes_expires ON device_pair_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_feed_entries_article ON feed_entries(article_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_name ON agent_runs(agent_name, started_at);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status, created_at);
 """
 
 

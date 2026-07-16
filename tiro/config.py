@@ -126,6 +126,10 @@ class TiroConfig:
     # deployment's behavior untouched.
     extra_allowed_hosts: list[str] = field(default_factory=list)
     trust_proxy_headers: bool = False
+    # Personas (Phase 6 K3): slugs disabled via POST /api/personas/{slug}/disable.
+    # Disabled personas are never registered -- running one is structurally
+    # impossible. Written only through persist_config.
+    personas_disabled: list[str] = field(default_factory=list)
     # Notify-only update check (Phase 5 D5): once-a-day GET to GitHub Releases,
     # surfaced as a dismissible banner. The ONLY phone-home in Tiro (a
     # version-string-free request; nothing about the library is sent). Default

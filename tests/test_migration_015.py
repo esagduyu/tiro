@@ -13,7 +13,7 @@ import frontmatter
 from tiro.anchors import content_hash
 from tiro.database import get_connection
 from tiro.ingestion.processor import process_article
-from tiro.migrations import LATEST_VERSION, run_migrations
+from tiro.migrations import MIGRATIONS, run_migrations
 
 BODY = "# Hello\n\nBody text for hashing."
 
@@ -61,7 +61,12 @@ def test_migration_015_adds_and_backfills(tmp_path):
     db_path = _legacy_library(tmp_path)
     applied = run_migrations(db_path, backup=False)
     assert any(a.startswith("015") for a in applied)
-    assert LATEST_VERSION == 16
+    # Sync S1 claimed exactly migration 015 (sync columns). Assert that
+    # specific claim rather than "015 is newest": K3 (017) lands on merge,
+    # and later milestones add more — the durable invariant is the number,
+    # not the ceiling (7c2ca0b precedent).
+    by_version = {v: desc for v, desc, _ in MIGRATIONS}
+    assert "sync" in by_version[15]
 
     conn = get_connection(db_path)
     try:
