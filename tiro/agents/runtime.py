@@ -234,7 +234,8 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
                          inputs=inputs, provider=provider, model=model,
                          replay_of=replay_of)
             ctx = RunContext(config, trace=trace, run_uid=run_uid,
-                             model_override=model_override)
+                             model_override=model_override,
+                             agent_name=agent.name)
             result = agent.run(ctx, **inputs)
             if not isinstance(result.outputs, agent.output_model):
                 raise AgentRunError(

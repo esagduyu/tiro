@@ -28,11 +28,13 @@ class RunContext:
     """Context handed to code agents. K2 appends gather + write tools."""
 
     def __init__(self, config: TiroConfig, *, trace: TraceWriter,
-                 run_uid: str, model_override: dict | None = None):
+                 run_uid: str, model_override: dict | None = None,
+                 agent_name: str = ""):
         self.config = config
         self._trace = trace
         self.run_uid = run_uid
         self._override = model_override
+        self.agent_name = agent_name
         self.tokens_in = 0
         self.tokens_out = 0
         self.cost_usd = 0.0
@@ -220,6 +222,49 @@ class RunContext:
         self._cite(o["uid"] for o in out)
         self._tool("similar_articles", {"article_uid": article_uid, "k": k}, out)
         return out
+
+    def list_recent_articles(self, *, hours: int = 24,
+                             limit: int = 50) -> list[dict]:
+        """Articles ingested in the trailing window (day-scope gather)."""
+        conn = get_connection(self.config.db_path)
+        try:
+            rows = conn.execute(
+                """SELECT a.id, a.uid, a.title, a.summary, s.name AS source
+                    FROM articles a LEFT JOIN sources s ON a.source_id = s.id
+                    WHERE a.ingested_at >= datetime('now', ?)
+                    ORDER BY a.ingested_at DESC LIMIT ?""",
+                (f"-{int(hours)} hours", limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        out = [dict(r) for r in rows]
+        self._cite(r["uid"] for r in out)
+        self._tool("list_recent_articles", {"hours": hours, "limit": limit}, out)
+        return out
+
+    # -- the ONLY persona write path (spec §5) ------------------------------
+
+    def suggest(self, kind: str, payload: dict, citations: list[str]) -> str:
+        """Record a pending suggestion. Citations are prune-only against the
+        accumulated read set (mirrors ctx.result -- fabrication is
+        structurally impossible, not merely an error)."""
+        from tiro.suggestions import create_suggestion
+
+        final, extras = [], []
+        for uid in citations or []:
+            (final if uid in self._citations else extras).append(uid)
+        if extras:
+            logger.warning(
+                "suggest() tried to cite %d uid(s) never read — stripped: %s",
+                len(extras), extras)
+        row = create_suggestion(
+            self.config, persona=self.agent_name or "unknown", kind=kind,
+            payload=payload, citations=final)
+        self._trace.event("tool", "suggest",
+                          {"kind": kind, "payload": payload,
+                           "citations": final},
+                          result={"uid": row["uid"]})
+        return row["uid"]
 
     # -- kernel gather tools (K2: relocated gather SQL, + uid for citations) --
 
