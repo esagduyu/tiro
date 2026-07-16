@@ -1,7 +1,9 @@
 """Migration 015 (sync S1): articles.body_hash + meta_updated_at + sources.uid.
 
-Campaign note: 014 is RESERVED (K-track agent_runs) and absent on this branch;
-the framework tolerates the gap (run_migrations applies sorted versions > current).
+Campaign note: migration numbers are pre-assigned across tracks (014 K-track,
+015 S1, 016 S2); the framework tolerates version gaps generally (run_migrations
+applies sorted versions > current). 014 is present on this branch post-rebase;
+stamping user_version 13 here exercises applying 014+015(+016) in order.
 """
 import sqlite3
 from pathlib import Path
@@ -59,7 +61,7 @@ def test_migration_015_adds_and_backfills(tmp_path):
     db_path = _legacy_library(tmp_path)
     applied = run_migrations(db_path, backup=False)
     assert any(a.startswith("015") for a in applied)
-    assert LATEST_VERSION == 15
+    assert LATEST_VERSION == 16
 
     conn = get_connection(db_path)
     try:

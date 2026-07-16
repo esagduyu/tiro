@@ -1,0 +1,182 @@
+"""Sync S2: build_manifest + shadow store (sync_shadow)."""
+import json
+
+import frontmatter
+import pytest
+
+from tiro.anchors import content_hash
+from tiro.database import get_connection
+from tiro.ingestion.processor import process_article
+from tiro.sync import reconcile as rec
+from tiro.sync.journal import HLCClock
+from tiro.sync.manifest import (
+    LINK_TABLES,
+    META_FIELDS,
+    ROW_TABLES,
+    build_manifest,
+    expire_tombstones,
+    load_shadow,
+    save_shadow,
+)
+
+
+@pytest.fixture(autouse=True)
+def _fast_settle(monkeypatch):
+    monkeypatch.setattr(rec, "SETTLE_SECONDS", 0.0)
+
+
+def _ingest(config, title="Hello World", body="# Hello\n\nSome body text.",
+            url="https://example.com/hello"):
+    return process_article(
+        title=title, author="A. Writer", content_md=body, url=url, config=config,
+    )
+
+
+class TestBuildManifest:
+    def test_article_entry_with_meta_fields(self, initialized_library, authenticated_client=None):
+        art = _ingest(initialized_library)
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT uid, markdown_path, body_hash FROM articles WHERE id = ?",
+                (art["id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        m = build_manifest(initialized_library)
+        entry = m.entries[("article", row["uid"])]
+        assert entry.hash == row["body_hash"]
+        assert entry.fields["path_hint"] == f"articles/{row['markdown_path']}"
+        for f in META_FIELDS:
+            assert f in entry.fields
+        assert entry.fields["url"] == "https://example.com/hello"
+        # source_uid resolves through the sources join (migration 015 uid)
+        assert entry.fields["source_uid"]
+
+    def test_note_and_highlight_entries(self, initialized_library):
+        art = _ingest(initialized_library)
+        from tiro.annotations import append_highlight, sidecar_stem, write_note
+        conn = get_connection(initialized_library.db_path)
+        try:
+            arow = conn.execute(
+                "SELECT * FROM articles WHERE id = ?", (art["id"],)).fetchone()
+            body = frontmatter.load(
+                str(initialized_library.articles_dir / arow["markdown_path"])).content
+            start = body.index("body")
+            hl_uid = append_highlight(
+                initialized_library, conn, arow,
+                quote="body", prefix=body[max(0, start - 8):start],
+                suffix=body[start + 4:start + 12],
+                position_start=start, position_end=start + 4,
+                content_hash=content_hash(body), color="yellow",
+                note_markdown="my note",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        stem = sidecar_stem(arow)
+        write_note(initialized_library, stem, "article-level note")
+
+        m = build_manifest(initialized_library)
+        hl = m.entries[("highlight", hl_uid)]
+        assert hl.fields["article_uid"] == arow["uid"]
+        assert hl.fields["line"]["note_markdown"] == "my note"
+        note = m.entries[("note", arow["uid"])]
+        assert note.hash == content_hash("article-level note")
+
+    def test_row_link_and_pathfile_entries(self, initialized_library):
+        art = _ingest(initialized_library)
+        conn = get_connection(initialized_library.db_path)
+        try:
+            arow = conn.execute(
+                "SELECT id, uid FROM articles WHERE id = ?", (art["id"],)).fetchone()
+            from tiro.migrations import new_ulid
+            conn.execute("INSERT INTO tags (uid, name) VALUES (?, 'ml')",
+                         (new_ulid(),))
+            tag = conn.execute("SELECT id, uid FROM tags WHERE name='ml'").fetchone()
+            conn.execute(
+                "INSERT INTO article_tags (article_id, tag_id) VALUES (?, ?)",
+                (arow["id"], tag["id"]))
+            conn.commit()
+            src_uid = conn.execute("SELECT uid FROM sources LIMIT 1").fetchone()["uid"]
+        finally:
+            conn.close()
+        (initialized_library.articles_dir /
+         "x.conflict-local-20260710.md").write_text("loser body")
+
+        m = build_manifest(initialized_library)
+        assert ("row:tags", tag["uid"]) in m.entries
+        assert ("row:sources", src_uid) in m.entries
+        link = m.entries[("link:article_tags", f"{arow['uid']}:{tag['uid']}")]
+        assert link.fields == {"a_uid": arow["uid"], "b_uid": tag["uid"]}
+        pf = m.entries[("pathfile", "path:articles/x.conflict-local-20260710.md")]
+        assert pf.hash == content_hash("loser body")
+
+    def test_never_synced_stores_absent(self, initialized_library):
+        _ingest(initialized_library)
+        m = build_manifest(initialized_library)
+        kinds = {k for (k, _uid) in m.entries}
+        # spec §2 "never synced": no audio, sessions, auth, feeds, stats kinds.
+        assert kinds <= (
+            {"article", "note", "wiki", "pathfile", "highlight"}
+            | {f"row:{t}" for t in ROW_TABLES}
+            | {f"link:{t}" for t in LINK_TABLES}
+        )
+
+    def test_deterministic(self, initialized_library):
+        _ingest(initialized_library)
+        assert build_manifest(initialized_library).entries == \
+            build_manifest(initialized_library).entries
+
+
+class TestShadowStore:
+    def test_save_load_roundtrip(self, initialized_library):
+        _ingest(initialized_library)
+        m = build_manifest(initialized_library)
+        clock = HLCClock("dev-a", now_ms=lambda: 1720000000000)
+        save_shadow(initialized_library, m, clock=clock)
+        s = load_shadow(initialized_library)
+        assert set(s.entries) == set(m.entries)
+        for key, entry in m.entries.items():
+            assert s.entries[key].hash == entry.hash
+            assert s.entries[key].fields == entry.fields
+            assert s.entries[key].hlc is not None
+
+    def test_missing_entries_become_tombstones(self, initialized_library):
+        art = _ingest(initialized_library)
+        m = build_manifest(initialized_library)
+        save_shadow(initialized_library, m,
+                    clock=HLCClock("dev-a", now_ms=lambda: 1))
+        from tiro.lifecycle import delete_article
+        delete_article(initialized_library, art["id"])
+        m2 = build_manifest(initialized_library)
+        save_shadow(initialized_library, m2,
+                    clock=HLCClock("dev-a", now_ms=lambda: 2))
+        s = load_shadow(initialized_library)
+        tomb_kinds = {k for (k, _u) in s.tombstones}
+        assert "article" in tomb_kinds
+        assert ("article",) not in {(k,) for (k, _u) in s.entries}
+
+    def test_expire_tombstones_purges_only_old(self, initialized_library):
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sync_shadow (kind, uid, fields_json, deleted_at) "
+                "VALUES ('article', 'OLD', '{}', '2020-01-01T00:00:00Z')")
+            conn.execute(
+                "INSERT INTO sync_shadow (kind, uid, fields_json, deleted_at) "
+                "VALUES ('article', 'NEW', '{}', '2099-01-01T00:00:00Z')")
+            # alias rows are exempt from TTL (plan decision #18)
+            conn.execute(
+                "INSERT INTO sync_shadow (kind, uid, fields_json, deleted_at) "
+                "VALUES ('alias', 'A', ?, '2020-01-01T00:00:00Z')",
+                (json.dumps({"new_uid": "B"}),))
+            conn.commit()
+        finally:
+            conn.close()
+        purged = expire_tombstones(initialized_library)
+        assert purged == 1
+        s = load_shadow(initialized_library)
+        assert ("article", "NEW") in s.tombstones
+        assert ("article", "OLD") not in s.tombstones
+        assert s.aliases == {"A": "B"}
