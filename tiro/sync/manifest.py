@@ -24,7 +24,7 @@ travel via export/backup, not sync — S5 may revisit), backups/, config.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,7 +33,20 @@ import frontmatter
 from tiro.anchors import content_hash
 from tiro.config import TiroConfig
 from tiro.database import get_connection
-from tiro.sync.journal import TOMBSTONE_TTL_DAYS, canonical_json
+from tiro.migrations import new_ulid
+from tiro.sync.journal import (
+    TOMBSTONE_TTL_DAYS,
+    FileDel,
+    FilePut,
+    HLCClock,
+    LineDel,
+    LinePut,
+    Meta,
+    Op,
+    RowDel,
+    RowPut,
+    canonical_json,
+)
 from tiro.sync.reconcile import body_hash_of_file, is_conflict_file
 
 logger = logging.getLogger(__name__)
@@ -409,6 +422,140 @@ def save_shadow(config: TiroConfig, manifest: Manifest, *,
         conn.commit()
     finally:
         conn.close()
+
+
+# --- diff ---------------------------------------------------------------------
+
+_META_DEFAULTS = {"rating": None, "is_read": 0, "snoozed_until": None,
+                  "opened_count": 0, "source_uid": None}
+
+
+def _hlc_wall_iso(hlc) -> str:
+    return datetime.fromtimestamp(hlc.wall_ms / 1000, UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _meta_ts(entry: ManifestEntry, hlc) -> str:
+    return entry.fields.get("meta_updated_at") or _hlc_wall_iso(hlc)
+
+
+def diff(manifest: Manifest, shadow: Shadow, *, clock=None) -> list[Op]:
+    """FROZEN signature: derive journal ops from state vs shadow (spec §1's
+    state-diff capture). Deterministic order: sorted by (kind, uid), puts
+    before deletes. diff NEVER reads disk (FilePut.body stays None — see
+    hydrate_bodies) and NEVER emits Alias ops (apply's dedupe owns those).
+
+    manifest.unreadable is honored exactly like save_shadow does (S2.1+S2.2
+    review, Major #2): an unreadable file is UNKNOWN, not deleted — a shadow
+    entry whose path_hint is unreadable emits NO delete op, and a manifest
+    entry whose path_hint is unreadable emits NO FilePut (its hash is a
+    disk-read fallback that failed; article meta ops still flow — SQLite
+    was readable)."""
+    clock = clock or HLCClock("local")
+    ops: list[Op] = []
+
+    def _stamp():
+        h = clock.tick()
+        return {"op_id": new_ulid(), "hlc": h, "device": clock.device}, h
+
+    for key in sorted(manifest.entries):
+        entry = manifest.entries[key]
+        prev = shadow.entries.get(key)
+        changed_hash = prev is None or entry.hash != prev.hash
+        unreadable = entry.fields.get("path_hint") in manifest.unreadable
+        if entry.kind == "article":
+            if changed_hash and not unreadable:
+                base, h = _stamp()
+                ops.append(FilePut(**base, uid=entry.uid,
+                                   path_hint=entry.fields["path_hint"],
+                                   object_hash=entry.hash or "",
+                                   base_hash=prev.hash if prev else None))
+            prev_fields = prev.fields if prev else _META_DEFAULTS
+            for f in META_FIELDS:
+                cur_v = entry.fields.get(f, _META_DEFAULTS.get(f))
+                old_v = prev_fields.get(f, _META_DEFAULTS.get(f))
+                if cur_v != old_v:
+                    base, h = _stamp()
+                    ops.append(Meta(**base, uid=entry.uid, field=f,
+                                    value=cur_v, ts=_meta_ts(entry, h)))
+        elif entry.kind in ("note", "wiki", "pathfile"):
+            if changed_hash and not unreadable:
+                base, _h = _stamp()
+                ops.append(FilePut(**base, uid=entry.uid,
+                                   path_hint=entry.fields["path_hint"],
+                                   object_hash=entry.hash or "",
+                                   base_hash=prev.hash if prev else None))
+        elif entry.kind == "highlight":
+            if changed_hash or (prev and entry.fields != prev.fields):
+                base, _h = _stamp()
+                ops.append(LinePut(**base, uid=entry.uid,
+                                   article_uid=entry.fields["article_uid"],
+                                   line=entry.fields["line"]))
+        elif entry.kind.startswith("row:"):
+            if changed_hash or (prev and entry.fields != prev.fields):
+                base, _h = _stamp()
+                ops.append(RowPut(**base, uid=entry.uid,
+                                  table=entry.kind.split(":", 1)[1],
+                                  row=dict(entry.fields)))
+        elif entry.kind.startswith("link:"):
+            if prev is None:
+                base, _h = _stamp()
+                ops.append(RowPut(**base, uid=entry.uid,
+                                  table=entry.kind.split(":", 1)[1],
+                                  row=dict(entry.fields)))
+            elif entry.fields != prev.fields:  # relations note/score changed
+                base, _h = _stamp()
+                ops.append(RowPut(**base, uid=entry.uid,
+                                  table=entry.kind.split(":", 1)[1],
+                                  row=dict(entry.fields)))
+
+    for key in sorted(shadow.entries):
+        if key in manifest.entries:
+            continue
+        prev = shadow.entries[key]
+        if prev.fields.get("path_hint") in manifest.unreadable:
+            continue  # unreadable, not deleted — mirrors save_shadow
+        base, _h = _stamp()
+        if prev.kind == "article":
+            ops.append(RowDel(**base, uid=prev.uid, table="articles",
+                              observed=prev.hash))
+        elif prev.kind in ("note", "wiki", "pathfile"):
+            ops.append(FileDel(**base, uid=prev.uid,
+                               path_hint=prev.fields.get("path_hint", ""),
+                               base_hash=prev.hash))
+        elif prev.kind == "highlight":
+            line = prev.fields.get("line") or {}
+            ops.append(LineDel(**base, uid=prev.uid,
+                               article_uid=prev.fields.get("article_uid", ""),
+                               observed_updated_at=line.get("updated_at")))
+        elif prev.kind.startswith("row:"):
+            ops.append(RowDel(**base, uid=prev.uid,
+                              table=prev.kind.split(":", 1)[1], observed=None))
+        elif prev.kind.startswith("link:"):
+            ops.append(RowDel(**base, uid=prev.uid,
+                              table=prev.kind.split(":", 1)[1],
+                              observed=prev.hlc))
+    return ops
+
+
+def hydrate_bodies(config: TiroConfig, ops: list[Op]) -> list[Op]:
+    """Fill FilePut.body from disk (push-path helper — spec §6.4 uploads
+    objects first, and apply_ops requires hydrated bodies). Path hints are
+    library-relative; a file that vanished since diff is dropped with a
+    WARNING (it will re-diff next cycle). Non-file ops pass through."""
+    out: list[Op] = []
+    for op in ops:
+        if not isinstance(op, FilePut) or op.body is not None:
+            out.append(op)
+            continue
+        path = config.library / op.path_hint
+        body = _read_text(path)
+        if body is None:
+            logger.warning("hydrate_bodies: %s vanished since diff — op dropped",
+                           op.path_hint)
+            continue
+        out.append(replace(op, body=body, object_hash=content_hash(body)))
+    return out
 
 
 def expire_tombstones(config: TiroConfig, now: datetime | None = None) -> int:
