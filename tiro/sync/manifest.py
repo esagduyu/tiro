@@ -34,7 +34,7 @@ from tiro.anchors import content_hash
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.sync.journal import TOMBSTONE_TTL_DAYS, canonical_json
-from tiro.sync.reconcile import is_conflict_file
+from tiro.sync.reconcile import body_hash_of_file, is_conflict_file
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,13 @@ class ManifestEntry:
 @dataclass
 class Manifest:
     entries: dict[tuple[str, str], ManifestEntry] = field(default_factory=dict)
+    # Library-relative path_hints of files that EXIST but could not be read
+    # (permission blip, non-UTF-8 bytes, iCloud lazy materialization — spec
+    # §10 risk). Their entries are absent from `entries`, but consumers
+    # (save_shadow, diff) must treat them as UNKNOWN, never as deleted —
+    # tombstoning an unreadable file would propagate a delete to every
+    # other device (S2.1+S2.2 review, Major #2).
+    unreadable: set[str] = field(default_factory=set)
 
     def add(self, entry: ManifestEntry) -> None:
         self.entries[(entry.kind, entry.uid)] = entry
@@ -109,8 +116,10 @@ def _fields_hash(fields: dict) -> str:
 
 
 def _read_text(path: Path) -> str | None:
+    # Explicit utf-8: sync hashes must be byte-stable across devices and
+    # platforms — never locale-dependent.
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         logger.warning("Manifest: unreadable file %s: %s", path, e)
         return None
@@ -147,9 +156,13 @@ def _add_articles(config: TiroConfig, conn, m: Manifest) -> None:
         h = r["body_hash"]
         if h is None:
             # NULL = unhashed baseline (S1 decision #7): fall back to disk.
-            path = config.articles_dir / name
-            body = _read_text(path)
-            h = content_hash(body) if body is not None else None
+            # MUST be the frontmatter-stripped BODY hash (body_hash_of_file),
+            # matching migration 015's backfill and ingest stamping — hashing
+            # the raw file text would make this entry permanently unequal to
+            # every stamped body_hash on every device (review Major #1).
+            h = body_hash_of_file(config.articles_dir / name)
+            if h is None:
+                m.unreadable.add(f"articles/{name}")
         m.add(ManifestEntry(
             kind="article", uid=r["uid"], hash=h,
             fields={
@@ -183,6 +196,7 @@ def _add_notes(config: TiroConfig, m: Manifest) -> None:
             continue  # orphan note: doctor's concern, not sync's
         body = _read_text(path)
         if body is None:
+            m.unreadable.add(f"notes/{path.name}")
             continue
         m.add(ManifestEntry(
             kind="note", uid=uid, hash=content_hash(body),
@@ -199,6 +213,7 @@ def _add_wiki(config: TiroConfig, m: Manifest) -> None:
             continue  # -> pathfile entries
         body = _read_text(path)
         if body is None:
+            m.unreadable.add(f"wiki/{rel}")
             continue
         try:
             uid = (frontmatter.loads(body).metadata or {}).get("uid") or ""
@@ -211,6 +226,11 @@ def _add_wiki(config: TiroConfig, m: Manifest) -> None:
                 hash=content_hash(body), fields={"path_hint": f"wiki/{rel}"},
             ))
             continue
+        if ("wiki", str(uid)) in m.entries:
+            logger.warning(
+                "Manifest: duplicate wiki uid %s — %s overwrites %s in the "
+                "sync set", uid, rel,
+                m.entries[("wiki", str(uid))].fields.get("path_hint"))
         m.add(ManifestEntry(
             kind="wiki", uid=str(uid), hash=content_hash(body),
             fields={"path_hint": f"wiki/{rel}"},
@@ -245,6 +265,7 @@ def _add_pathfiles(config: TiroConfig, m: Manifest) -> None:
     for rel, path in candidates:
         body = _read_text(path)
         if body is None:
+            m.unreadable.add(rel)
             continue
         m.add(ManifestEntry(
             kind="pathfile", uid=f"path:{rel}", hash=content_hash(body),
@@ -359,9 +380,12 @@ def shadow_tombstone(conn, kind: str, uid: str, *, hlc: str | None,
 def save_shadow(config: TiroConfig, manifest: Manifest, *,
                 clock=None, now: datetime | None = None) -> None:
     """Persist `manifest` as the new shadow. Previous live entries absent
-    from `manifest` become tombstones (deleted locally / by an applied op).
-    The engine (S5) calls this after a successful push; S2 tests call it
-    directly. Alias rows are preserved untouched."""
+    from `manifest` become tombstones (deleted locally / by an applied op) —
+    EXCEPT entries whose file was merely unreadable at build time
+    (manifest.unreadable): those are carried forward unchanged, never
+    tombstoned, so a transient read failure can never propagate as a
+    delete to other devices. The engine (S5) calls this after a successful
+    push; S2 tests call it directly. Alias rows are preserved untouched."""
     from tiro.sync.journal import HLCClock
 
     clock = clock or HLCClock("local")
@@ -376,9 +400,12 @@ def save_shadow(config: TiroConfig, manifest: Manifest, *,
                                and old.fields == entry.fields) else hlc_str
             shadow_upsert(conn, entry.kind, entry.uid,
                           hash=entry.hash, fields=entry.fields, hlc=keep)
-        for key in prev.entries:
-            if key not in manifest.entries:
-                shadow_tombstone(conn, key[0], key[1], hlc=hlc_str, now=now)
+        for key, old in prev.entries.items():
+            if key in manifest.entries:
+                continue
+            if old.fields.get("path_hint") in manifest.unreadable:
+                continue  # unreadable, not deleted — carry forward untouched
+            shadow_tombstone(conn, key[0], key[1], hlc=hlc_str, now=now)
         conn.commit()
     finally:
         conn.close()

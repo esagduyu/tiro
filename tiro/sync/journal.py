@@ -90,6 +90,12 @@ class HLCClock:
         wall = self._now_ms()
         if wall > self._last.wall_ms:
             self._last = HLC(wall, 0, self.device)
+        elif self._last.counter + 1 >= 1_000_000:
+            # The counter would overflow its 6-digit zero-pad and silently
+            # break the load-bearing string-order == logical-order invariant
+            # ("999999" > "1000000" lexicographically). Roll the wall
+            # forward 1ms instead — still strictly monotone, format intact.
+            self._last = HLC(self._last.wall_ms + 1, 0, self.device)
         else:
             self._last = HLC(self._last.wall_ms, self._last.counter + 1, self.device)
         return self._last

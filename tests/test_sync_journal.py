@@ -70,6 +70,19 @@ class TestHLC:
         assert t > HLC(9999, 3, "dev-b")
         assert t.device == "dev-a"
 
+    def test_clock_counter_overflow_rolls_wall(self):
+        """S2.1+S2.2 review Minor: past 10^6 same-ms ticks the 6-digit pad
+        would invert string order vs logical order ("999999" > "1000000").
+        The clock must roll the wall forward instead of overflowing."""
+        clock = HLCClock("dev-a", now_ms=lambda: 100)  # stalled wall
+        clock.observe(HLC(100, 999_998, "dev-b"))
+        a = clock.tick()
+        assert a == HLC(100, 999_999, "dev-a")
+        b = clock.tick()  # counter would hit 1_000_000 -> wall rolls
+        assert b == HLC(101, 0, "dev-a")
+        assert a < b
+        assert a.to_str() < b.to_str()  # string order preserved
+
 
 def _sample_ops():
     """One op of every kind, fixed values — the golden-fixture corpus."""
