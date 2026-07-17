@@ -85,7 +85,12 @@ class WebDAVAdapter(StorageAdapter):
                 )
             except httpx.TransportError as e:
                 raise TransientAdapterError(f"{endpoint}: {e}") from e
-            if resp.status_code >= 500:
+            # 5xx and 429 (Nextcloud brute-force/rate protection emits real
+            # 429s) are transient; 501 Not Implemented is a capability
+            # answer that never heals by retrying (per-task review fix).
+            if resp.status_code == 429 or (
+                resp.status_code >= 500 and resp.status_code != 501
+            ):
                 raise TransientAdapterError(f"{endpoint}: HTTP {resp.status_code}")
             return resp
 
@@ -180,7 +185,9 @@ class WebDAVAdapter(StorageAdapter):
     def _relativize(self, href: str) -> str | None:
         """href may be an absolute URL or an absolute percent-encoded path."""
         path = unquote(urlsplit(href).path).rstrip("/")
-        if not path.startswith(self._base_path):
+        # "/dav" must not claim its SIBLING "/davish/thing" (review nit) —
+        # only itself or true descendants.
+        if path != self._base_path and not path.startswith(self._base_path + "/"):
             return None
         return path[len(self._base_path):].strip("/")
 

@@ -157,6 +157,27 @@ class TestWebDAVQuirks:
             await a.get("format.json")
         await a.aclose()
 
+    async def test_429_rate_limit_retried_then_succeeds(self, no_sleep):
+        """Nextcloud brute-force/rate protection emits real 429s — they are
+        throttling (decision #2's transient class), not a terminal answer."""
+        dav = FakeDav()
+        a = _fake_adapter(dav)
+        dav.fail_next = [429]
+        await a.put("format.json", b"v1")  # 429, then MKCOL/PUT proceed
+        assert await a.get("format.json") == b"v1"
+        assert len(no_sleep) >= 1
+        await a.aclose()
+
+    async def test_relativize_never_claims_sibling_paths(self):
+        """base path /dav must not relativize /davish/... (prefix-string
+        trap); such hrefs are foreign and dropped."""
+        dav = FakeDav()
+        a = _fake_adapter(dav)
+        assert a._relativize("/davish/journal/x.age") is None
+        assert a._relativize("/dav/journal/x.age") == "journal/x.age"
+        assert a._relativize("http://dav.test/dav/journal/x.age") == "journal/x.age"
+        await a.aclose()
+
     async def test_unicode_and_space_keys_percent_encoded(self):
         dav = FakeDav()
         a = _fake_adapter(dav)
