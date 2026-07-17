@@ -302,3 +302,44 @@ def test_apply_contradiction_has_no_applier_yet(initialized_library):
     with pytest.raises(SuggestionApplyError, match="no applier"):
         apply_suggestion(initialized_library, _mk_suggestion(
             initialized_library, "contradiction", {"claim": "x"}))
+
+
+# --- Task 9: export/backup posture -----------------------------------------
+
+
+def test_export_bundle_excludes_suggestions(initialized_library):
+    import json
+    import zipfile
+
+    from tiro.export import export_library
+
+    _seed_article(initialized_library, title="Export Check")
+    _mk_suggestion(initialized_library, "note",
+                   {"article_id": 1, "markdown": "m"})
+    out = export_library(initialized_library)
+    try:
+        with zipfile.ZipFile(out) as zf:
+            meta = json.loads(zf.read("metadata.json"))
+        assert "suggestions" not in meta
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_backup_snapshot_carries_personas_dir(initialized_library):
+    # Snapshots are tar+zstd (not a stdlib-recognized tarfile compression
+    # scheme) -- mirror tests/test_backup.py's own zstandard-stream-reader
+    # helper rather than a bare tarfile.open("r:*").
+    import tarfile
+
+    import zstandard
+
+    from tiro.agents.personas import ensure_personas
+    from tiro.backup import create_snapshot
+
+    ensure_personas(initialized_library)
+    snapshot = create_snapshot(initialized_library)
+    dctx = zstandard.ZstdDecompressor()
+    with snapshot.open("rb") as raw, dctx.stream_reader(raw) as z:
+        with tarfile.open(mode="r|", fileobj=z) as tar:
+            names = [m.name for m in tar]
+    assert any("personas/devils-advocate.md" in n for n in names)

@@ -238,6 +238,16 @@ Tiro is local-first, but "local" doesn't mean "unprotected" — especially once 
 - **Ingenuity analysis** — On-demand bias detection, factual confidence scoring, and novelty assessment for any article. Only runs when you ask (saves tokens).
 - **Learned preferences** — Rate a few articles, and Opus classifies the rest into must-read / summary-enough / discard tiers based on your demonstrated taste.
 
+### Personas (alpha)
+
+Personas are small, forkable AI agents you write yourself: a markdown file at `{library}/personas/{slug}.md` with a bit of YAML frontmatter and a prompt-template body. Tiro ships three defaults — `devils-advocate` (counterpoint notes on an article), `daily-themes` (a digest section), `research-brief` (a wiki-page draft from a search query) — copied into your library on first use so you can edit them freely.
+
+**Frontmatter contract:** `name`, `scope` (`article` / `day` / `query` / `library`), `output` (`note` / `digest_section` / `wiki_page` / `tier_suggestion`), plus optional `version`/`schedule`/`tier`. The body is a template over a small, fixed placeholder set (`{{article}}`, `{{highlights}}`, `{{query}}`, `{{day_articles}}`, `{{wiki_page}}`) — which placeholders are available depends on the persona's scope. Anything else (unknown key, unknown placeholder, a placeholder outside its scope) fails to load, loudly, in the `/agents` persona list — there's no silent partial run.
+
+**Security posture, in one paragraph:** a persona file is untrusted input, and the sandbox is structural rather than a request to behave. A persona only ever sees a read-only context built from its own scope (an article, a day's articles, a search, a wiki page) — it cannot read the rest of your library, cannot reach the network, and cannot write anything directly. Its only output path is `ctx.suggest(...)`, which lands as a **pending suggestion**, never an immediate change. Library content interpolated into the prompt is wrapped in a fence the persona's own text can't forge or escape.
+
+You review suggestions from the inbox/reader chips or the `/agents` queue and accept or dismiss each one; accepting runs the same validated write path Tiro's own features use (append a note, set a tier, add a digest section, update an existing wiki page). Runs are manual-only for now — there's no on-ingest or scheduled dispatch yet, that's a later phase. To try your own: copy one of the defaults and edit the body; a broken persona just won't appear as runnable until you fix it.
+
 ### Reading
 
 - **Clean reader** — Distraction-free article view with full markdown rendering

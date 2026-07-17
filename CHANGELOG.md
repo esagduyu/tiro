@@ -45,6 +45,14 @@ day the release was tagged.
   resolution); conflict blockquote headers carry the date only (device
   labels are not byte-convergent at line level).
 
+### Agent runtime — personas (Phase 6 K3)
+- Persona files (`{library}/personas/*.md`): community-shareable prompt templates over a closed placeholder set, running through the agent runtime on scope-derived read-only contexts. Untrusted by construction: suggest-only writes, no network tool, fenced interpolation with a fixed preamble, forced output kind, adversarially tested.
+- `suggestions` table (migration 017) + accept/dismiss flow running the standard validated writes; suggestion chips in inbox/reader and a queue + persona management on `/agents`.
+- Three forkable default personas: devils-advocate, daily-themes, research-brief. `personas_disabled` config (API-toggled). Manual runs only in K3; on-ingest/cron dispatch arrives with K4's hook infrastructure.
+- Routes: `GET /api/personas`, `POST /api/personas/{slug}/enable`, `POST /api/personas/{slug}/disable`, `GET /api/suggestions?status=&article_id=`, `POST /api/suggestions/{uid}/accept`, `POST /api/suggestions/{uid}/dismiss`.
+- Backup snapshots now include `personas/` (an export/backup posture fix landed alongside K3 closeout — `agents/traces/` remains deliberately excluded, per the K1–K2 D15 owner-ratification item).
+- STATIC_VERSION 70.
+
 ### Sync S1 — local reconcile engine (absorbed Phase 2b)
 - External edits to the library (Obsidian et al.) now reconcile into SQLite/
   ChromaDB/anchors: changed bodies re-index + re-embed and re-check highlight

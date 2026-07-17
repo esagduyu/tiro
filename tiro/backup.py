@@ -9,6 +9,10 @@ bundled config-snapshot.yaml (reference only — restore never touches the
 live config.yaml). `reading_sessions` rows (ephemeral local telemetry, M2.3)
 are scrubbed from the throwaway DB copy before it's tarred — snapshots never
 carry them, matching the docs' promise (see `_scrub_reading_sessions`).
+Persona files (`{library}/personas/*.md`, Phase 6 K3) ride along via an
+explicit per-directory allowlist entry (this is NOT a whole-library walk —
+`agents/traces/` is deliberately excluded, see the K1-K2 owner-ratification
+item D15).
 """
 
 import json
@@ -26,6 +30,7 @@ import yaml
 import zstandard
 
 from tiro import __version__
+from tiro.agents.personas import personas_dir
 from tiro.annotations import annotations_dir, notes_dir
 from tiro.config import TiroConfig
 from tiro.database import get_connection
@@ -210,6 +215,15 @@ def create_snapshot(
                 if nt_dir.exists():
                     for f in sorted(nt_dir.glob("*.md")):
                         tar.add(f, arcname=f"notes/{f.name}")
+                # Persona files (Phase 6 K3): community-shareable prompt
+                # templates the user has installed/forked -- library content,
+                # not regenerable, same treatment as wiki/. Traces
+                # (agents/traces/) deliberately stay OUT of this allowlist
+                # (K1-K2 owner-ratification item D15) -- do not add them here.
+                pd = personas_dir(config)
+                if pd.exists():
+                    for f in sorted(pd.glob("*.md")):
+                        tar.add(f, arcname=f"personas/{f.name}")
                 _add_bytes(tar, "embeddings.jsonl", _dump_embeddings_jsonl(config))
                 audio_dir = config.library / "audio"
                 if include_audio and audio_dir.exists():
