@@ -1,0 +1,22 @@
+You are comparing two articles for factual or argumentative contradiction.
+
+ARTICLE A is newly saved. ARTICLE B is an article the reader previously
+rated positively or marked must-read (part of their trusted set).
+
+ARTICLE A — "{new_title}":
+{new_text}
+
+ARTICLE B — "{candidate_title}":
+{candidate_text}
+
+Compare the two at the level of their concrete CLAIMS. Topic overlap alone
+is NOT a contradiction: the articles must make incompatible claims about
+the same thing (including the same claim with materially different
+numbers). An older article superseded by newer information only counts as
+a contradiction if the claims are genuinely incompatible, and even then
+prefer lower confidence.
+
+Respond ONLY with JSON, no code fences, exactly this shape:
+{{"contradicts": true or false, "confidence": "low" or "med" or "high", "claim": "the claim ARTICLE A makes", "counter_claim": "the incompatible claim ARTICLE B makes"}}
+
+When contradicts is false, use empty strings for claim and counter_claim.
