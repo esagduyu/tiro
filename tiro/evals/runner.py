@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 EVALS_DIR = Path(__file__).resolve().parent
 AGENT_NAMES = ("metadata_extractor", "preference_classifier",
-               "digest_writer", "ingenuity_analyst")
+               "digest_writer", "ingenuity_analyst", "contradiction-detector")
 
 
 def load_fixtures(agent_name: str) -> list[dict]:
@@ -69,12 +69,13 @@ def _build_eval_library(
                 conn.execute(
                     """INSERT INTO articles (uid, source_id, title, url, slug,
                        markdown_path, word_count, reading_time_min,
-                       ingested_at, rating, summary)
-                       VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?, ?)""",
+                       ingested_at, rating, summary, ai_tier)
+                       VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?, ?, ?)""",
                     (new_ulid(), sid, art["title"],
                      f"https://eval.example.com/{slug}", slug, fname,
                      f"2026-07-01T00:00:{99 - i:02d}",
-                     art.get("rating"), art.get("summary", "")),
+                     art.get("rating"), art.get("summary", ""),
+                     art.get("ai_tier")),
                 )
             conn.commit()
         finally:
@@ -120,14 +121,30 @@ def _check_fixture(
         if not real:
             llm_module._fake_responses.clear()
             llm_module.queue_fake_responses(*fixture.get("fake_responses", []))
-        rec = _PromptRecorder()
-        with rec:
-            try:
-                result = run_agent(config, agent_name, fixture.get("inputs", {}))
-            except Exception as e:
-                return [f"run failed: {e}"]
-            finally:
-                llm_module._fake_responses.clear()
+        # `fake_similars` stands in for ChromaDB (eval libraries never seed
+        # vectors) in BOTH structural and --real mode — in --real the realism
+        # comes from the LLM verdicts, not the similarity lookup. Ids are the
+        # seed articles' sequential DB ids (see _build_eval_library).
+        sim_ids = fixture.get("fake_similars")
+        from tiro.search import semantic as _semantic
+        _orig_find = _semantic.find_related_articles
+        if sim_ids is not None:
+            def _fake_find(article_id, config_, limit=5):
+                return [{"related_article_id": i, "similarity_score": 0.9}
+                        for i in sim_ids]
+            _semantic.find_related_articles = _fake_find
+        try:
+            rec = _PromptRecorder()
+            with rec:
+                try:
+                    result = run_agent(config, agent_name,
+                                       fixture.get("inputs", {}))
+                except Exception as e:
+                    return [f"run failed: {e}"]
+                finally:
+                    llm_module._fake_responses.clear()
+        finally:
+            _semantic.find_related_articles = _orig_find
 
         expect = fixture.get("expect", {})
         failures: list[str] = []
