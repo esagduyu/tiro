@@ -1,0 +1,300 @@
+"""Sync S3: snapshot manifest doc + device registry docs + materialization."""
+import base64
+import json
+
+import pytest
+
+from tiro.anchors import content_hash
+from tiro.sync.crypto import KdfParams, SyncFormatError, codec_from_passphrase
+from tiro.sync.journal import FilePut
+from tiro.sync.manifest import Manifest, ManifestEntry
+from tiro.sync.snapshot import (
+    DeviceInfo,
+    SnapshotError,
+    build_snapshot,
+    decode_snapshot,
+    encode_device_doc,
+    encode_snapshot,
+    materialize_ops,
+    parse_device_doc,
+    parse_snapshot,
+)
+
+KDF = KdfParams(salt_b64=base64.b64encode(b"\x04" * 16).decode(), m=8, t=1, p=1)
+BODY = "# Hello\n\nSnapshot body.\n"
+
+# D-S3 hash-space adaptation: article manifest entries carry BODY-space hashes
+# while objects/ blobs are keyed by FULL-file addresses, so build_snapshot
+# takes an explicit {path_hint: blob address} map. The address here is a
+# SENTINEL deliberately distinct from content_hash(BODY) (S3.5 review
+# Major #2): if any step leaked the body-space entry hash where the blob
+# address belongs — build's wire "object"/returned set, or materialize's
+# hydration lookup — these tests now fail instead of passing by numeric
+# coincidence.
+ADDRESS = "f" * 64
+OBJECTS = {"articles/hello.md": ADDRESS}
+
+
+def _manifest():
+    """One file entry + one row entry — enough to exercise both branches.
+    NOTE: construct entries the way S2's build_manifest does; if ManifestEntry
+    field names differ as landed, adapt HERE and in snapshot.py, nowhere else."""
+    e_file = ManifestEntry(kind="article", uid="01ART0000000000000000000A1",
+                           hash=content_hash(BODY),
+                           fields={"path_hint": "articles/hello.md", "rating": None,
+                                   "is_read": 0, "snoozed_until": None,
+                                   "opened_count": 0, "source_uid": "01SRC01",
+                                   "url": "https://example.com/hello"},
+                           # HLC string format: {wall_ms:013d}-{counter:06d}-{device}
+                           hlc="1720000000000-000000-dev-a")
+    e_row = ManifestEntry(kind="row:sources", uid="01SRC01", hash=None,
+                          fields={"uid": "01SRC01", "name": "Example",
+                                  "domain": "example.com", "email_sender": None,
+                                  "source_type": "web", "is_vip": 0,
+                                  "created_at": "2026-07-01 00:00:00"},
+                          hlc="1720000000000-000001-dev-a")
+    return Manifest(entries={(e.kind, e.uid): e for e in (e_file, e_row)})
+
+
+class TestSnapshotDoc:
+    def test_build_parse_roundtrip(self):
+        text, hashes = build_snapshot(
+            _manifest(), snapshot_id="01SNAPX", created_by="dev-a",
+            covers={"dev-a": 3, "dev-b": 1}, now="2026-07-11T00:00:00Z",
+            object_hashes=OBJECTS)
+        d = json.loads(text)
+        assert d["sync_format"] == 1
+        assert d["covers"] == {"dev-a": 3, "dev-b": 1}
+        assert [e["kind"] for e in d["entries"]] == sorted(e["kind"] for e in d["entries"])
+        # The article entry's wire dict carries the blob ADDRESS alongside its
+        # body-space hash; non-file entries carry no "object" key.
+        by_kind = {e["kind"]: e for e in d["entries"]}
+        assert by_kind["article"]["object"] == ADDRESS
+        assert by_kind["article"]["hash"] == content_hash(BODY)  # untouched
+        assert "object" not in by_kind["row:sources"]
+        doc = parse_snapshot(text)
+        assert doc.snapshot_id == "01SNAPX" and doc.created_by == "dev-a"
+        assert doc.manifest.entries.keys() == _manifest().entries.keys()
+        assert doc.objects == {"articles/hello.md": ADDRESS}
+        # Only file-kind entries contribute object hashes — the ADDRESSES.
+        assert hashes == {ADDRESS}
+
+    def test_encode_decode_encrypted(self):
+        codec = codec_from_passphrase("pw", KDF)
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 now="2026-07-11T00:00:00Z",
+                                 object_hashes=OBJECTS)
+        blob = encode_snapshot(text, codec)
+        assert b"example.com" not in blob
+        assert decode_snapshot(blob, codec).snapshot_id == "01SNAPX"
+
+    def test_newer_format_refused(self):
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        d["sync_format"] = 99
+        with pytest.raises(SyncFormatError):
+            parse_snapshot(json.dumps(d))
+
+    def test_garbage_is_snapshot_error(self):
+        with pytest.raises(SnapshotError):
+            parse_snapshot("not json")
+
+    def test_malformed_entry_shapes_stay_in_taxonomy(self):
+        """Whole-branch review Major #1 (snapshot twin of the S3.4 segment
+        matrix): valid-JSON docs with malformed entry shapes must raise
+        SnapshotError, never KeyError/AttributeError out of parse or
+        materialize."""
+        base = {
+            "sync_format": 1, "snapshot": "01SNAPZ",
+            "created_at": "2026-07-11T00:00:00Z", "created_by": "dev-a",
+            "covers": {},
+        }
+        hostiles = (
+            # non-dict fields on a row entry
+            [{"kind": "row:sources", "uid": "01X", "hash": None,
+              "fields": [1, 2], "hlc": None}],
+            # bare highlight entry (no article_uid / line)
+            [{"kind": "highlight", "uid": "01H", "hash": "h",
+              "fields": {}, "hlc": None}],
+            # highlight with non-dict line
+            [{"kind": "highlight", "uid": "01H", "hash": "h",
+              "fields": {"article_uid": "01A", "line": "x"}, "hlc": None}],
+        )
+        for entries in hostiles:
+            with pytest.raises(SnapshotError):
+                parse_snapshot(json.dumps({**base, "entries": entries}))
+
+    def test_materialize_wraps_diff_failures_into_taxonomy(self):
+        """Belt for hand-built docs that bypass parse_snapshot's validation:
+        whatever diff chokes on must still quarantine."""
+        from tiro.sync.snapshot import SnapshotDoc
+        bad_entry = ManifestEntry(kind="highlight", uid="01H", hash="h",
+                                  fields={}, hlc=None)
+        doc = SnapshotDoc(snapshot_id="01SNAPZ", created_at="", created_by="",
+                          covers={},
+                          manifest=Manifest(entries={("highlight", "01H"): bad_entry}),
+                          objects={})
+        with pytest.raises(SnapshotError):
+            materialize_ops(doc, {})
+
+    def test_materialize_missing_address_is_honest_error(self):
+        """Review Nit #7: no silent body-space fallback for a hand-built doc
+        lacking an address."""
+        from tiro.sync.snapshot import SnapshotDoc
+        m = _manifest()
+        doc = SnapshotDoc(snapshot_id="01SNAPZ", created_at="", created_by="",
+                          covers={}, manifest=m, objects={})
+        with pytest.raises(SnapshotError, match="no object address"):
+            materialize_ops(doc, {ADDRESS: BODY})
+
+    def test_article_without_object_hashes_refused(self):
+        # Article entry hashes are BODY-space, never a blob address — the
+        # caller MUST supply the address; there is no fallback.
+        with pytest.raises(SnapshotError):
+            build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                           created_by="dev-a", covers={})
+
+    def test_parse_article_entry_without_object_refused(self):
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        for e in d["entries"]:
+            e.pop("object", None)
+        # A snapshot that cannot hydrate its articles is unreadable.
+        with pytest.raises(SnapshotError):
+            parse_snapshot(json.dumps(d))
+
+    def test_non_integer_sync_format_refused(self):
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        for bad in (1.9, True, "1", None):
+            d["sync_format"] = bad
+            with pytest.raises(SnapshotError):
+                parse_snapshot(json.dumps(d))
+
+    def test_hashless_file_entry_refused_at_build_and_parse(self):
+        """S3.5 review Major #3: a file entry with no content hash (unreadable
+        at manifest-build) would upload as a snapshot no device can ever
+        materialize — refuse loudly on both sides."""
+        m = _manifest()
+        broken = ManifestEntry(kind="article", uid="01ART0000000000000000000B2",
+                               hash=None,
+                               fields={"path_hint": "articles/broken.md"})
+        m.entries[(broken.kind, broken.uid)] = broken
+        with pytest.raises(SnapshotError, match="content hash"):
+            build_snapshot(m, snapshot_id="01SNAPX", created_by="dev-a",
+                           covers={}, object_hashes=OBJECTS)
+        # Foreign doc carrying one fails at parse with an honest message.
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        d["entries"].append({"kind": "wiki", "uid": "01WIKI01", "hash": None,
+                             "fields": {"path_hint": "wiki/w.md"}})
+        with pytest.raises(SnapshotError, match="content hash"):
+            parse_snapshot(json.dumps(d))
+
+    def test_build_note_entry_without_map_falls_back_to_hash(self):
+        """Build-side twin of the parse fallback (S3.5 review Minor #5)."""
+        note_hash = content_hash("a note body\n")
+        m = _manifest()
+        note = ManifestEntry(kind="note", uid="01ART0000000000000000000A1",
+                             hash=note_hash,
+                             fields={"path_hint": "notes/hello.md"})
+        m.entries[(note.kind, note.uid)] = note
+        text, hashes = build_snapshot(m, snapshot_id="01SNAPX",
+                                      created_by="dev-a", covers={},
+                                      object_hashes=OBJECTS)  # no note key
+        by_kind = {e["kind"]: e for e in json.loads(text)["entries"]}
+        assert by_kind["note"]["object"] == note_hash
+        assert hashes == {ADDRESS, note_hash}
+
+    def test_parse_note_entry_without_object_falls_back_to_hash(self):
+        # note/wiki/pathfile hash spaces coincide — a missing "object" key
+        # tolerably defaults to the entry hash.
+        note_hash = content_hash("a note body\n")
+        d = {
+            "sync_format": 1,
+            "snapshot": "01SNAPY",
+            "created_at": "2026-07-11T00:00:00Z",
+            "created_by": "dev-a",
+            "covers": {},
+            "entries": [{"kind": "note", "uid": "01ART0000000000000000000A1",
+                         "hash": note_hash,
+                         "fields": {"path_hint": "notes/hello.md"},
+                         "hlc": "1720000000000-000002-dev-a"}],
+        }
+        doc = parse_snapshot(json.dumps(d))
+        assert doc.objects == {"notes/hello.md": note_hash}
+
+
+class TestMaterialize:
+    def test_materialize_hydrates_file_bodies(self):
+        text, hashes = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                      created_by="dev-a", covers={},
+                                      object_hashes=OBJECTS)
+        assert hashes == {ADDRESS}
+        doc = parse_snapshot(text)
+        # objects_plain is keyed by the sentinel ADDRESS only: hydrating via
+        # the body-space op.object_hash would MISS and raise (Major #2 pin).
+        ops = materialize_ops(doc, {ADDRESS: BODY})
+        file_puts = [op for op in ops if isinstance(op, FilePut)]
+        assert len(file_puts) == 1 and file_puts[0].body == BODY
+        # object_hash is rewritten to the blob ADDRESS while hydrating —
+        # the hydrated-op shape apply_ops expects.
+        assert file_puts[0].object_hash == ADDRESS
+        assert len(ops) >= 2  # file op + at least the row op
+
+    def test_missing_object_is_snapshot_error(self):
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        with pytest.raises(SnapshotError):
+            materialize_ops(parse_snapshot(text), {})
+
+    def test_materialize_stamps_are_epoch_pinned(self):
+        """S3.5 review Major #1: bootstrap stamps land in sync_shadow; a
+        wall-time stamp would outrank — and skip-as-stale — every journal
+        tail op written before the bootstrap moment. Epoch-pinned stamps
+        sort BEFORE every real device stamp, so tails always win."""
+        from tiro.sync.journal import HLC, HLCClock
+
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        doc = parse_snapshot(text)
+        ops = materialize_ops(doc, {ADDRESS: BODY})
+        assert ops
+        stamps = [op.hlc for op in ops]
+        assert all(h.wall_ms == 0 and h.device == "snapshot" for h in stamps)
+        assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
+        # Strictly older than even the very first tick of any real clock.
+        assert all(h < HLC(1, 0, "deva") for h in stamps)
+        # S5 can consciously override the clock.
+        ops2 = materialize_ops(doc, {ADDRESS: BODY},
+                               clock=HLCClock("boot", now_ms=lambda: 5))
+        assert all(op.hlc.wall_ms == 5 and op.hlc.device == "boot"
+                   for op in ops2)
+
+
+class TestDeviceDocs:
+    def test_roundtrip(self):
+        info = DeviceInfo(device_id="dev-a", name="Ege's MBP",
+                          last_seen="2026-07-11T00:00:00Z", last_seq=42,
+                          app_version="0.7.0", acked={"dev-b": 7})
+        back = parse_device_doc("dev-a", encode_device_doc(info))
+        assert back == info
+
+    def test_parse_tolerates_missing_optional_keys(self):
+        back = parse_device_doc("dev-a", '{"name": "x"}')
+        assert back.last_seq == 0 and back.acked == {}
+
+    def test_garbage_is_snapshot_error(self):
+        with pytest.raises(SnapshotError):
+            parse_device_doc("dev-a", "][")

@@ -89,6 +89,15 @@ day the release was tagged.
 - `PATCH .../rate|read|snooze` (including the M3.2 unmark paths) now bump
   `articles.meta_updated_at` (UTC) — the LWW clock for the coming sync merge.
 
+### Sync S3 — encryption + backend blob format
+- Sync engine S3 (internal, no user-facing surface yet): age encryption layer
+  (passphrase → Argon2id → X25519 identity via pyrage; recovery code = Bech32
+  age secret key), frozen cross-port crypto parity fixture, sync backend blob
+  format (format.json with version refusal, journal segments, content-addressed
+  objects, snapshot manifests, device registry docs), compaction/GC planning
+  (500-op/7-day cadence, 90-day dead-device rule), and corrupted-blob
+  quarantine semantics. New runtime deps: pyrage (MIT), argon2-cffi (MIT).
+
 ### Sync engine (S4 — storage adapters)
 - Storage adapter contract (`tiro/sync/adapters/`): async `put/get/list/delete/lock/unlock`
   byte stores with TTL-honoring advisory locks and a shared jittered retry policy
