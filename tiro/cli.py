@@ -620,7 +620,15 @@ def cmd_agent(args):
     if args.agent_cmd == "list":
         # Listing is pure static metadata (no library/DB touch needed) —
         # unlike "run", which needs a real, migrated library to write
-        # agent_runs rows + trace files.
+        # agent_runs rows + trace files. Personas are files-as-truth and
+        # need an explicit sync (run_agent normally does this); best-effort
+        # so a missing/uninitialized library can't crash `list` (final-review M-1).
+        try:
+            from tiro.agents import personas
+
+            personas.sync_registry(config)
+        except Exception:
+            logger.debug("persona sync skipped for `tiro agent list`", exc_info=True)
         for agent in sorted(registry.all_agents().values(), key=lambda a: a.name):
             inputs = ", ".join(f"{k}: {t.__name__}" for k, t in agent.inputs.items())
             print(f"  {agent.name}  v{agent.version}  [{agent.tier}]  inputs: {inputs or '(none)'}")

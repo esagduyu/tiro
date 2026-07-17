@@ -88,3 +88,33 @@ def test_agents_page_has_suggestions_and_personas_sections(api):
     assert r.status_code == 200
     for anchor in ("suggestions-queue", "personas-list"):
         assert anchor in r.text
+
+
+def test_manual_run_cold_registry_still_finds_valid_persona(api):
+    """final-review I-1: a cold process (nothing has warmed the persona
+    registry yet) must still 200 a valid persona run through the friendly
+    manual_run pre-check, not 404 it. run_agent itself would sync personas
+    and happily run this -- the pre-check must do the same warming."""
+    from tiro import llm
+    from tiro.agents import registry
+
+    write_persona(_cfg(api), "mine")
+    aid, _ = _seed_article(_cfg(api), title="Cold Registry Target")
+
+    registry.ensure_builtins()
+    registry.unregister_prefix("persona:")   # simulate a cold process
+
+    config = _cfg(api)
+    config.ai_heavy_provider = "fake"
+    config.ai_light_provider = "fake"
+    llm._fake_responses.clear()
+    llm.queue_fake_responses("Steelmanning the opposing view here.")
+    try:
+        r = api.post("/api/agents/persona:mine/run",
+                      json={"inputs": {"article_id": aid}})
+    finally:
+        llm._fake_responses.clear()
+
+    assert r.status_code != 404, r.text
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
