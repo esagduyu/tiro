@@ -1,0 +1,487 @@
+"""Op application + conflict rules (sync S2 — pure merge core, spec §4).
+
+apply_ops folds journal ops into the local library through the existing
+coordinators: file writes are atomic (temp+rename), article rows refresh via
+tiro/sync/reconcile.refresh_article_from_file, deletes go through
+lifecycle.delete_article, sidecars are written file-first. ZERO network
+(test-enforced: monkeypatched socket in tests/test_sync_properties.py).
+
+Concurrency model (plan decision #8): sync_shadow holds the last-synced
+hash+hlc per entry. Per file op: stale (hlc <= shadow hlc) -> skip;
+object_hash == current -> no-op fast-forward; base_hash == current ->
+clean fast-forward; else TRUE CONCURRENCY -> LWW by HLC (local side =
+shadow hlc if unedited, else a fresh local tick), loser preserved as a
+conflict file. Applied ops advance the shadow, so a losing op can never
+win later (monotone convergence).
+
+HASH SPACES (S2.3 review Major #1 — hydrate_bodies' docstring is the
+contract): for ARTICLES, op.object_hash is the FULL-file blob address while
+base_hash and everything in sync_shadow/manifest are BODY-space
+(frontmatter-stripped). An article's current body hash is therefore never
+compared against op.object_hash, and article shadow rows always store the
+BODY-space hash. For notes/wiki/pathfiles the two spaces coincide.
+
+Stats are NEVER touched (tiro import precedent); reading_sessions/audio/
+Chroma are never written (vector_status='pending' + existing retry loop).
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+import frontmatter
+
+from tiro.anchors import content_hash
+from tiro.config import TiroConfig
+from tiro.database import get_connection
+from tiro.migrations import new_ulid
+from tiro.sync.journal import (
+    HLC,
+    Alias,
+    FileDel,
+    FilePut,
+    HLCClock,
+    LineDel,
+    LinePut,
+    Meta,
+    RowDel,
+    RowPut,
+)
+from tiro.sync.manifest import shadow_tombstone, shadow_upsert
+from tiro.sync.reconcile import refresh_article_from_file, write_conflict_file
+
+logger = logging.getLogger(__name__)
+
+MASS_DELETE_FLOOR = 10
+MASS_DELETE_FRACTION = 0.2
+
+_ALLOWED_ROOTS = ("articles", "notes", "wiki")
+
+
+@dataclass
+class ApplyReport:
+    """Per plan decision #11. emitted_ops carries ops the merge itself
+    generated (dedupe aliases) for the engine to journal on push."""
+    applied: int = 0
+    skipped_stale: int = 0
+    conflicts: int = 0
+    resurrected: int = 0
+    deferred: int = 0
+    errors: int = 0
+    tombstones: int = 0
+    guard: str | None = None
+    by_kind: dict = field(default_factory=dict)
+    details: dict = field(default_factory=dict)
+    emitted_ops: list = field(default_factory=list)
+
+    def _count(self, op, action: str, **extra) -> None:
+        kind = type(op).kind
+        self.by_kind[kind] = self.by_kind.get(kind, 0) + 1
+        self.details.setdefault(action, []).append(
+            {"kind": kind, "uid": op.uid, **extra})
+
+    def as_dict(self) -> dict:
+        from dataclasses import asdict
+
+        from tiro.sync.journal import op_to_wire
+
+        d = asdict(self)
+        d["emitted_ops"] = [op_to_wire(op)[0] for op in self.emitted_ops]
+        return d
+
+
+def _resolve_path(config: TiroConfig, path_hint: str) -> Path:
+    """Library-relative path_hint -> absolute path, refusing escapes."""
+    p = Path(path_hint)
+    if p.is_absolute() or ".." in p.parts or not p.parts:
+        raise ValueError(f"bad path_hint: {path_hint!r}")
+    if p.parts[0] not in _ALLOWED_ROOTS:
+        raise ValueError(f"path_hint outside sync roots: {path_hint!r}")
+    return config.library / p
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    from tiro.annotations import _atomic_write_text
+    _atomic_write_text(path, text)
+
+
+def _shadow_get(conn, kind: str, uid: str):
+    return conn.execute(
+        "SELECT hash, hlc, deleted_at FROM sync_shadow WHERE kind = ? AND uid = ?",
+        (kind, uid),
+    ).fetchone()
+
+
+def _entry_kind_for_file(path_hint: str, uid: str) -> str:
+    if uid.startswith("path:"):
+        return "pathfile"
+    root = Path(path_hint).parts[0]
+    return {"articles": "article", "notes": "note", "wiki": "wiki"}[root]
+
+
+def apply_ops(config: TiroConfig, ops: list, *, guard: bool = True,
+              clock: HLCClock | None = None) -> ApplyReport:
+    """FROZEN signature (+ optional clock kw). Never raises on a bad op —
+    per-op failures land in report.errors; only the mass-delete guard
+    halts the whole batch (applying NOTHING, spec §4)."""
+    report = ApplyReport()
+    clock = clock or HLCClock("local")
+    for op in ops:  # engine-parity: fold every remote stamp into the clock
+        clock.observe(op.hlc)
+
+    if guard:
+        msg = _mass_delete_guard(config, ops)
+        if msg:
+            report.guard = msg
+            logger.warning("Sync apply guarded: %s — nothing applied; "
+                           "rerun via tiro sync --accept-mass-delete (S5)", msg)
+            return report
+
+    wiki_touched = False
+    for op in _ordered(ops):
+        try:
+            if isinstance(op, FilePut):
+                wiki_touched |= _apply_file_put(config, op, report, clock)
+            elif isinstance(op, FileDel):
+                wiki_touched |= _apply_file_del(config, op, report)
+            elif isinstance(op, LinePut):
+                _apply_line_put(config, op, report)      # Task 5
+            elif isinstance(op, LineDel):
+                _apply_line_del(config, op, report)      # Task 5
+            elif isinstance(op, Meta):
+                _apply_meta(config, op, report)          # Task 6
+            elif isinstance(op, RowPut):
+                _apply_row_put(config, op, report)       # Task 6
+            elif isinstance(op, RowDel):
+                _apply_row_del(config, op, report)       # Task 6
+            elif isinstance(op, Alias):
+                _apply_alias(config, op, report)         # Task 7
+        except Exception as e:
+            report.errors += 1
+            report._count(op, "errors", error=str(e))
+            logger.error("Sync apply: op %s (%s %s) failed: %s",
+                         op.op_id, type(op).kind, op.uid, e)
+    if wiki_touched:
+        try:
+            from tiro.wiki import reconcile_wiki_index
+            reconcile_wiki_index(config)
+        except Exception as e:
+            logger.error("Sync apply: wiki index refresh failed: %s", e)
+    return report
+
+
+def _ordered(ops: list) -> list:
+    """Deterministic apply order: rows first (referents before links),
+    then files, meta, lines, links, then deletes, aliases last."""
+    def rank(op) -> tuple:
+        if isinstance(op, RowPut):
+            k = 0 if op.table in ("sources", "authors", "tags", "entities",
+                                  "saved_views", "digests") else 4
+        elif isinstance(op, FilePut):
+            k = 1
+        elif isinstance(op, Meta):
+            k = 2
+        elif isinstance(op, LinePut):
+            k = 3
+        elif isinstance(op, LineDel):
+            k = 5
+        elif isinstance(op, RowDel):
+            k = 6 if op.table != "articles" else 7
+        elif isinstance(op, FileDel):
+            k = 6
+        else:  # Alias
+            k = 8
+        return (k, op.hlc.to_str(), op.op_id)
+    return sorted(ops, key=rank)
+
+
+def _mass_delete_guard(config: TiroConfig, ops: list) -> str | None:
+    """Spec §4: a pulled diff deleting > max(10, 20%) of local articles (or
+    the annotations equivalent over highlights) halts the merge."""
+    art_dels = sum(1 for o in ops
+                   if isinstance(o, RowDel) and o.table == "articles")
+    line_dels = sum(1 for o in ops if isinstance(o, LineDel))
+    if not art_dels and not line_dels:
+        return None
+    conn = get_connection(config.db_path)
+    try:
+        n_art = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+        n_hl = conn.execute("SELECT COUNT(*) AS n FROM highlights").fetchone()["n"]
+    finally:
+        conn.close()
+    if art_dels and art_dels > max(MASS_DELETE_FLOOR,
+                                   math.ceil(MASS_DELETE_FRACTION * n_art)):
+        return f"{art_dels} article deletions vs {n_art} local articles"
+    if line_dels and line_dels > max(MASS_DELETE_FLOOR,
+                                     math.ceil(MASS_DELETE_FRACTION * n_hl)):
+        return f"{line_dels} highlight deletions vs {n_hl} local highlights"
+    return None
+
+
+# --- file ops -----------------------------------------------------------------
+
+
+def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
+                    clock: HLCClock) -> bool:
+    """Returns True when a wiki file was touched (index refresh batching)."""
+    if op.body is None:
+        raise ValueError("unhydrated file_put (body missing)")
+    path = _resolve_path(config, op.path_hint)
+    kind = _entry_kind_for_file(op.path_hint, op.uid)
+    is_article = kind == "article"
+
+    conn = get_connection(config.db_path)
+    try:
+        shadow = _shadow_get(conn, kind, op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return False
+
+        current = None
+        if path.exists():
+            if is_article:
+                current = frontmatter.load(str(path)).content  # BODY hash space
+            else:
+                current = path.read_text()
+        # For articles op.object_hash is the FULL-file blob address (hash
+        # spaces, module docstring): re-derive the BODY-space hash from the
+        # hydrated body — this is the only hash ever compared to the current
+        # body or stored into the shadow for an article.
+        incoming_hash_space = (
+            content_hash(frontmatter.loads(op.body).content)
+            if is_article else op.object_hash
+        )
+
+        if is_article:
+            row = conn.execute("SELECT * FROM articles WHERE uid = ?",
+                               (op.uid,)).fetchone()
+            if row is None and current is None:
+                _materialize_article(config, conn, op, report)
+                # Deliberate accepted noise: this shadow row carries only
+                # path_hint in fields, so the next local diff before the
+                # cycle-end save_shadow may re-emit Meta ops for non-default
+                # meta fields (receivers skip them as stale — a bounded
+                # one-cycle echo).
+                shadow_upsert(conn, kind, op.uid, hash=incoming_hash_space,
+                              fields={"path_hint": op.path_hint},
+                              hlc=op.hlc.to_str())
+                conn.commit()
+                report.applied += 1
+                return False
+
+        cur_hash = content_hash(current) if current is not None else None
+        if current is not None and cur_hash == incoming_hash_space:
+            shadow_upsert(conn, kind, op.uid,
+                          hash=cur_hash, fields={"path_hint": op.path_hint},
+                          hlc=op.hlc.to_str())
+            conn.commit()
+            report.applied += 1
+            report._count(op, "fast_forward_noop")
+            return False
+
+        concurrent = (current is not None and op.base_hash is not None
+                      and op.base_hash != cur_hash) or (
+                      current is not None and op.base_hash is None)
+        if concurrent:
+            local_unedited = shadow and shadow["hash"] == cur_hash
+            local_hlc = (HLC.parse(shadow["hlc"]) if local_unedited and shadow["hlc"]
+                         else clock.tick())
+            if op.hlc < local_hlc:
+                # LOCAL wins: remote body preserved as conflict file.
+                loser_body = (frontmatter.loads(op.body).content
+                              if is_article else op.body)
+                dest = write_conflict_file(path.parent, path.stem, loser_body,
+                                           device=op.device)
+                report.conflicts += 1
+                report._count(op, "conflict_local_won",
+                              conflict_file=dest.name)
+                # Shadow hlc does NOT advance past local (local will out-op).
+                conn.commit()
+                return False
+            # REMOTE wins: local body preserved as conflict file.
+            write_conflict_file(path.parent, path.stem, current, device="local")
+            report.conflicts += 1
+            report._count(op, "conflict_remote_won")
+
+        _atomic_write(path, op.body)
+        if is_article:
+            row = conn.execute("SELECT * FROM articles WHERE uid = ?",
+                               (op.uid,)).fetchone()
+            post = frontmatter.loads(op.body)
+            if row is None:
+                _materialize_article(config, conn, op, report)
+            else:
+                refresh_article_from_file(config, conn, row, path, post.content,
+                                          content_hash(post.content),
+                                          meta=post.metadata or {})
+        elif kind == "note":
+            _upsert_note_row(conn, config, op)
+        # Article shadow rows: BODY-space hash + path_hint only — see the
+        # accepted one-cycle Meta-echo note on the materialize branch above.
+        shadow_upsert(conn, kind, op.uid, hash=incoming_hash_space,
+                      fields={"path_hint": op.path_hint}, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report._count(op, "applied")
+        return kind in ("wiki", "pathfile") and op.path_hint.startswith("wiki/")
+    finally:
+        conn.close()
+
+
+def _apply_file_del(config: TiroConfig, op: FileDel, report: ApplyReport) -> bool:
+    path = _resolve_path(config, op.path_hint)
+    kind = _entry_kind_for_file(op.path_hint, op.uid)
+    if kind == "article":
+        raise ValueError("article deletion must be row_del, never file_del")
+    conn = get_connection(config.db_path)
+    try:
+        shadow = _shadow_get(conn, kind, op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return False
+        if not path.exists():
+            shadow_tombstone(conn, kind, op.uid, hlc=op.hlc.to_str())
+            conn.commit()
+            report.tombstones += 1
+            report._count(op, "already_gone")
+            return False
+        current = path.read_text()
+        if op.base_hash is not None and content_hash(current) != op.base_hash:
+            # Edit-wins retention (plan decision #17).
+            report.resurrected += 1
+            report._count(op, "resurrected_edit_wins")
+            return False
+        path.unlink()
+        if kind == "note":
+            row = conn.execute("SELECT id FROM articles WHERE uid = ?",
+                               (op.uid,)).fetchone()
+            if row:
+                conn.execute(
+                    "DELETE FROM notes WHERE article_id = ? AND highlight_id IS NULL",
+                    (row["id"],))
+        shadow_tombstone(conn, kind, op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report.tombstones += 1
+        report._count(op, "applied")
+        return kind == "wiki"
+    finally:
+        conn.close()
+
+
+def _upsert_note_row(conn, config: TiroConfig, op: FilePut) -> None:
+    row = conn.execute("SELECT id FROM articles WHERE uid = ?",
+                       (op.uid,)).fetchone()
+    if row is None:
+        return  # article not here (yet); reconcile_annotations heals later
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    existing = conn.execute(
+        "SELECT id FROM notes WHERE article_id = ? AND highlight_id IS NULL",
+        (row["id"],)).fetchone()
+    if existing:
+        conn.execute("UPDATE notes SET body_markdown = ?, updated_at = ? "
+                     "WHERE id = ?", (op.body, now, existing["id"]))
+    else:
+        conn.execute(
+            "INSERT INTO notes (uid, article_id, highlight_id, body_markdown, "
+            "created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?)",
+            (new_ulid(), row["id"], op.body, now, now))
+
+
+def _materialize_article(config: TiroConfig, conn, op: FilePut,
+                         report: ApplyReport) -> None:
+    """Create the article row for an unknown-uid file_put (plan decision #9).
+    Frontmatter is the row source (the processor writes title/author/url/
+    tags/summary/published); NO enrichment, NO LLM, NO stats. URL dedupe
+    (decision #12) is wired in Task 7 — this function gains a dedupe
+    pre-check there."""
+    path = _resolve_path(config, op.path_hint)
+    post = frontmatter.loads(op.body)
+    body = post.content
+    meta = post.metadata or {}
+    _atomic_write(path, op.body)
+
+    title = str(meta.get("title") or path.stem)
+    url = str(meta.get("url") or "")
+    source_id = _source_for(conn, meta)
+    slug, n = path.stem, 2
+    while conn.execute("SELECT 1 FROM articles WHERE slug = ?", (slug,)).fetchone():
+        slug = f"{path.stem}-{n}"
+        n += 1
+    word_count = len(body.split())
+    conn.execute(
+        """INSERT INTO articles
+           (uid, source_id, title, author, url, slug, markdown_path,
+            summary, word_count, reading_time_min, published_at, ingested_at,
+            ingestion_method, vector_status, body_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sync', 'pending', ?)""",
+        (op.uid, source_id, title, meta.get("author"), url, slug, path.name,
+         meta.get("summary"), word_count, max(1, math.ceil(word_count / 250)),
+         str(meta["published"]) if meta.get("published") else None,
+         datetime.now().isoformat(), content_hash(body)),
+    )
+    article_id = conn.execute("SELECT id FROM articles WHERE uid = ?",
+                              (op.uid,)).fetchone()["id"]
+    from tiro.sync.reconcile import _sync_tags_from_frontmatter
+    if isinstance(meta.get("tags"), list):
+        _sync_tags_from_frontmatter(conn, article_id,
+                                    [str(t) for t in meta["tags"]])
+    try:
+        from tiro.authors import link_article_author
+        link_article_author(conn, article_id, meta.get("author"))
+    except Exception as e:
+        logger.error("link_article_author failed for %s (non-fatal): %s",
+                     op.uid, e)
+    report._count(op, "materialized")
+
+
+def _source_for(conn, meta: dict) -> int:
+    """source_uid meta ops repoint later; at materialize time fall back to
+    frontmatter source name / url domain (S1 _external_source_id pattern)."""
+    from urllib.parse import urlparse
+    url = str(meta.get("url") or "")
+    domain = urlparse(url).netloc if url else ""
+    if domain:
+        from tiro.ingestion.processor import _get_or_create_source
+        return _get_or_create_source(conn, domain)
+    name = str(meta.get("source") or "Synced")
+    row = conn.execute(
+        "SELECT id FROM sources WHERE name = ? AND domain IS NULL "
+        "AND email_sender IS NULL", (name,)).fetchone()
+    if row:
+        return row["id"]
+    cur = conn.execute(
+        "INSERT INTO sources (uid, name, source_type) VALUES (?, ?, 'web')",
+        (new_ulid(), name))
+    return cur.lastrowid
+
+
+# Task 5/6/7 handlers land next; stubs keep _ordered dispatch importable.
+def _apply_line_put(config, op, report):  # pragma: no cover - Task 5
+    raise NotImplementedError
+
+
+def _apply_line_del(config, op, report):  # pragma: no cover - Task 5
+    raise NotImplementedError
+
+
+def _apply_meta(config, op, report):  # pragma: no cover - Task 6
+    raise NotImplementedError
+
+
+def _apply_row_put(config, op, report):  # pragma: no cover - Task 6
+    raise NotImplementedError
+
+
+def _apply_row_del(config, op, report):  # pragma: no cover - Task 6
+    raise NotImplementedError
+
+
+def _apply_alias(config, op, report):  # pragma: no cover - Task 7
+    raise NotImplementedError
