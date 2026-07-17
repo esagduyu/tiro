@@ -25,10 +25,14 @@ BODY = "# Hello\n\nSnapshot body.\n"
 
 # D-S3 hash-space adaptation: article manifest entries carry BODY-space hashes
 # while objects/ blobs are keyed by FULL-file addresses, so build_snapshot
-# takes an explicit {path_hint: blob address} map. In this test BODY serves as
-# the whole file, so the two spaces coincide NUMERICALLY — the map is still
-# mandatory for article entries (the space distinction is structural).
-OBJECTS = {"articles/hello.md": content_hash(BODY)}
+# takes an explicit {path_hint: blob address} map. The address here is a
+# SENTINEL deliberately distinct from content_hash(BODY) (S3.5 review
+# Major #2): if any step leaked the body-space entry hash where the blob
+# address belongs — build's wire "object"/returned set, or materialize's
+# hydration lookup — these tests now fail instead of passing by numeric
+# coincidence.
+ADDRESS = "f" * 64
+OBJECTS = {"articles/hello.md": ADDRESS}
 
 
 def _manifest():
@@ -65,14 +69,15 @@ class TestSnapshotDoc:
         # The article entry's wire dict carries the blob ADDRESS alongside its
         # body-space hash; non-file entries carry no "object" key.
         by_kind = {e["kind"]: e for e in d["entries"]}
-        assert by_kind["article"]["object"] == content_hash(BODY)
+        assert by_kind["article"]["object"] == ADDRESS
+        assert by_kind["article"]["hash"] == content_hash(BODY)  # untouched
         assert "object" not in by_kind["row:sources"]
         doc = parse_snapshot(text)
         assert doc.snapshot_id == "01SNAPX" and doc.created_by == "dev-a"
         assert doc.manifest.entries.keys() == _manifest().entries.keys()
-        assert doc.objects == {"articles/hello.md": content_hash(BODY)}
+        assert doc.objects == {"articles/hello.md": ADDRESS}
         # Only file-kind entries contribute object hashes — the ADDRESSES.
-        assert hashes == {content_hash(BODY)}
+        assert hashes == {ADDRESS}
 
     def test_encode_decode_encrypted(self):
         codec = codec_from_passphrase("pw", KDF)
@@ -115,6 +120,53 @@ class TestSnapshotDoc:
         with pytest.raises(SnapshotError):
             parse_snapshot(json.dumps(d))
 
+    def test_non_integer_sync_format_refused(self):
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        for bad in (1.9, True, "1", None):
+            d["sync_format"] = bad
+            with pytest.raises(SnapshotError):
+                parse_snapshot(json.dumps(d))
+
+    def test_hashless_file_entry_refused_at_build_and_parse(self):
+        """S3.5 review Major #3: a file entry with no content hash (unreadable
+        at manifest-build) would upload as a snapshot no device can ever
+        materialize — refuse loudly on both sides."""
+        m = _manifest()
+        broken = ManifestEntry(kind="article", uid="01ART0000000000000000000B2",
+                               hash=None,
+                               fields={"path_hint": "articles/broken.md"})
+        m.entries[(broken.kind, broken.uid)] = broken
+        with pytest.raises(SnapshotError, match="content hash"):
+            build_snapshot(m, snapshot_id="01SNAPX", created_by="dev-a",
+                           covers={}, object_hashes=OBJECTS)
+        # Foreign doc carrying one fails at parse with an honest message.
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        d = json.loads(text)
+        d["entries"].append({"kind": "wiki", "uid": "01WIKI01", "hash": None,
+                             "fields": {"path_hint": "wiki/w.md"}})
+        with pytest.raises(SnapshotError, match="content hash"):
+            parse_snapshot(json.dumps(d))
+
+    def test_build_note_entry_without_map_falls_back_to_hash(self):
+        """Build-side twin of the parse fallback (S3.5 review Minor #5)."""
+        note_hash = content_hash("a note body\n")
+        m = _manifest()
+        note = ManifestEntry(kind="note", uid="01ART0000000000000000000A1",
+                             hash=note_hash,
+                             fields={"path_hint": "notes/hello.md"})
+        m.entries[(note.kind, note.uid)] = note
+        text, hashes = build_snapshot(m, snapshot_id="01SNAPX",
+                                      created_by="dev-a", covers={},
+                                      object_hashes=OBJECTS)  # no note key
+        by_kind = {e["kind"]: e for e in json.loads(text)["entries"]}
+        assert by_kind["note"]["object"] == note_hash
+        assert hashes == {ADDRESS, note_hash}
+
     def test_parse_note_entry_without_object_falls_back_to_hash(self):
         # note/wiki/pathfile hash spaces coincide — a missing "object" key
         # tolerably defaults to the entry hash.
@@ -139,13 +191,16 @@ class TestMaterialize:
         text, hashes = build_snapshot(_manifest(), snapshot_id="01SNAPX",
                                       created_by="dev-a", covers={},
                                       object_hashes=OBJECTS)
+        assert hashes == {ADDRESS}
         doc = parse_snapshot(text)
-        ops = materialize_ops(doc, {h: BODY for h in hashes})
+        # objects_plain is keyed by the sentinel ADDRESS only: hydrating via
+        # the body-space op.object_hash would MISS and raise (Major #2 pin).
+        ops = materialize_ops(doc, {ADDRESS: BODY})
         file_puts = [op for op in ops if isinstance(op, FilePut)]
         assert len(file_puts) == 1 and file_puts[0].body == BODY
         # object_hash is rewritten to the blob ADDRESS while hydrating —
         # the hydrated-op shape apply_ops expects.
-        assert file_puts[0].object_hash == content_hash(BODY)
+        assert file_puts[0].object_hash == ADDRESS
         assert len(ops) >= 2  # file op + at least the row op
 
     def test_missing_object_is_snapshot_error(self):
@@ -154,6 +209,30 @@ class TestMaterialize:
                                  object_hashes=OBJECTS)
         with pytest.raises(SnapshotError):
             materialize_ops(parse_snapshot(text), {})
+
+    def test_materialize_stamps_are_epoch_pinned(self):
+        """S3.5 review Major #1: bootstrap stamps land in sync_shadow; a
+        wall-time stamp would outrank — and skip-as-stale — every journal
+        tail op written before the bootstrap moment. Epoch-pinned stamps
+        sort BEFORE every real device stamp, so tails always win."""
+        from tiro.sync.journal import HLC, HLCClock
+
+        text, _ = build_snapshot(_manifest(), snapshot_id="01SNAPX",
+                                 created_by="dev-a", covers={},
+                                 object_hashes=OBJECTS)
+        doc = parse_snapshot(text)
+        ops = materialize_ops(doc, {ADDRESS: BODY})
+        assert ops
+        stamps = [op.hlc for op in ops]
+        assert all(h.wall_ms == 0 and h.device == "snapshot" for h in stamps)
+        assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
+        # Strictly older than even the very first tick of any real clock.
+        assert all(h < HLC(1, 0, "deva") for h in stamps)
+        # S5 can consciously override the clock.
+        ops2 = materialize_ops(doc, {ADDRESS: BODY},
+                               clock=HLCClock("boot", now_ms=lambda: 5))
+        assert all(op.hlc.wall_ms == 5 and op.hlc.device == "boot"
+                   for op in ops2)
 
 
 class TestDeviceDocs:

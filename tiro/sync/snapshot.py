@@ -31,6 +31,7 @@ from tiro.sync.crypto import CryptoError, SyncFormatError
 from tiro.sync.journal import (
     SYNC_FORMAT,
     FilePut,
+    HLCClock,
     JournalError,
     Op,
     canonical_json,
@@ -176,9 +177,6 @@ def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]
 #: Must match S2 manifest.py's kind strings (S2 header decision #4).
 FILE_KINDS = ("article", "note", "wiki", "pathfile")
 
-_EMPTY_SHADOW = Shadow(entries={}, tombstones={}, aliases={})
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -220,8 +218,18 @@ def build_snapshot(
     for (kind, _uid), e in sorted(manifest.entries.items()):
         wire = {"kind": e.kind, "uid": e.uid, "hash": e.hash,
                 "fields": e.fields, "hlc": e.hlc}
-        if kind in FILE_KINDS and e.hash:
-            path_hint = e.fields["path_hint"]
+        if kind in FILE_KINDS:
+            path_hint = e.fields.get("path_hint")
+            if not e.hash or not path_hint:
+                # A hashless file entry (unreadable at manifest-build time —
+                # iCloud lazy materialization et al., manifest.unreadable)
+                # would upload as a snapshot NO device can ever materialize
+                # (S3.5 review Major #3). Fail loud; the S5 snapshot writer
+                # defers the cycle or excludes the entry consciously.
+                raise SnapshotError(
+                    f"file entry {e.kind}:{e.uid} has no "
+                    f"{'path_hint' if e.hash else 'content hash'} — "
+                    "cannot snapshot an unreadable file entry")
             address = object_hashes.get(path_hint) if object_hashes else None
             if address is None:
                 if kind == "article":
@@ -249,7 +257,12 @@ def parse_snapshot(text: str) -> SnapshotDoc:
         d = json.loads(text)
         if not isinstance(d, dict):
             raise SnapshotError("snapshot doc is not a JSON object")
-        version = int(d["sync_format"])
+        version = d["sync_format"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            # Mirrors parse_format_json's strictness (S3.3 review Minor #2 /
+            # S3.5 review Minor #4): int() would silently floor a float.
+            raise SnapshotError(
+                f"sync_format must be an integer, got {version!r}")
         if version > SYNC_FORMAT:
             raise SyncFormatError(
                 f"snapshot uses sync_format {version}, this build understands "
@@ -261,7 +274,14 @@ def parse_snapshot(text: str) -> SnapshotDoc:
             entry = ManifestEntry(kind=e["kind"], uid=e["uid"], hash=e.get("hash"),
                                   fields=e.get("fields") or {}, hlc=e.get("hlc"))
             entries[(entry.kind, entry.uid)] = entry
-            if entry.kind in FILE_KINDS and entry.hash:
+            if entry.kind in FILE_KINDS:
+                if not entry.hash:
+                    # build_snapshot refuses to write these; a foreign doc
+                    # carrying one can never materialize — fail at parse
+                    # with an honest message (S3.5 review Major #3).
+                    raise SnapshotError(
+                        f"file entry {entry.kind}:{entry.uid} has no content "
+                        "hash — snapshot cannot be materialized")
                 address = e.get("object")
                 if address is None:
                     if entry.kind == "article":
@@ -301,7 +321,8 @@ def decode_snapshot(blob: bytes, codec) -> SnapshotDoc:
     return parse_snapshot(text)
 
 
-def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str]) -> list:
+def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str],
+                    *, clock=None) -> list:
     """Snapshot -> ops, via S2's diff against an EMPTY shadow (decision #9 —
     bootstrap reuses the one merge path; no second materializer exists).
     `objects_plain` maps blob ADDRESS -> decrypted body for every address
@@ -310,8 +331,18 @@ def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str]) -> list:
     diff emits article FilePuts with object_hash = the BODY-space manifest
     hash; hydration here resolves the blob address via doc.objects (keyed by
     path_hint) and rewrites object_hash to it — the hydrated-op shape
-    apply_ops expects (it treats object_hash as a blob address only)."""
-    ops = diff(doc.manifest, _EMPTY_SHADOW)
+    apply_ops expects (it treats object_hash as a blob address only).
+
+    HLC stamps are EPOCH-PINNED, deliberately (S3.5 review Major #1): the
+    stamps land in sync_shadow via apply_ops, and any stamp at bootstrap
+    wall-time would outrank — and silently skip-as-stale — every journal-tail
+    op written BEFORE the bootstrap moment. HLC(0, n, "snapshot") sorts
+    before every real device stamp, so tail ops always win over snapshot
+    state, which is exactly the covers contract (only seq > covers replays).
+    The `clock` kwarg exists for S5 to override consciously; passing a
+    wall-time clock re-opens the drop-the-tail bug."""
+    ops = diff(doc.manifest, Shadow(),
+               clock=clock or HLCClock("snapshot", now_ms=lambda: 0))
     out = []
     for op in ops:
         if isinstance(op, FilePut) and op.body is None:
