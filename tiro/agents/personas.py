@@ -16,6 +16,7 @@ no partial render and no registration of a broken persona.
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -384,17 +385,29 @@ class PersonaAgent:
                                            payload=payload))
 
 
+# run_agent calls sync_registry concurrently from multiple threads (parallel
+# ingests via asyncio.to_thread, manual persona runs overlapping scheduled
+# digests) BEFORE it takes _RUN_LOCK. The unregister/re-register window below
+# must therefore be atomic under this module lock: without it, two
+# interleaved syncs could either TOCTOU-raise an un-typed ValueError out of
+# registry.register (an untyped exception escaping run_agent's "never raises
+# anything but AgentRunError" contract) or transiently deregister a still-
+# valid persona between one thread's unregister_prefix and its re-register.
+_SYNC_LOCK = threading.Lock()
+
+
 def sync_registry(config: TiroConfig) -> None:
     """Refresh persona:* registrations from disk. Called on every
     run_agent and by the personas API -- user edits apply immediately,
     disabled/broken personas are structurally absent from the registry."""
     from tiro.agents import registry
 
-    ensure_personas(config)
-    registry.unregister_prefix("persona:")
-    personas, _errors = load_personas(config)
-    disabled = set(config.personas_disabled or [])
-    for persona in personas:
-        if persona.slug in disabled:
-            continue
-        registry.register(PersonaAgent(persona))
+    with _SYNC_LOCK:
+        ensure_personas(config)
+        registry.unregister_prefix("persona:")
+        personas, _errors = load_personas(config)
+        disabled = set(config.personas_disabled or [])
+        for persona in personas:
+            if persona.slug in disabled:
+                continue
+            registry.register(PersonaAgent(persona))

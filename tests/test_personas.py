@@ -281,6 +281,42 @@ def test_sync_registry_registers_enabled_skips_disabled_and_broken(
         registry.unregister_prefix("persona:")
 
 
+def test_sync_registry_concurrent_calls_never_raise(initialized_library):
+    """Regression canary for the sync_registry TOCTOU race (K3.5a review
+    finding): concurrent sync_registry calls interleave an
+    unregister_prefix + re-register loop, which -- without _SYNC_LOCK --
+    could TOCTOU-raise an un-typed ValueError from registry.register or
+    make registry.get transiently miss a still-valid persona. This test is
+    a race: it reliably reproduces the failure against the pre-fix code on
+    this machine, but a race is inherently non-deterministic, so a clean
+    pass here is not proof the bug is fixed on every machine/load -- only a
+    failure is proof it's back."""
+    import threading
+
+    from tiro.agents import registry
+    from tiro.agents.personas import sync_registry
+
+    errors = []
+
+    def worker():
+        for _ in range(25):
+            try:
+                sync_registry(initialized_library)
+                registry.get("persona:devils-advocate")
+            except Exception as e:  # noqa: BLE001 - canary must catch everything
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+    finally:
+        registry.unregister_prefix("persona:")
+
+
 def test_persona_run_end_to_end(initialized_library, fake_llm):
     from tiro.agents.runtime import run_agent
     from tiro.suggestions import list_suggestions
