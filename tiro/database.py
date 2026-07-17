@@ -340,6 +340,22 @@ CREATE TABLE IF NOT EXISTS suggestions (
     status TEXT NOT NULL DEFAULT 'pending'
 );
 
+-- Sync state (S5, migration 018): device registry + watermarks. The
+-- is_self=1 row is THIS device's identity (ULID device_id) plus its journal
+-- head, per-remote applied watermarks and last cycle report; is_self=0 rows
+-- mirror remote devices' device docs. Local operational state: never
+-- exported, never backed-up-specially, never doctor-reconciled.
+CREATE TABLE IF NOT EXISTS sync_state (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    is_self INTEGER NOT NULL DEFAULT 0,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    watermarks_json TEXT,
+    last_cycle_json TEXT,
+    last_seen TEXT,
+    last_wall_ms INTEGER
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);
