@@ -47,7 +47,8 @@ settings.register_profile(
 
 # --- zero-I/O gate ---------------------------------------------------------------
 
-_PURE_MODULES = ("journal.py", "manifest.py", "merge.py")
+_PURE_MODULES = ("journal.py", "manifest.py", "merge.py", "crypto.py",
+                 "snapshot.py")  # S3 extends the S2 list (plan Task 7)
 
 
 @pytest.fixture(autouse=True)
