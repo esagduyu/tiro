@@ -309,12 +309,14 @@ def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
             report._count(op, "conflict_remote_won")
 
         _atomic_write(path, op.body)
+        materialized = False
         if is_article:
             row = conn.execute("SELECT * FROM articles WHERE uid = ?",
                                (op.uid,)).fetchone()
             post = frontmatter.loads(op.body)
             if row is None:
                 _materialize_article(config, conn, op, report)
+                materialized = True
             else:
                 refresh_article_from_file(config, conn, row, path, post.content,
                                           content_hash(post.content),
@@ -327,7 +329,10 @@ def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
                       fields={"path_hint": op.path_hint}, hlc=op.hlc.to_str())
         conn.commit()
         report.applied += 1
-        report._count(op, "applied")
+        if not materialized:
+            # _materialize_article already _count()ed the op ("materialized")
+            # — one op, one by_kind increment.
+            report._count(op, "applied")
         return kind in ("wiki", "pathfile") and op.path_hint.startswith("wiki/")
     finally:
         conn.close()
@@ -352,8 +357,12 @@ def _apply_file_del(config: TiroConfig, op: FileDel, report: ApplyReport) -> boo
             report._count(op, "already_gone")
             return False
         current = path.read_text()
-        if op.base_hash is not None and content_hash(current) != op.base_hash:
-            # Edit-wins retention (plan decision #17).
+        if op.base_hash is None or content_hash(current) != op.base_hash:
+            # Edit-wins retention (plan decision #17). base_hash=None on an
+            # EXISTING file is treated as concurrent-by-construction, same
+            # posture as the put side — never blind-delete user text (our
+            # own diff always sends base_hash=prev.hash, so None here means
+            # a foreign/degraded op; retention bias wins).
             report.resurrected += 1
             report._count(op, "resurrected_edit_wins")
             return False
@@ -370,7 +379,10 @@ def _apply_file_del(config: TiroConfig, op: FileDel, report: ApplyReport) -> boo
         report.applied += 1
         report.tombstones += 1
         report._count(op, "applied")
-        return kind == "wiki"
+        # Mirror _apply_file_put's return: a pathfile under wiki/ (e.g. a
+        # deleted wiki conflict file) refreshes the index too.
+        return kind == "wiki" or (kind == "pathfile"
+                                  and op.path_hint.startswith("wiki/"))
     finally:
         conn.close()
 

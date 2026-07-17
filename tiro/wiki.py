@@ -360,19 +360,28 @@ def mark_pages_stale(config: TiroConfig, conn, article_id: int) -> int:
 
 def reconcile_wiki_index(config: TiroConfig) -> dict:
     """Rebuild wiki_pages/wiki_page_articles from wiki/**/*.md on disk
-    (files win) -- excludes _schema.md/index.md/log.md. NEVER writes or
-    deletes page files; only the derived SQLite tables are touched.
-    Unparseable files are skipped (warned) and counted rather than raising,
-    so one corrupt page can't block the whole reconcile.
+    (files win) -- excludes _schema.md/index.md/log.md AND sync conflict
+    files (`{stem}.conflict-{device}-{yyyymmdd}.md` — spec §4: conflict
+    files sync as ordinary files but are EXCLUDED from ingest/index; without
+    this a wiki conflict file would be indexed as a page whose frontmatter
+    uid collides with the real page's). NEVER writes or deletes page files;
+    only the derived SQLite tables are touched. Unparseable files are
+    skipped (warned) and counted rather than raising, so one corrupt page
+    can't block the whole reconcile.
 
     Returns {"pages": n rebuilt, "skipped": n unparseable files,
     "unresolved_articles": n cited article_uids that didn't resolve,
     "duplicate_uids": n files whose frontmatter uid collided with an
     earlier-sorted file's this run}."""
+    # Lazy import: tiro.sync.reconcile lazily imports tiro.wiki inside its
+    # own functions; a module-level import here would risk a cycle.
+    from tiro.sync.reconcile import is_conflict_file
+
     files = []
     if config.wiki_dir.exists():
         files = sorted(
-            p for p in config.wiki_dir.rglob("*.md") if p.name not in _RESERVED_FILENAMES
+            p for p in config.wiki_dir.rglob("*.md")
+            if p.name not in _RESERVED_FILENAMES and not is_conflict_file(p.name)
         )
 
     parsed = []
