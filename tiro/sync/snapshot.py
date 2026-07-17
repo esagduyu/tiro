@@ -21,21 +21,23 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field  # noqa: F401  (Tasks 5-6 use these)
-from datetime import UTC, datetime, timedelta  # noqa: F401  (Tasks 5-6 use these)
-from typing import Any  # noqa: F401  (Tasks 5-6 use this)
+from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
+from datetime import UTC, datetime, timedelta  # noqa: F401  (Task 6 uses timedelta)
+from typing import Any  # noqa: F401  (Task 6 uses this)
 
 from tiro.anchors import content_hash
 from tiro.sync.crypto import CryptoError, SyncFormatError
 from tiro.sync.journal import (
-    SYNC_FORMAT,  # noqa: F401  (Tasks 5-6 use this)
-    FilePut,  # noqa: F401  (Tasks 5-6 use this)
+    SYNC_FORMAT,
+    FilePut,
     JournalError,
     Op,
-    canonical_json,  # noqa: F401  (Tasks 5-6 use this)
+    canonical_json,
     ops_from_jsonl,
     ops_to_jsonl,
 )
+from tiro.sync.manifest import Manifest, ManifestEntry, Shadow, diff
 
 
 class SnapshotError(ValueError):
@@ -166,3 +168,197 @@ def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]
             raise JournalError(f"segment references missing object {h!r}")
         plain[h] = decode_object(objects[h], codec, expected_hash=h)
     return ops_from_jsonl(text, plain)
+
+
+# --- Snapshot manifest docs (spec para 5: snapshots/{ulid}/manifest.age) -----
+
+#: Manifest kinds whose entries carry a content-addressed file body.
+#: Must match S2 manifest.py's kind strings (S2 header decision #4).
+FILE_KINDS = ("article", "note", "wiki", "pathfile")
+
+_EMPTY_SHADOW = Shadow(entries={}, tombstones={}, aliases={})
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True)
+class SnapshotDoc:
+    snapshot_id: str
+    created_at: str
+    created_by: str
+    covers: dict[str, int]  # device_id -> journal seq this snapshot subsumes
+    manifest: Manifest
+    objects: dict[str, str]  # path_hint -> blob address (objects/ key hash)
+
+
+def build_snapshot(
+    manifest: Manifest,
+    *,
+    snapshot_id: str,
+    created_by: str,
+    covers: dict[str, int],
+    now: str | None = None,
+    object_hashes: Mapping[str, str] | None = None,
+) -> tuple[str, set[str]]:
+    """-> (plaintext canonical-JSON doc, object ADDRESSES the doc references).
+    Full state per spec para 5: every entity row + the object-address map.
+    The caller must ensure every returned address exists in objects/ before
+    uploading the snapshot (same objects-first ordering as segments).
+
+    HASH SPACES (D-S3, mirrors manifest.hydrate_bodies): for kind="article"
+    the manifest entry's `hash` is BODY-space (frontmatter-stripped,
+    = articles.body_hash) while objects/ blobs are keyed by the FULL-file
+    plaintext sha256 — so `object_hashes` maps path_hint -> blob address and
+    is REQUIRED for article entries (never defaulted from entry.hash). For
+    note/wiki/pathfile the two spaces coincide, so a missing map entry
+    defaults to entry.hash. Keyed by path_hint, not uid — notes share their
+    article's uid."""
+    entries = []
+    hashes: set[str] = set()
+    for (kind, _uid), e in sorted(manifest.entries.items()):
+        wire = {"kind": e.kind, "uid": e.uid, "hash": e.hash,
+                "fields": e.fields, "hlc": e.hlc}
+        if kind in FILE_KINDS and e.hash:
+            path_hint = e.fields["path_hint"]
+            address = object_hashes.get(path_hint) if object_hashes else None
+            if address is None:
+                if kind == "article":
+                    raise SnapshotError(
+                        f"no object address for {path_hint!r} — article entry "
+                        "hashes are body-space, the caller must supply the "
+                        "blob address")
+                address = e.hash  # note/wiki/pathfile: spaces coincide
+            wire["object"] = address
+            hashes.add(address)
+        entries.append(wire)
+    doc = {
+        "sync_format": SYNC_FORMAT,
+        "snapshot": snapshot_id,
+        "created_at": now or _now_iso(),
+        "created_by": created_by,
+        "covers": covers,
+        "entries": entries,
+    }
+    return canonical_json(doc) + "\n", hashes
+
+
+def parse_snapshot(text: str) -> SnapshotDoc:
+    try:
+        d = json.loads(text)
+        if not isinstance(d, dict):
+            raise SnapshotError("snapshot doc is not a JSON object")
+        version = int(d["sync_format"])
+        if version > SYNC_FORMAT:
+            raise SyncFormatError(
+                f"snapshot uses sync_format {version}, this build understands "
+                f"{SYNC_FORMAT} — upgrade Tiro before syncing"
+            )
+        entries = {}
+        objects: dict[str, str] = {}
+        for e in d["entries"]:
+            entry = ManifestEntry(kind=e["kind"], uid=e["uid"], hash=e.get("hash"),
+                                  fields=e.get("fields") or {}, hlc=e.get("hlc"))
+            entries[(entry.kind, entry.uid)] = entry
+            if entry.kind in FILE_KINDS and entry.hash:
+                address = e.get("object")
+                if address is None:
+                    if entry.kind == "article":
+                        # An article entry's hash is body-space, never a blob
+                        # address — a snapshot that cannot hydrate its
+                        # articles is unreadable.
+                        raise SnapshotError(
+                            f"article entry {entry.uid!r} has no object "
+                            "address — snapshot cannot hydrate its articles")
+                    address = entry.hash  # note/wiki/pathfile: spaces coincide
+                objects[entry.fields["path_hint"]] = address
+        return SnapshotDoc(
+            snapshot_id=d["snapshot"],
+            created_at=d.get("created_at", ""),
+            created_by=d.get("created_by", ""),
+            covers={k: int(v) for k, v in (d.get("covers") or {}).items()},
+            manifest=Manifest(entries=entries),
+            objects=objects,
+        )
+    except (SnapshotError, SyncFormatError):
+        raise
+    except Exception as e:
+        raise SnapshotError(f"unreadable snapshot doc: {e}") from e
+
+
+def encode_snapshot(doc_text: str, codec) -> bytes:
+    return codec.encrypt(doc_text.encode("utf-8"))
+
+
+def decode_snapshot(blob: bytes, codec) -> SnapshotDoc:
+    try:
+        text = codec.decrypt(blob).decode("utf-8")
+    except CryptoError:
+        raise
+    except UnicodeDecodeError as e:
+        raise SnapshotError(f"snapshot blob is not valid UTF-8: {e}") from e
+    return parse_snapshot(text)
+
+
+def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str]) -> list:
+    """Snapshot -> ops, via S2's diff against an EMPTY shadow (decision #9 —
+    bootstrap reuses the one merge path; no second materializer exists).
+    `objects_plain` maps blob ADDRESS -> decrypted body for every address
+    `build_snapshot` reported. S5's bootstrap feeds the result to apply_ops.
+
+    diff emits article FilePuts with object_hash = the BODY-space manifest
+    hash; hydration here resolves the blob address via doc.objects (keyed by
+    path_hint) and rewrites object_hash to it — the hydrated-op shape
+    apply_ops expects (it treats object_hash as a blob address only)."""
+    ops = diff(doc.manifest, _EMPTY_SHADOW)
+    out = []
+    for op in ops:
+        if isinstance(op, FilePut) and op.body is None:
+            addr = doc.objects.get(op.path_hint, op.object_hash)
+            if addr not in objects_plain:
+                raise SnapshotError(
+                    f"snapshot references missing object {addr!r}")
+            op = _dc_replace(op, body=objects_plain[addr], object_hash=addr)
+        out.append(op)
+    return out
+
+
+# --- Device registry docs (spec para 5: devices/{device_id}.json, plaintext) -
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    device_id: str
+    name: str = ""
+    last_seen: str = ""
+    last_seq: int = 0
+    app_version: str = ""
+    acked: dict[str, int] = field(default_factory=dict)
+
+
+def encode_device_doc(info: DeviceInfo) -> str:
+    return canonical_json({
+        "name": info.name, "last_seen": info.last_seen,
+        "last_seq": info.last_seq, "app_version": info.app_version,
+        "acked": info.acked,
+    }) + "\n"
+
+
+def parse_device_doc(device_id: str, text: str) -> DeviceInfo:
+    try:
+        d = json.loads(text)
+        if not isinstance(d, dict):
+            raise SnapshotError("device doc is not a JSON object")
+        return DeviceInfo(
+            device_id=device_id,
+            name=d.get("name", ""),
+            last_seen=d.get("last_seen", ""),
+            last_seq=int(d.get("last_seq", 0)),
+            app_version=d.get("app_version", ""),
+            acked={k: int(v) for k, v in (d.get("acked") or {}).items()},
+        )
+    except SnapshotError:
+        raise
+    except Exception as e:
+        raise SnapshotError(f"unreadable device doc for {device_id!r}: {e}") from e
