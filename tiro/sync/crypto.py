@@ -261,7 +261,11 @@ def parse_format_json(text: str) -> SyncFormat:
         d = json.loads(text)
         if not isinstance(d, dict):
             raise SyncFormatError("format.json is not a JSON object")
-        version = int(d["sync_format"])
+        version = d["sync_format"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            # Strict: build_format_json only ever writes an int, and int()
+            # coercion would silently floor a float (S3.3 review Minor #2).
+            raise SyncFormatError(f"sync_format must be an integer, got {version!r}")
         if version > SYNC_FORMAT:
             raise SyncFormatError(
                 f"backend uses sync_format {version}, this build understands "
@@ -269,6 +273,12 @@ def parse_format_json(text: str) -> SyncFormat:
             )
         recipient = d.get("age_recipient")
         encryption = d.get("encryption") or ("age" if recipient else "none")
+        if encryption not in ("age", "none"):
+            # Allowlist (S3.3 review Major #1): an unknown mode must be a
+            # clean quarantine-class refusal, never an AttributeError deep
+            # in codec construction. A future mode arrives with a
+            # sync_format bump anyway, so this costs no forward-compat.
+            raise SyncFormatError(f"unknown encryption mode: {encryption!r}")
         kdf = KdfParams.from_dict(d["kdf"]) if d.get("kdf") else None
         if encryption == "age" and (kdf is None or recipient is None):
             raise SyncFormatError("age encryption declared but kdf/recipient missing")

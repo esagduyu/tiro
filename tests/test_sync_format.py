@@ -60,6 +60,27 @@ class TestBuildParse:
             with pytest.raises(SyncFormatError):
                 parse_format_json(bad)
 
+    def test_unknown_encryption_mode_is_sync_format_error(self):
+        """S3.3 review Major #1: an unknown mode must refuse cleanly inside
+        the quarantine taxonomy, never AttributeError in codec construction."""
+        d = json.loads(_age_format_text())
+        d["encryption"] = "aes"
+        with pytest.raises(SyncFormatError, match="encryption"):
+            parse_format_json(json.dumps(d))
+        # The hostile shape the review probed: unknown mode, no kdf/recipient.
+        d["kdf"] = None
+        d["age_recipient"] = None
+        with pytest.raises(SyncFormatError, match="encryption"):
+            open_format(json.dumps(d), passphrase="hunter2")
+
+    def test_non_integer_sync_format_is_sync_format_error(self):
+        """S3.3 review Minor #2: no silent int() flooring / bool coercion."""
+        d = json.loads(_age_format_text())
+        for bad in (1.9, True, "2", None):
+            d["sync_format"] = bad
+            with pytest.raises(SyncFormatError):
+                parse_format_json(json.dumps(d))
+
 
 class TestOpenFormat:
     def test_open_with_passphrase(self):
