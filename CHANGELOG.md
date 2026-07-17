@@ -37,6 +37,21 @@ day the release was tagged.
 - `PATCH .../rate|read|snooze` (including the M3.2 unmark paths) now bump
   `articles.meta_updated_at` (UTC) — the LWW clock for the coming sync merge.
 
+### Sync engine (S4 — storage adapters)
+- Storage adapter contract (`tiro/sync/adapters/`): async `put/get/list/delete/lock/unlock`
+  byte stores with TTL-honoring advisory locks and a shared jittered retry policy
+  (transient faults only, 3 attempts).
+- Three adapters: filesystem (atomic temp+rename writes, O_EXCL lock, encryption
+  default off), S3-compatible (boto3, paginated listing, conditional-PUT lock,
+  encryption default on), WebDAV (hand-rolled on httpx: Depth-1 PROPFIND walk,
+  MKCOL parent creation, percent-encoded keys, encryption default on).
+- One shared conformance suite runs against all three: tempdir always;
+  MinIO/Nextcloud via `deploy/docker/docker-compose.sync-test.yml`, auto-skipped
+  when unavailable. Failure injection (5xx retry, list pagination, partial upload,
+  lock contention/steal) runs fully offline via Stubber/MockTransport.
+- New dependency: boto3 (Apache-2.0, license re-verified). No migration, no routes,
+  no UI — the engine loop and settings surface land in S5.
+
 ## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
 
 Tiro becomes something you install, not just something you run from a terminal:
