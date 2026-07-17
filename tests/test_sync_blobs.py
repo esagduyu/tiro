@@ -104,6 +104,51 @@ class TestSegments:
             decode_segment(seg, codec, {})
 
     def test_quarantine_errors_tuple(self):
+        from tiro.sync.crypto import SyncFormatError
         assert SnapshotError in QUARANTINE_ERRORS
         assert CryptoError in QUARANTINE_ERRORS
         assert JournalError in QUARANTINE_ERRORS
+        assert SyncFormatError in QUARANTINE_ERRORS
+
+    def test_unicode_lineish_chars_in_strings_roundtrip(self, codec):
+        """S3.4 review Blocker #1: canonical_json emits U+0085/U+2028/U+2029
+        raw inside JSON strings; the pre-scan must split on \\n only (the
+        S2.8 ops_from_jsonl shear bug, re-guarded here)."""
+        hlc = HLC(1720000000000, 3, "dev-a")
+        ops = [Meta(op_id="01OP00000000000000000000N1", hlc=hlc, device="dev-a",
+                    uid="01ART0000000000000000000A1", field="snoozed_until",
+                    value="nel\x85ls\u2028ps\u2029", ts="2026-07-11T00:00:00Z")]
+        seg, objects = encode_segment(ops, codec)
+        assert objects == {}
+        assert decode_segment(seg, codec, objects) == ops
+
+    def test_malformed_shapes_stay_in_quarantine_taxonomy(self, codec):
+        """S3.4 review Major #2: valid-JSON-but-wrong-shape lines must raise
+        a QUARANTINE_ERRORS member, never AttributeError/TypeError."""
+        hostiles = (
+            b'{"kind": "file_put", "payload": "x"}\n',  # non-dict payload
+            b'{"kind": "file_put", "payload": {"object_hash": 123}}\n',
+            b"[1, 2]\n",  # non-dict line
+        )
+        for hostile in hostiles:
+            with pytest.raises(QUARANTINE_ERRORS):
+                decode_segment(codec.encrypt(hostile), codec, {})
+
+    def test_empty_segment_roundtrips_to_no_ops(self, codec):
+        assert decode_segment(codec.encrypt(b""), codec, {}) == []
+        assert decode_segment(codec.encrypt(b"\n\n"), codec, {}) == []
+
+    def test_parse_rejects_fanout_mismatch_and_uppercase(self):
+        h = content_hash("x")
+        wrong_prefix = f"objects/cd/{h}.age"  # valid hex, wrong fan-out dir
+        assert h[:2] != "cd"
+        with pytest.raises(SnapshotError):
+            parse_object_key(wrong_prefix)
+        upper = h.upper()
+        with pytest.raises(SnapshotError):
+            parse_object_key(f"objects/{upper[:2]}/{upper}.age")
+
+    def test_parse_journal_key_rejects_traversal_devices(self):
+        for dev in (".", ".."):
+            with pytest.raises(SnapshotError):
+                parse_journal_key(f"journal/{dev}/000000000001.age")

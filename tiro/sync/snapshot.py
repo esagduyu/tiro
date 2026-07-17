@@ -75,6 +75,12 @@ def parse_journal_key(key: str) -> tuple[str, int]:
     m = _JOURNAL_KEY_RE.match(key)
     if not m:
         raise SnapshotError(f"not a journal segment key: {key!r}")
+    if m.group(1) in (".", ".."):
+        # Traversal hardening (S3.4 review Minor #3): "." / ".." round-trip
+        # the regex cleanly but would escape the backend root if an adapter
+        # joined keys naively. Device ids are locally generated ULID-ish
+        # strings; adapters must still sanitize their own key joins.
+        raise SnapshotError(f"not a journal segment key: {key!r}")
     return m.group(1), int(m.group(2))
 
 
@@ -132,7 +138,11 @@ def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]
         raise JournalError(f"segment blob is not valid UTF-8: {e}") from e
 
     needed: set[str] = set()
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    # split("\n"), NEVER splitlines(): canonical_json(ensure_ascii=False)
+    # legally emits U+0085/U+2028/U+2029 raw inside JSON strings, and
+    # splitlines() shears such a line mid-string — the exact S2.8 bug
+    # ops_from_jsonl already guards against (S3.4 review Blocker #1).
+    for lineno, raw in enumerate(text.split("\n"), start=1):
         raw = raw.strip()
         if not raw:
             continue
@@ -140,10 +150,15 @@ def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]
             d = json.loads(raw)
         except Exception as e:
             raise JournalError(f"invalid JSON at segment line {lineno}: {e}") from e
+        # isinstance guards (S3.4 review Major #2): a valid-JSON line with a
+        # malformed shape must fall through to ops_from_jsonl's JournalError,
+        # never AttributeError/TypeError out of this pre-scan.
         if isinstance(d, dict) and d.get("kind") == "file_put":
-            h = (d.get("payload") or {}).get("object_hash")
-            if h:
-                needed.add(h)
+            payload = d.get("payload")
+            if isinstance(payload, dict):
+                h = payload.get("object_hash")
+                if isinstance(h, str) and h:
+                    needed.add(h)
 
     plain: dict[str, str] = {}
     for h in sorted(needed):
