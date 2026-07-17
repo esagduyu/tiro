@@ -1097,3 +1097,26 @@ def test_mcp_get_highlights_respects_limit(db_config, monkeypatch):
     mcp_server = _mcp_config(monkeypatch, config)
     result = mcp_server.get_highlights(limit=1)
     assert result.count("quote ") == 1
+
+
+def test_parse_jsonl_tolerates_unicode_line_separators_in_notes(db_config):
+    """S2.8 hard-review nit pin (layer-local regression test for the
+    splitlines -> split-on-LF fix in _parse_jsonl_lines): a note containing
+    U+0085/U+2028 — legal RAW inside ensure_ascii=False JSON — must
+    round-trip without shearing its own sidecar line into malformed
+    fragments."""
+    note = "before\u0085mid\u2028after end"
+    line = {
+        "uid": "01HLNEL0000000000000000001",
+        "article_uid": "01ARTNEL000000000000000001",
+        "quote": "q", "prefix": "", "suffix": "",
+        "position_start": 0, "position_end": 1,
+        "content_hash": "d" * 64, "color": "yellow",
+        "note_markdown": note,
+        "created_at": "2026-07-10T00:00:00Z",
+        "updated_at": "2026-07-10T00:00:00Z",
+    }
+    write_annotations(db_config, "nel-stem", [line])
+    lines = read_annotations(db_config, "nel-stem")
+    assert len(lines) == 1
+    assert lines[0]["note_markdown"] == note

@@ -18,6 +18,33 @@ day the release was tagged.
 - Evals harness: `tiro/evals/` fixtures + `tiro evals run [agent] [--real]` (structural mode is free/CI-gated via pytest); `tiro agent list|run`.
 - STATIC_VERSION 69.
 
+### Sync S2 — pure merge core
+- `tiro/sync/{journal,manifest,merge}.py`: HLC + the eight journal op kinds
+  (spec §5, wire format frozen by tests/fixtures/sync-journal-golden.jsonl,
+  sync_format 1), whole-library manifest build + sync_shadow store
+  (migration 016), state-diff op derivation, and full op application per the
+  spec §4 merge-rules table — LWW files with conflict-file preservation,
+  per-uid JSONL merge with a canonical note algebra that never drops a note
+  body (losers append verbatim under sorted `[conflict {date}]` blocks),
+  per-field meta LWW with per-field clocks (`sync_shadow` kind='metats') and
+  max()-merged opened_count, link add-wins-over-concurrent-remove, article
+  tombstones through `delete_article` with edit-wins resurrection, URL
+  dedupe keeping the ULID-older uid + alias repointing, tombstone TTL 90d,
+  unreadable-file protection (a transiently unreadable file is UNKNOWN,
+  never deleted), and a pull-side mass-delete guard (max(10, 20%),
+  whole-batch refusal).
+- THE 1.0 HARD GATE: hypothesis property suite (commutativity, idempotence,
+  no-note-loss, diff∘apply round-trip, HLC monotonicity) + test-enforced
+  zero-network check on the pure modules. Gate command:
+  `for i in 1 2 3; do uv run pytest tests/test_sync_properties.py -q --hypothesis-seed=random || exit 1; done`
+- New test-only dependency: hypothesis (MPL-2.0, license verified at add).
+- No product surface yet: no routes, no scheduler, no UI, no transport —
+  S3 (crypto/blobs) and S5 (engine loop) build on these interfaces.
+- Known owner-review items (decisions log D26): highlight deletes preserve
+  non-empty notes as conflict files unconditionally (plan-property-vs-spec
+  resolution); conflict blockquote headers carry the date only (device
+  labels are not byte-convergent at line level).
+
 ### Sync S1 — local reconcile engine (absorbed Phase 2b)
 - External edits to the library (Obsidian et al.) now reconcile into SQLite/
   ChromaDB/anchors: changed bodies re-index + re-embed and re-check highlight

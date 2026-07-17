@@ -311,6 +311,20 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     replay_of TEXT
 );
 
+-- Sync shadow (S2, migration 016): what this device last synced — one row
+-- per manifest entry (uid -> hash/fields/hlc). Rows with deleted_at are
+-- tombstones; kind='alias' rows are uid dedupe mappings. Derived/rebuildable
+-- state: never exported, never backed-up-specially, never doctor-reconciled.
+CREATE TABLE IF NOT EXISTS sync_shadow (
+    kind TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    hash TEXT,
+    fields_json TEXT NOT NULL DEFAULT '{}',
+    hlc TEXT,
+    deleted_at TEXT,
+    PRIMARY KEY (kind, uid)
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);

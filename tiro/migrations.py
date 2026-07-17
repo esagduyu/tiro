@@ -561,6 +561,31 @@ def _m015_sync_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _m016_sync_shadow(conn: sqlite3.Connection) -> None:
+    """Sync-engine S2 shadow store (weekend campaign: number 016 is
+    PRE-ASSIGNED; 014 is the agent track's — the framework tolerates
+    version gaps generally, though both 014 and 015 are present here).
+    sync_shadow persists what THIS device last synced, one row per manifest
+    entry: uid -> hash/fields/hlc (spec §3's shadow manifest, in SQLite not
+    JSON per spec §10 scale note). Rebuildable — losing it means a full
+    re-diff, never data loss. Rows with deleted_at set are tombstones
+    (TTL-purged by tiro/sync/manifest.py::expire_tombstones);
+    kind='alias' rows persist uid dedupe mappings (exempt from TTL).
+    sync_state (device registry/watermarks) is deliberately NOT here — S5.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS sync_shadow (
+            kind TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            hash TEXT,
+            fields_json TEXT NOT NULL DEFAULT '{}',
+            hlc TEXT,
+            deleted_at TEXT,
+            PRIMARY KEY (kind, uid)
+        )"""
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -577,6 +602,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (13, "feeds + feed_entries tables", _m013_feeds_tables),
     (14, "agent_runs table", _m014_agent_runs),
     (15, "sync S1 change-detection columns (body_hash/meta_updated_at/sources.uid)", _m015_sync_columns),
+    (16, "sync S2 shadow store (sync_shadow)", _m016_sync_shadow),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

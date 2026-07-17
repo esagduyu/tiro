@@ -142,7 +142,13 @@ def _parse_jsonl_lines(path: Path) -> tuple[list[dict], int]:
     function."""
     lines: list[dict] = []
     malformed = 0
-    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+    # Split on "\n" ONLY, never splitlines(): write_annotations serializes
+    # with ensure_ascii=False, so a note_markdown containing U+0085/U+2028/
+    # U+2029 puts those RAW inside a JSON string — splitlines() treats them
+    # as line breaks and shears the line into two malformed halves,
+    # poisoning the sidecar it was just written to (found by the S2.8
+    # apply-level property suite; same fix as journal.ops_from_jsonl).
+    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
         raw = raw.strip()
         if not raw:
             continue
