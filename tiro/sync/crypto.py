@@ -25,16 +25,16 @@ never these constants.
 from __future__ import annotations
 
 import base64
-import json  # noqa: F401 — used by Task 3's format.json functions in this module
+import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone  # noqa: F401 — used by Task 3's format.json functions
+from datetime import UTC, datetime
 
 import pyrage
 from argon2.low_level import Type, hash_secret_raw
 from pyrage import x25519
 
-from tiro.sync.journal import SYNC_FORMAT, canonical_json  # noqa: F401 — used by Task 3
+from tiro.sync.journal import SYNC_FORMAT, canonical_json
 
 ARGON2ID_M_KIB = 65536  # 64 MiB
 ARGON2ID_T = 3
@@ -215,3 +215,97 @@ class AgeCodec:
 
 def codec_from_passphrase(passphrase: str, kdf: KdfParams) -> AgeCodec:
     return AgeCodec(derive_recovery_code(passphrase, kdf))
+
+
+# --- format.json (spec para 5, plaintext at the backend root) ---------------
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True)
+class SyncFormat:
+    sync_format: int
+    library_id: str
+    encryption: str  # "age" | "none"
+    kdf: KdfParams | None
+    age_recipient: str | None
+    created_at: str
+
+
+def build_format_json(
+    library_id: str,
+    *,
+    kdf: KdfParams | None = None,
+    age_recipient: str | None = None,
+    now: str | None = None,
+) -> str:
+    """Canonical-JSON format.json. age mode needs BOTH kdf and recipient;
+    plaintext mode (filesystem-adapter default, spec para 5) neither."""
+    if (kdf is None) != (age_recipient is None):
+        raise SyncFormatError("kdf and age_recipient must be given together")
+    doc = {
+        "sync_format": SYNC_FORMAT,
+        "library_id": library_id,
+        "encryption": "age" if age_recipient else "none",
+        "kdf": kdf.to_dict() if kdf else None,
+        "age_recipient": age_recipient,
+        "created_at": now or _now_iso(),
+    }
+    return canonical_json(doc) + "\n"
+
+
+def parse_format_json(text: str) -> SyncFormat:
+    try:
+        d = json.loads(text)
+        if not isinstance(d, dict):
+            raise SyncFormatError("format.json is not a JSON object")
+        version = int(d["sync_format"])
+        if version > SYNC_FORMAT:
+            raise SyncFormatError(
+                f"backend uses sync_format {version}, this build understands "
+                f"{SYNC_FORMAT} — upgrade Tiro on this device before syncing"
+            )
+        recipient = d.get("age_recipient")
+        encryption = d.get("encryption") or ("age" if recipient else "none")
+        kdf = KdfParams.from_dict(d["kdf"]) if d.get("kdf") else None
+        if encryption == "age" and (kdf is None or recipient is None):
+            raise SyncFormatError("age encryption declared but kdf/recipient missing")
+        return SyncFormat(
+            sync_format=version,
+            library_id=d["library_id"],
+            encryption=encryption,
+            kdf=kdf,
+            age_recipient=recipient,
+            created_at=d.get("created_at", ""),
+        )
+    except (SyncFormatError, CryptoError):
+        raise
+    except Exception as e:
+        raise SyncFormatError(f"unreadable format.json: {e}") from e
+
+
+def open_format(
+    text: str,
+    *,
+    passphrase: str | None = None,
+    recovery_code: str | None = None,
+) -> tuple[SyncFormat, PlainCodec | AgeCodec]:
+    """Parse + version-check format.json and return the matching codec.
+    Wrong passphrase/recovery code -> clean CryptoError HERE, before any
+    blob is ever fetched or decrypted (spec para 9 'clean refusal')."""
+    fmt = parse_format_json(text)
+    if fmt.encryption == "none":
+        return fmt, PlainCodec()
+    if recovery_code is not None:
+        codec = AgeCodec(recovery_code)
+        if codec.recipient != fmt.age_recipient:
+            raise CryptoError("recovery code does not match this library")
+        return fmt, codec
+    if passphrase is not None:
+        codec = codec_from_passphrase(passphrase, fmt.kdf)
+        if codec.recipient != fmt.age_recipient:
+            raise CryptoError("wrong passphrase for this library")
+        return fmt, codec
+    raise CryptoError("this library is encrypted — passphrase or recovery code required")
