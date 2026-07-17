@@ -386,6 +386,12 @@ def load_shadow(config: TiroConfig) -> Shadow:
                 fields = _json.loads(r["fields_json"] or "{}")
                 s.aliases[r["uid"]] = fields.get("new_uid", "")
                 continue
+            if r["kind"] == "metats":
+                # Per-field meta LWW clocks (merge.py::_apply_meta) — apply-
+                # side bookkeeping, not sync-set entries: skipping them here
+                # keeps save_shadow from tombstoning them as "deleted" and
+                # diff from ever seeing them.
+                continue
             if r["deleted_at"]:
                 s.tombstones[(r["kind"], r["uid"])] = r["deleted_at"]
                 continue
@@ -410,13 +416,19 @@ def shadow_upsert(conn, kind: str, uid: str, *, hash: str | None,
 
 
 def shadow_tombstone(conn, kind: str, uid: str, *, hlc: str | None,
-                     now: datetime | None = None) -> None:
+                     now: datetime | None = None,
+                     fields: dict | None = None) -> None:
+    """`fields` (default {}) lets a highlight tombstone CARRY the killed
+    line's fold (merge.py's convergence model): a line_put with a newer hlc
+    resurrects from it instead of losing every pre-delete contribution.
+    load_shadow ignores tombstone fields, so other kinds are unaffected."""
     conn.execute(
         "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, deleted_at) "
-        "VALUES (?, ?, NULL, '{}', ?, ?) "
-        "ON CONFLICT(kind, uid) DO UPDATE SET hash = NULL, fields_json = '{}', "
+        "VALUES (?, ?, NULL, ?, ?, ?) "
+        "ON CONFLICT(kind, uid) DO UPDATE SET hash = NULL, "
+        "fields_json = excluded.fields_json, "
         "hlc = excluded.hlc, deleted_at = excluded.deleted_at",
-        (kind, uid, hlc, _now_iso(now)),
+        (kind, uid, canonical_json(fields or {}), hlc, _now_iso(now)),
     )
 
 

@@ -282,7 +282,12 @@ def ops_to_jsonl(ops: list[Op]) -> tuple[str, dict[str, str]]:
 
 def ops_from_jsonl(text: str, objects: dict[str, str]) -> list[Op]:
     ops: list[Op] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    # Split on "\n" ONLY — the wire format is one JSON object per
+    # "\n"-terminated line, and canonical_json(ensure_ascii=False) legally
+    # emits U+0085/U+2028/U+2029 etc. RAW inside JSON strings; splitlines()
+    # treats those as line breaks and shears the JSON mid-string (found by
+    # the S2.8 wire round-trip property: note_markdown='\x85').
+    for lineno, raw in enumerate(text.split("\n"), start=1):
         raw = raw.strip()
         if not raw:
             continue

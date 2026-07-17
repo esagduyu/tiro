@@ -61,7 +61,12 @@ class TestMergeJsonl:
                                 label_a="laptop", label_b="phone")
         assert "winner text" in merged["note_markdown"]
         assert "precious loser text" in merged["note_markdown"]
-        assert "[conflict 2026-07-10 laptop]" in merged["note_markdown"]
+        # S2.8 property fix: the block header is content-derived (loser's
+        # updated_at day) — the old positional device label ("laptop" here,
+        # but "local" vs the device id depending on which side a line
+        # arrived from) made merged notes byte-diverge across arrival
+        # orders, failing the apply-level order-independence property.
+        assert "[conflict 2026-07-10]" in merged["note_markdown"]
 
     def test_identical_notes_not_duplicated(self):
         a = _line(note="same", updated="2026-07-10T00:00:00Z")

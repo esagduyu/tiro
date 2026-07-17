@@ -27,8 +27,10 @@ Chroma are never written (vector_status='pending' + existing retry loop).
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import re
 import sqlite3
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -136,7 +138,8 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def _shadow_get(conn, kind: str, uid: str):
     return conn.execute(
-        "SELECT hash, hlc, deleted_at FROM sync_shadow WHERE kind = ? AND uid = ?",
+        "SELECT hash, hlc, fields_json, deleted_at FROM sync_shadow "
+        "WHERE kind = ? AND uid = ?",
         (kind, uid),
     ).fetchone()
 
@@ -572,64 +575,132 @@ def _source_for(conn, meta: dict) -> int:
 
 
 # --- JSONL per-uid merge (spec §4 row 4) ---------------------------------------
+#
+# The note algebra below was rebuilt by the Task-8 property suite (THE 1.0
+# hard gate): the original pairwise blockquote-append was order-DEPENDENT —
+# folding three notes as F(F(a,b),c) vs F(F(b,c),a) nested the conflict
+# blockquotes differently, and the positional local/remote device label made
+# even the two-note case byte-diverge across arrival orders. Merged notes are
+# now a CANONICAL form — winner head + a sorted SET of conflict blocks, each
+# quoting a loser's head VERBATIM under a content-derived "[conflict {day}]"
+# header — so any fold order over the same set of lines produces identical
+# bytes (test_apply_order_independent_across_devices), re-delivery never
+# grows the note (idempotence), and every non-empty note appears verbatim as
+# a substring of the merged note (test_merge_jsonl_never_loses_a_note — the
+# old "> "-per-line quoting broke verbatim substring for multi-line notes).
 
 
 def _line_sort_key(line: dict) -> tuple:
     return (line.get("created_at") or "", line.get("uid") or "")
 
 
+def _line_key(line: dict) -> tuple:
+    """Total order for LWW: updated_at (missing loses), then canonical JSON
+    of the line WITHOUT note_markdown, then the note itself. The core must
+    outrank the note: notes mutate during folds (conflict blocks accrue), so
+    a note-inclusive tiebreak would let the fold GROUPING flip which core
+    wins — breaking associativity-on-line-sets. The note participates only
+    as the final key, where either pick yields the same core."""
+    core = {k: v for k, v in line.items() if k != "note_markdown"}
+    return (line.get("updated_at") or "", canonical_json(core),
+            canonical_json(line.get("note_markdown")))
+
+
 def _lww_pick(a: dict, b: dict) -> tuple[dict, dict]:
-    """(winner, loser) — LWW on updated_at (missing loses), ties broken by
-    canonical JSON of the whole line (arbitrary but symmetric)."""
-    ka = (a.get("updated_at") or "", canonical_json(a))
-    kb = (b.get("updated_at") or "", canonical_json(b))
-    return (a, b) if ka >= kb else (b, a)
+    """(winner, loser) — see _line_key."""
+    return (a, b) if _line_key(a) >= _line_key(b) else (b, a)
 
 
-def _conflict_blockquote(text: str, when: str | None, label: str) -> str:
+# A conflict block header is a FULL line: "> [conflict 2026-07-10]" (loser's
+# updated_at day) or "> [conflict unknown-date]". The day is CONTENT-derived
+# (never a positional local/remote device label) so the same set of merged
+# lines produces byte-identical notes on every device regardless of which
+# side each line arrived from. Markdown lazy continuation renders the raw
+# note lines that follow as part of the same blockquote.
+_CONFLICT_HEADER_RE = re.compile(
+    r"(?m)^> \[conflict (?:\d{4}-\d{2}-\d{2}|unknown-date)\]$")
+
+
+def _conflict_block(text: str, when: str | None) -> str:
     day = (when or "")[:10] or "unknown-date"
-    quoted = "\n".join("> " + ln for ln in text.splitlines() or [""])
-    return f"> [conflict {day} {label}]\n{quoted}"
+    return f"> [conflict {day}]\n{text}"
+
+
+def _decompose_note(note: str | None) -> tuple[str, list[str]]:
+    """Split a merged note into (head, conflict blocks). Inverse of the
+    assembly in _merge_notes: blocks start at header lines and non-final
+    segments carry exactly one trailing "\\n\\n" separator (stripped here, so
+    block bodies with their own trailing newlines round-trip byte-exactly).
+    A note with no header lines is all head. A RAW user note containing a
+    literal header line decomposes deterministically (same bytes, same split
+    on every device) — convergence holds; only its visual grouping shifts."""
+    if not note:
+        return "", []
+    starts = [m.start() for m in _CONFLICT_HEADER_RE.finditer(note)]
+    if not starts:
+        return note, []
+
+    def _strip_sep(segment: str) -> str:
+        return segment[:-2] if segment.endswith("\n\n") else segment
+
+    head = _strip_sep(note[:starts[0]])
+    blocks = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(note)
+        seg = note[start:end]
+        if i + 1 < len(starts):
+            seg = _strip_sep(seg)
+        blocks.append(seg)
+    return head, blocks
+
+
+def _merge_notes(winner: dict, loser: dict) -> str | None:
+    """Canonical note merge: winner's head stays the head; the loser's head
+    (when non-blank and different) joins the conflict-block SET, and the
+    union is reassembled sorted. Set semantics make the result independent
+    of fold order and stable under re-delivery (a block already present is
+    never appended twice)."""
+    w_note = winner.get("note_markdown")
+    wh, wb = _decompose_note(w_note)
+    lh, lb = _decompose_note(loser.get("note_markdown"))
+    blocks = set(wb) | set(lb)
+    if lh.strip() and lh != wh:
+        blocks.add(_conflict_block(lh, loser.get("updated_at")))
+    if blocks == set(wb):
+        return w_note  # nothing new — keep the winner's bytes untouched
+    parts = ([wh] if wh else []) + sorted(blocks)
+    return "\n\n".join(parts) if parts else w_note
 
 
 def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
                 label_a: str = "local", label_b: str = "remote") -> list[dict]:
     """FROZEN core signature. Per-uid set union; same-uid clash resolves
-    LWW-whole-line on updated_at, and a losing note_markdown that differs is
-    APPENDED to the winning note as a [conflict {date} {device}] blockquote —
-    never silently dropped (spec §4). Pure, deterministic, commutative
-    (labels swap with their sides)."""
-    by_uid: dict[str, tuple[dict, str]] = {}
-    for line, label in [(ln, label_a) for ln in lines_a] + \
-                       [(ln, label_b) for ln in lines_b]:
+    LWW-whole-line on updated_at (_line_key total order), and a losing
+    note_markdown that differs is preserved in the winning note as a
+    "[conflict {date}]" block — never silently dropped (spec §4). Pure,
+    deterministic, commutative AND order-independent across arbitrary fold
+    groupings (canonical head+sorted-block-set note form; see the section
+    comment above). label_a/label_b are retained for signature stability but
+    are no longer embedded in conflict blocks — a positional label ("local"
+    vs a device id for the SAME line, depending on arrival order) is exactly
+    what byte-level convergence cannot contain."""
+    del label_a, label_b  # positional labels cannot appear in convergent output
+    by_uid: dict[str, dict] = {}
+    for line in list(lines_a) + list(lines_b):
         uid = line.get("uid")
         if not uid:
             continue
         if uid not in by_uid:
-            by_uid[uid] = (dict(line), label)
+            by_uid[uid] = dict(line)
             continue
-        cur, cur_label = by_uid[uid]
+        cur = by_uid[uid]
         if canonical_json(cur) == canonical_json(line):
             continue  # identical twins — nothing to merge
         winner, loser = _lww_pick(cur, line)
-        l_label = label if winner is cur else cur_label
         merged = dict(winner)
-        w_note = winner.get("note_markdown")
-        l_note = loser.get("note_markdown")
-        quoted_l_note = ("\n".join("> " + ln for ln in l_note.splitlines() or [""])
-                         if l_note else "")
-        # Skip when the loser's note is already present RAW (substring
-        # heuristic, plan decision #15 / D20) or already present as a
-        # BLOCKQUOTE — without the second check a multi-line loser note
-        # re-presented on a later merge (third device, re-delivered file)
-        # appends the same conflict block again (S2.5 review F2; single-line
-        # notes were only coincidentally protected by their "> " prefix).
-        if (l_note and l_note != w_note and l_note not in (w_note or "")
-                and quoted_l_note not in (w_note or "")):
-            block = _conflict_blockquote(l_note, loser.get("updated_at"), l_label)
-            merged["note_markdown"] = (w_note + "\n\n" + block) if w_note else block
-        by_uid[uid] = (merged, cur_label if winner is cur else label)
-    return sorted((line for line, _label in by_uid.values()), key=_line_sort_key)
+        merged["note_markdown"] = _merge_notes(winner, loser)
+        by_uid[uid] = merged
+    return sorted(by_uid.values(), key=_line_sort_key)
 
 
 # --- line ops -------------------------------------------------------------------
@@ -679,8 +750,65 @@ def _highlight_row_from_line(conn, article_id: int, line: dict) -> None:
         conn.execute("DELETE FROM notes WHERE id = ?", (nrow["id"],))
 
 
+# Highlight convergence model (rebuilt by the Task-8 property suite): the
+# per-uid state every device must agree on is a pure function of the op SET —
+#   watermark  = max HLC over all line ops seen for the uid
+#   liveness   = whether the watermark op is a put (dels kill, later puts
+#                resurrect; equal-HLC ties are impossible — HLCs are unique
+#                per (wall, counter, device))
+#   content    = merge_jsonl-fold over ALL put lines ever seen (the canonical
+#                note algebra makes the fold order-independent)
+# The old code skipped any op with hlc <= watermark, which made content
+# depend on arrival order (an updated_at-newer line arriving hlc-late was
+# dropped on one device and folded on another). Now a stale put still FOLDS
+# (content), it just never advances the watermark (liveness). While dead,
+# the fold is carried in the tombstone row's fields ("line"), so a
+# resurrecting put re-folds the full content instead of starting from
+# scratch. Sidecar FILE existence is also convergence-relevant (a kill
+# leaves an empty file behind — Mandate C — which other arrival orders would
+# otherwise never create), so every processed line op ensures the sidecar
+# file of every article it cites exists (_ensure_sidecar).
+
+
+def _fold_line(local: dict | None, incoming: dict) -> dict:
+    return dict(incoming) if local is None else merge_jsonl([local], [incoming])[0]
+
+
+def _stem_for_article(conn, article_uid: str | None) -> str | None:
+    from tiro.annotations import sidecar_stem
+
+    if not article_uid:
+        return None
+    row = conn.execute("SELECT markdown_path FROM articles WHERE uid = ?",
+                       (article_uid,)).fetchone()
+    return sidecar_stem(row["markdown_path"]) if row else None
+
+
+def _ensure_sidecar(config: TiroConfig, conn, article_uid: str | None) -> None:
+    """Create an EMPTY annotations sidecar for `article_uid` if none exists.
+    File existence is part of the convergent state (see the model comment
+    above): which sidecar files exist must be a function of the set of ops
+    processed, never of their arrival order. Empty sidecars are inert by
+    Mandate C (reconcile parses zero lines; the mass-delete guard counts the
+    stem present)."""
+    from tiro.annotations import annotations_dir, write_annotations
+
+    stem = _stem_for_article(conn, article_uid)
+    if stem is None:
+        return
+    path = annotations_dir(config) / f"{stem}.jsonl"
+    if not path.exists():
+        write_annotations(config, stem, [])
+
+
 def _apply_line_put(config: TiroConfig, op: LinePut, report: ApplyReport) -> None:
-    from tiro.annotations import read_annotations, sidecar_stem, write_annotations
+    from tiro.annotations import (
+        _ordered_line,
+        notes_dir,
+        read_annotations,
+        sidecar_stem,
+        write_annotations,
+    )
 
     # Validate BEFORE any file write (S2.5 review F1): an invalid line —
     # uid mismatch or missing/empty quote (mirroring _parse_jsonl_lines'
@@ -696,28 +824,105 @@ def _apply_line_put(config: TiroConfig, op: LinePut, report: ApplyReport) -> Non
         report.errors += 1
         report._count(op, "errors", error="invalid line payload (uid/quote)")
         return
+    # Project onto the on-disk field order BEFORE folding/comparing: the
+    # merge algebra must run in ONE representation space — a raw wire dict
+    # (unknown keys, missing keys) canonicalizes differently from its own
+    # parsed disk form, which would make fold results arrival-order-shaped.
+    incoming = _ordered_line(line)
 
     conn = get_connection(config.db_path)
     try:
+        _ensure_sidecar(config, conn, op.article_uid)
+        _ensure_sidecar(config, conn, incoming.get("article_uid"))
+
         shadow = _shadow_get(conn, "highlight", op.uid)
-        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
-            report.skipped_stale += 1
-            report._count(op, "skipped_stale")
+        wm = shadow["hlc"] if shadow and shadow["hlc"] else None
+        stale = wm is not None and op.hlc.to_str() <= wm
+        dead = bool(shadow and shadow["deleted_at"])
+        new_wm = max(op.hlc.to_str(), wm or "")
+
+        if dead and stale:
+            # DEAD-FOLD: the uid is tombstoned by a higher-hlc delete, so
+            # this put stays dead — but its content must still join the fold
+            # (a later resurrecting put re-folds it) and its note must land
+            # somewhere durable (apply-level no-note-loss).
+            stored = json.loads(shadow["fields_json"] or "{}").get("line")
+            folded = _fold_line(stored, incoming)
+            if stored is not None and folded == stored:
+                report.skipped_stale += 1
+                report._count(op, "skipped_stale")
+                return
+            shadow_tombstone(conn, "highlight", op.uid, hlc=wm,
+                             fields={"article_uid": folded.get("article_uid"),
+                                     "line": folded})
+            conn.commit()
+            note = incoming.get("note_markdown")
+            if note and note.strip():
+                stem = _stem_for_article(conn, incoming.get("article_uid")) or op.uid
+                write_conflict_file(notes_dir(config), stem, note,
+                                    device=op.device)
+            report.applied += 1
+            report._count(op, "dead_fold")
             return
-        arow = conn.execute(
-            "SELECT id, uid, markdown_path FROM articles WHERE uid = ?",
-            (op.article_uid,)).fetchone()
-        if arow is None:
+
+        local_line, cur_stem = None, None
+        if dead:
+            # Fresh hlc on a tombstoned uid: RESURRECT — re-fold with the
+            # content the tombstone carried.
+            local_line = json.loads(shadow["fields_json"] or "{}").get("line")
+        else:
+            # Locate the current line GLOBALLY by highlight uid (the row is
+            # the index): a same-uid put citing a different article must
+            # merge with — and possibly move — the existing line, never fork
+            # a second copy in another sidecar.
+            hrow = conn.execute(
+                "SELECT h.id AS hid, a.markdown_path FROM highlights h "
+                "JOIN articles a ON a.id = h.article_id WHERE h.uid = ?",
+                (op.uid,)).fetchone()
+            if hrow is not None:
+                cur_stem = sidecar_stem(hrow["markdown_path"])
+                local_line = next(
+                    (ln for ln in read_annotations(config, cur_stem)
+                     if ln.get("uid") == op.uid), None)
+
+        folded = _fold_line(local_line, incoming)
+        target = conn.execute(
+            "SELECT id, markdown_path FROM articles WHERE uid = ?",
+            (folded.get("article_uid"),)).fetchone()
+        if target is None:
             report.deferred += 1
             report._count(op, "deferred_unknown_article")
             return
-        stem = sidecar_stem(arow)
-        # FILE FIRST (sidecar-first invariant): merge the incoming line into
-        # the sidecar via the same per-uid rules a two-file merge uses.
-        local_lines = read_annotations(config, stem)
-        merged = merge_jsonl(local_lines, [op.line],
-                             label_a="local", label_b=op.device)
-        write_annotations(config, stem, merged)
+        target_stem = sidecar_stem(target["markdown_path"])
+        moved = cur_stem is not None and cur_stem != target_stem
+
+        if not dead and not moved and local_line is not None and folded == local_line:
+            if stale:
+                # True replay / already-superseded content: nothing changes.
+                report.skipped_stale += 1
+                report._count(op, "skipped_stale")
+                return
+            # Newer hlc, identical content: advance the watermark only.
+            shadow_upsert(conn, "highlight", op.uid,
+                          hash=content_hash(canonical_json(local_line)),
+                          fields={"article_uid": local_line.get("article_uid"),
+                                  "line": local_line,
+                                  "path_hint": f"annotations/{target_stem}.jsonl"},
+                          hlc=new_wm)
+            conn.commit()
+            report.applied += 1
+            report._count(op, "fast_forward_noop")
+            return
+
+        # FILE FIRST (sidecar-first invariant): move out of the old sidecar
+        # when the fold winner's article changed, then rewrite the target.
+        if moved:
+            old_lines = read_annotations(config, cur_stem)
+            write_annotations(config, cur_stem,
+                              [ln for ln in old_lines if ln.get("uid") != op.uid])
+        tlines = read_annotations(config, target_stem)
+        write_annotations(config, target_stem, merge_jsonl(
+            [ln for ln in tlines if ln.get("uid") != op.uid] + [folded], []))
         # ROW SECOND — from the RE-READ line, not the in-memory merge result:
         # write_annotations projects onto _FIELD_ORDER (unknown wire keys
         # dropped, missing keys -> None), so hashing/storing the in-memory
@@ -727,15 +932,15 @@ def _apply_line_put(config: TiroConfig, op: LinePut, report: ApplyReport) -> Non
         # (content_hash(canonical_json(disk line))), same fields shape
         # (article_uid/line/path_hint — path_hint keeps the unreadable-
         # protection guards in diff/save_shadow structurally sound).
-        merged_line = next(ln for ln in read_annotations(config, stem)
+        merged_line = next(ln for ln in read_annotations(config, target_stem)
                            if ln["uid"] == op.uid)
-        _highlight_row_from_line(conn, arow["id"], merged_line)
+        _highlight_row_from_line(conn, target["id"], merged_line)
         shadow_upsert(conn, "highlight", op.uid,
                       hash=content_hash(canonical_json(merged_line)),
                       fields={"article_uid": merged_line.get("article_uid"),
                               "line": merged_line,
-                              "path_hint": f"annotations/{stem}.jsonl"},
-                      hlc=op.hlc.to_str())
+                              "path_hint": f"annotations/{target_stem}.jsonl"},
+                      hlc=new_wm)
         conn.commit()
         report.applied += 1
         report._count(op, "applied")
@@ -753,35 +958,52 @@ def _apply_line_del(config: TiroConfig, op: LineDel, report: ApplyReport) -> Non
 
     conn = get_connection(config.db_path)
     try:
+        _ensure_sidecar(config, conn, op.article_uid)
         shadow = _shadow_get(conn, "highlight", op.uid)
-        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+        wm = shadow["hlc"] if shadow and shadow["hlc"] else None
+        if wm is not None and op.hlc.to_str() <= wm:
             report.skipped_stale += 1
             report._count(op, "skipped_stale")
             return
-        arow = conn.execute(
-            "SELECT id, uid, markdown_path FROM articles WHERE uid = ?",
-            (op.article_uid,)).fetchone()
-        if arow is None:
+        if shadow and shadow["deleted_at"]:
+            # Already dead: advance the watermark, KEEP the carried fold
+            # (resetting fields here would drop content a resurrecting put
+            # is entitled to re-fold).
+            stored_fields = json.loads(shadow["fields_json"] or "{}")
+            shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str(),
+                             fields=stored_fields)
+            conn.commit()
+            report.tombstones += 1
+            report._count(op, "already_dead")
+            return
+        # Locate GLOBALLY by highlight uid first — the envelope's article_uid
+        # may lag a fold-driven move/alias; falling back to it covers a
+        # sidecar line the derived index lost.
+        hrow = conn.execute(
+            "SELECT h.id AS hid, a.markdown_path FROM highlights h "
+            "JOIN articles a ON a.id = h.article_id WHERE h.uid = ?",
+            (op.uid,)).fetchone()
+        if hrow is not None:
+            stem = sidecar_stem(hrow["markdown_path"])
+        else:
+            stem = _stem_for_article(conn, op.article_uid)
+        if stem is None:
             # Nothing local to delete — tombstone so a late line_put stays dead.
             shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str())
             conn.commit()
             report.tombstones += 1
             report._count(op, "tombstone_no_local")
             return
-        stem = sidecar_stem(arow)
         lines = read_annotations(config, stem)
         target = next((ln for ln in lines if ln.get("uid") == op.uid), None)
         if target is not None:
-            # Spec §4: delete wins over concurrent edit EXCEPT note_markdown —
-            # a note edited after the remover's observation is preserved as an
-            # article-level conflict note (never destroyed by a race).
+            # A synced delete ALWAYS preserves a non-empty note as an
+            # article-level conflict note (apply-level no-note-loss: a note
+            # must never vanish silently, even when the remover had observed
+            # it — retention bias over tidiness; observed_updated_at stays on
+            # the wire for provenance but no longer gates preservation).
             note = target.get("note_markdown")
-            edited_after = (
-                note and note.strip()
-                and (op.observed_updated_at is None
-                     or (target.get("updated_at") or "") > op.observed_updated_at)
-            )
-            if edited_after:
+            if note and note.strip():
                 dest = write_conflict_file(notes_dir(config), stem, note,
                                            device=op.device)
                 report.resurrected += 1
@@ -791,12 +1013,16 @@ def _apply_line_del(config: TiroConfig, op: LineDel, report: ApplyReport) -> Non
             # zero lines and the mass-delete guard counts its stem present).
             write_annotations(config, stem,
                               [ln for ln in lines if ln.get("uid") != op.uid])
-        hrow = conn.execute("SELECT id FROM highlights WHERE uid = ?",
-                            (op.uid,)).fetchone()
         if hrow:
-            conn.execute("DELETE FROM notes WHERE highlight_id = ?", (hrow["id"],))
-            conn.execute("DELETE FROM highlights WHERE id = ?", (hrow["id"],))
-        shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str())
+            conn.execute("DELETE FROM notes WHERE highlight_id = ?",
+                         (hrow["hid"],))
+            conn.execute("DELETE FROM highlights WHERE id = ?", (hrow["hid"],))
+        # The tombstone CARRIES the killed fold so a higher-hlc put can
+        # resurrect the full content (convergence model above).
+        fields = ({"article_uid": target.get("article_uid"), "line": target}
+                  if target is not None else {})
+        shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str(),
+                         fields=fields)
         conn.commit()
         report.applied += 1
         report.tombstones += 1
@@ -806,6 +1032,23 @@ def _apply_line_del(config: TiroConfig, op: LineDel, report: ApplyReport) -> Non
 
 
 # --- meta / row / link / article-tombstone ops ----------------------------------
+
+
+def _metats_get(conn, article_uid: str, field: str) -> str | None:
+    row = conn.execute(
+        "SELECT fields_json FROM sync_shadow WHERE kind = 'metats' AND uid = ?",
+        (f"{article_uid}:{field}",)).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["fields_json"] or "{}").get("ts")
+
+
+def _metats_set(conn, article_uid: str, field: str, ts: str) -> None:
+    conn.execute(
+        "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, deleted_at) "
+        "VALUES ('metats', ?, NULL, ?, NULL, NULL) "
+        "ON CONFLICT(kind, uid) DO UPDATE SET fields_json = excluded.fields_json",
+        (f"{article_uid}:{field}", canonical_json({"ts": ts})))
 
 
 def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
@@ -833,12 +1076,20 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
             report.applied += 1
             report._count(op, "applied")
             return
-        local_ts = row["meta_updated_at"]
-        if local_ts and not op.ts:
+        # PER-FIELD LWW clock (Task-8 property fix): articles carry ONE
+        # meta_updated_at across all meta fields, so gating on it coupled
+        # the fields — Meta(rating, ts=5) arriving after Meta(is_read, ts=9)
+        # was skipped as "stale" on one device and applied on another,
+        # diverging on the rating. Applied per-field clocks live in
+        # sync_shadow kind='metats' rows (uid "{article_uid}:{field}"),
+        # written here only, skipped by load_shadow (never diffed, never
+        # tombstoned by save_shadow). meta_updated_at itself is bumped
+        # monotonically below purely as the diff-side emission stamp.
+        local_ts = _metats_get(conn, op.uid, op.field)
+        if not op.ts and (local_ts is not None or row["meta_updated_at"]):
             # S2.6 review F7: a ts-less (None/"") meta op must never
             # overwrite a stamped field — it would bypass both LWW guards
-            # AND null meta_updated_at, regressing the clock. Mirror of the
-            # NULL-local-loses rule.
+            # AND regress the clock. Mirror of the NULL-local-loses rule.
             report.skipped_stale += 1
             report._count(op, "skipped_stale")
             return
@@ -868,6 +1119,10 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
                 report.skipped_stale += 1
                 report._count(op, "skipped_stale_tie")
                 return
+        # meta_updated_at is bumped MONOTONICALLY (never regressed): with
+        # per-field clocks a legitimately-applied op can carry a ts older
+        # than another field's — the column is the diff-side emission stamp,
+        # not the LWW authority anymore.
         if op.field == "source_uid":
             src = conn.execute("SELECT id FROM sources WHERE uid = ?",
                                (op.value,)).fetchone()
@@ -876,12 +1131,15 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
                 report._count(op, "deferred_unknown_source")
                 return
             conn.execute(
-                "UPDATE articles SET source_id = ?, meta_updated_at = ? "
+                "UPDATE articles SET source_id = ?, "
+                "meta_updated_at = MAX(COALESCE(meta_updated_at, ''), ?) "
                 "WHERE id = ?", (src["id"], op.ts, row["id"]))
         else:  # rating / is_read / snoozed_until — allowlisted identifiers only
             conn.execute(
-                f"UPDATE articles SET {op.field} = ?, meta_updated_at = ? "
+                f"UPDATE articles SET {op.field} = ?, "
+                "meta_updated_at = MAX(COALESCE(meta_updated_at, ''), ?) "
                 "WHERE id = ?", (op.value, op.ts, row["id"]))
+        _metats_set(conn, op.uid, op.field, op.ts or "")
         conn.commit()
         report.applied += 1
         report._count(op, "applied")
