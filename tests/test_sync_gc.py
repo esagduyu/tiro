@@ -50,6 +50,15 @@ class TestShouldSnapshot:
     def test_unparseable_timestamp_snapshots(self):
         assert should_snapshot(1, "garbage", now=NOW)  # fail-safe: take one
 
+    def test_exact_boundaries(self):
+        # Spec wording is strict: "age > 7d" — exactly 7 days does NOT
+        # snapshot; exactly 90 days does NOT drop (S3.6 review 6d).
+        assert not should_snapshot(1, "2026-07-04T00:00:00Z", now=NOW)  # =7d
+        devices = {"dev-a": _dev("dev-a", "2026-04-12T00:00:00Z", 1, {})}  # =90d
+        plan = plan_gc(devices=devices, segment_keys=[],
+                       snapshot_covers={"01S": {}}, now=NOW)
+        assert plan.dropped_devices == []
+
 
 class TestPlanGc:
     def _base(self):
@@ -76,6 +85,74 @@ class TestPlanGc:
         # Only the newest snapshot (max ULID) survives.
         assert plan.delete_snapshots == [snapshot_key("01SNAP0000000000000000000A")]
         assert plan.dropped_devices == []
+
+    def test_covers_axis_binds_independently_of_acks(self):
+        """S3.6 review Major #1: the covers check is what guarantees a
+        deleted segment's ops are CONTAINED IN THE SNAPSHOT — without it,
+        fully-acked-but-uncovered segments would be deleted and their ops
+        would survive nowhere a bootstrap can reach. Acks here exceed
+        covers, so covers must be the binding minimum."""
+        devices, segments, _ = self._base()
+        covers = {"01SNAP0000000000000000000B": {"dev-a": 3, "dev-b": 1}}
+        plan = plan_gc(devices=devices, segment_keys=segments,
+                       snapshot_covers=covers, now=NOW)
+        # dev-a: min(covers 3, dev-b acked 4, own 5) => 1..3 — 4 is acked
+        # by everyone but NOT covered, so it must survive.
+        # dev-b: min(covers 1, dev-a acked 2, own 3) => 1 only.
+        assert plan.delete_segments == sorted(
+            [journal_key("dev-a", s) for s in (1, 2, 3)]
+            + [journal_key("dev-b", 1)])
+
+    def test_device_absent_from_covers_never_deletable(self):
+        """S3.6 review 6a: a device with segments but no covers entry is
+        uncovered by definition — nothing of its journal may be deleted."""
+        devices, segments, _ = self._base()
+        covers = {"01SNAP0000000000000000000B": {"dev-a": 4}}  # no dev-b key
+        plan = plan_gc(devices=devices, segment_keys=segments,
+                       snapshot_covers=covers, now=NOW)
+        assert all("dev-b" not in k for k in plan.delete_segments)
+        assert journal_key("dev-a", 4) in plan.delete_segments
+
+    def test_zero_live_devices_deletes_covered_segments(self):
+        """S3.6 review 6c, pinned CONSCIOUSLY: with every device dead the
+        ack conjunction is vacuously true and covered segments delete —
+        safe because covers-containment still holds (the ops live in the
+        snapshot), consistent with 'below every device's ack' over an
+        empty set."""
+        devices = {"dev-a": _dev("dev-a", "2026-01-01T00:00:00Z", 5, {})}
+        segments = [journal_key("dev-a", s) for s in (1, 2, 3)]
+        covers = {"01SNAP0000000000000000000B": {"dev-a": 2}}
+        plan = plan_gc(devices=devices, segment_keys=segments,
+                       snapshot_covers=covers, now=NOW)
+        assert plan.dropped_devices == ["dev-a"]
+        assert plan.delete_segments == [journal_key("dev-a", s) for s in (1, 2)]
+
+    def test_empty_last_seen_drops_with_honest_warning(self):
+        """S3.6 review Minor #3: absent/unreadable last_seen drops the
+        device (never forever-pins), and the warning says so honestly."""
+        devices, segments, covers = self._base()
+        devices["dev-c"] = _dev("dev-c", "", 0, {})
+        plan = plan_gc(devices=devices, segment_keys=segments,
+                       snapshot_covers=covers, now=NOW)
+        assert "dev-c" in plan.dropped_devices
+        assert any("dev-c" in w and "unreadable" in w for w in plan.warnings)
+        assert journal_key("dev-a", 4) in plan.delete_segments
+
+    def test_non_dominating_latest_keeps_older_snapshot(self):
+        """D-S3 refinement of decision #12b (S3.6 review Minor #2): the
+        advisory lock lets two devices race snapshot writes; a newer-ULID
+        snapshot whose covers do NOT dominate the older one's must not
+        delete it — that would strand journal ranges a prior GC already
+        deleted segments for."""
+        devices, segments, _ = self._base()
+        covers = {"01SNAP0000000000000000000A": {"dev-a": 4, "dev-b": 2},
+                  "01SNAP0000000000000000000B": {"dev-a": 2, "dev-b": 2}}
+        plan = plan_gc(devices=devices, segment_keys=segments,
+                       snapshot_covers=covers, now=NOW)
+        assert plan.delete_snapshots == []
+        assert any("does not dominate" in w for w in plan.warnings)
+        # Segment GC still runs against the LATEST's covers only.
+        assert journal_key("dev-a", 3) not in plan.delete_segments
 
     def test_dead_device_stops_blocking(self):
         devices, segments, covers = self._base()

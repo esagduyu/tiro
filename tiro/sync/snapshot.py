@@ -402,6 +402,12 @@ DEAD_DEVICE_DAYS = 90         # FROZEN: unseen >90d stops blocking journal GC
 
 
 def _parse_iso(ts: str) -> datetime | None:
+    # STRICT by design and part of the cross-port wire contract (S3.6 review
+    # Minor #4): every timestamp this layer writes (_now_iso, DeviceInfo
+    # last_seen/created_at) is exactly "%Y-%m-%dT%H:%M:%SZ" — no fractional
+    # seconds, no offsets. A port emitting any other shape would have its
+    # device silently demoted to dead every cycle; ports must match the
+    # format, not this parser loosened.
     try:
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except Exception:
@@ -450,10 +456,18 @@ def plan_gc(
     """Pure GC plan (spec para 6.5): a segment journal/{d}/{seq} is deletable
     iff (a) the LATEST snapshot covers it (seq <= covers[d]) and (b) every
     LIVE device has applied it (a device implicitly acks its own journal at
-    last_seq). Devices unseen > DEAD_DEVICE_DAYS are dropped from
-    ack-blocking with a warning so a dead device can't pin the journal
-    forever. Only the latest snapshot survives. S5 executes the plan;
-    nothing here does I/O."""
+    last_seq). Devices unseen > DEAD_DEVICE_DAYS — or whose last_seen is
+    absent/unreadable — are dropped from ack-blocking with a warning so a
+    dead device can't pin the journal forever (dropping can never lose
+    committed data: the covers gate still requires deleted segments to be
+    snapshot-contained; the cost is the dropped device may re-bootstrap).
+    An older snapshot is deletable only when the latest's covers DOMINATE
+    its covers per-device (D-S3 refinement of plan decision #12b, retention
+    direction): the advisory lock means two devices can race snapshot
+    writes, and a newer-ULID snapshot with non-dominating covers would
+    strand journal ranges a prior GC already deleted segments for.
+    S5 executes the plan; nothing here does I/O. Input contract for S5:
+    snapshot ids are ULIDs (max() = creation order relies on it)."""
     now = now or datetime.now(UTC)
     warnings: list[str] = []
 
@@ -461,7 +475,17 @@ def plan_gc(
         return GCPlan([], [], [], ["no snapshot yet — journal GC blocked"])
     latest_id = max(snapshot_covers)  # ULIDs sort by creation time
     covers = snapshot_covers[latest_id]
-    delete_snapshots = sorted(snapshot_key(s) for s in snapshot_covers if s != latest_id)
+    delete_snapshots: list[str] = []
+    for s, c in snapshot_covers.items():
+        if s == latest_id:
+            continue
+        if all(covers.get(d, -1) >= seq for d, seq in c.items()):
+            delete_snapshots.append(snapshot_key(s))
+        else:
+            warnings.append(
+                f"snapshot {s!r} kept: latest {latest_id!r} does not "
+                "dominate its covers")
+    delete_snapshots.sort()
 
     live: dict[str, DeviceInfo] = {}
     dropped: list[str] = []
@@ -471,8 +495,8 @@ def plan_gc(
         if seen is None or (now - seen) > timedelta(days=DEAD_DEVICE_DAYS):
             dropped.append(did)
             warnings.append(
-                f"device {did!r} unseen for >{DEAD_DEVICE_DAYS}d — "
-                "no longer blocks journal GC")
+                f"device {did!r} unseen for >{DEAD_DEVICE_DAYS}d or "
+                "last_seen unreadable — no longer blocks journal GC")
         else:
             live[did] = info
 
@@ -497,7 +521,10 @@ def plan_gc(
 def plan_object_gc(live_hashes: set[str], object_keys: list[str]) -> list[str]:
     """Objects referenced by neither the latest snapshot nor any surviving
     segment are deletable. The caller (S5) computes live_hashes as
-    build_snapshot's hash set UNION every kept segment's referenced hashes.
+    build_snapshot's returned ADDRESS set (blob addresses — full-file space
+    for articles, D-S3) UNION every kept segment's referenced object_hash
+    values (also blob addresses post-hydration). Never pass body-space
+    entry hashes here — they would mark every article object dead.
     Unparseable keys are left alone (never delete what we don't understand)."""
     delete: list[str] = []
     for key in object_keys:
