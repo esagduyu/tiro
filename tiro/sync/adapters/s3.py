@@ -27,6 +27,7 @@ from botocore.client import Config as BotoConfig
 from botocore.exceptions import (
     ClientError,
     HTTPClientError,
+    IncompleteReadError,
     ParamValidationError,
 )
 from botocore.exceptions import (
@@ -59,6 +60,17 @@ def _classify(e: ClientError) -> tuple[str, int]:
     code = e.response.get("Error", {}).get("Code", "")
     status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
     return code, status
+
+
+def _is_transient(code: str, status: int) -> bool:
+    """5xx and throttle codes retry — EXCEPT 501 NotImplemented, which never
+    heals by retrying (it's a capability answer, not a fault) and must reach
+    lock()'s best-effort fallback un-retried (plan decision #12; the plan's
+    reference code classified it transient, making the fallback dead code —
+    caught in per-task review)."""
+    if status == 501 or code == "NotImplemented":
+        return False
+    return status >= 500 or status == 429 or code in _TRANSIENT_CODES
 
 
 class S3Adapter(StorageAdapter):
@@ -102,11 +114,13 @@ class S3Adapter(StorageAdapter):
                 return await asyncio.to_thread(fn, **kwargs)
             except ClientError as e:
                 code, status = _classify(e)
-                if status >= 500 or code in _TRANSIENT_CODES:
+                if _is_transient(code, status):
                     raise TransientAdapterError(f"{endpoint}: {code or status}") from e
                 raise
-            except (BotoConnectionError, HTTPClientError) as e:
-                # endpoint/connect/read-timeout/connection-closed families
+            except (BotoConnectionError, HTTPClientError, IncompleteReadError) as e:
+                # endpoint/connect/read-timeout/connection-closed/mid-stream
+                # body-read families (IncompleteReadError is a bare
+                # BotoCoreError, not under the other two)
                 raise TransientAdapterError(f"{endpoint}: {e}") from e
 
         try:
@@ -128,15 +142,24 @@ class S3Adapter(StorageAdapter):
             raise AdapterError(f"put {key}: {e}") from e
 
     async def get(self, key: str) -> bytes:
+        k = self._k(key)
+
+        def _get_sync() -> bytes:
+            # Body read happens INSIDE the retried/classified/audited
+            # envelope: get_object returns at headers, the body streams
+            # after — a mid-stream disconnect must retry and audit as a
+            # failure, not escape as a raw botocore streaming error after
+            # a success audit line (per-task review fix).
+            resp = self._client.get_object(Bucket=self.bucket, Key=k)
+            return resp["Body"].read()
+
         try:
-            resp = await self._call("s3:get", self._client.get_object,
-                                    Bucket=self.bucket, Key=self._k(key))
+            return await self._call("s3:get", _get_sync)
         except ClientError as e:
             code, status = _classify(e)
             if code in ("NoSuchKey", "404") or status == 404:
                 raise KeyMissing(key) from e
             raise AdapterError(f"get {key}: {e}") from e
-        return await asyncio.to_thread(resp["Body"].read)
 
     async def list(self, prefix: str) -> list[str]:
         validate_prefix(prefix)
@@ -157,10 +180,10 @@ class S3Adapter(StorageAdapter):
                 return await asyncio.to_thread(_list_sync)
             except ClientError as e:
                 code, status = _classify(e)
-                if status >= 500 or code in _TRANSIENT_CODES:
+                if _is_transient(code, status):
                     raise TransientAdapterError(f"s3:list: {code or status}") from e
                 raise AdapterError(f"list {prefix}: {e}") from e
-            except (BotoConnectionError, HTTPClientError) as e:
+            except (BotoConnectionError, HTTPClientError, IncompleteReadError) as e:
                 raise TransientAdapterError(f"s3:list: {e}") from e
 
         started = time.monotonic()

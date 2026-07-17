@@ -79,11 +79,15 @@ class TestS3Conformance(AdapterConformance):
 def _stubbed_adapter(page_size: int = 1000) -> tuple:
     """Adapter over a never-connecting client + its Stubber."""
     import boto3
+    from botocore.client import Config as BotoConfig
     from botocore.stub import Stubber
 
     client = boto3.client(
         "s3", endpoint_url="http://stub.invalid", region_name="us-east-1",
         aws_access_key_id="stub", aws_secret_access_key="stub",
+        # same retries-off config as the adapter's own client, so decision #1
+        # ("ours is the only retry layer") holds by construction here too
+        config=BotoConfig(retries={"max_attempts": 1, "mode": "standard"}),
     )
     adapter = S3Adapter(
         endpoint_url="http://stub.invalid", bucket="bkt", access_key="stub",
@@ -209,6 +213,72 @@ class TestS3FailureInjection:
         stub.add_response("put_object", {}, None)  # conditional retry succeeds
         with stub:
             assert await adapter.lock(ttl_s=300) is True
+
+    async def test_lock_501_falls_back_to_best_effort_and_acquires(self, no_sleep):
+        """A backend without conditional-PUT support (real HTTP 501) must
+        reach the decision-#12 best-effort fallback UNRETRIED — with 501
+        classified transient (the plan's reference code), the fallback was
+        dead code and lock() raised after burning retries."""
+        adapter, stub = _stubbed_adapter()
+        stub.add_client_error(
+            "put_object", service_error_code="NotImplemented", http_status_code=501,
+        )
+        # fallback: read-check (no lock present) -> unconditional put -> read-back
+        stub.add_client_error(
+            "get_object", service_error_code="NoSuchKey", http_status_code=404,
+            expected_params={"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        stub.add_response("put_object", {}, None)
+        stub.add_response(
+            "get_object", {"Body": _body(make_lock_payload("dev-a", 300))},
+            {"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        with stub:
+            assert await adapter.lock(ttl_s=300) is True
+        assert no_sleep == []  # 501 is a capability answer, never retried
+        stub.assert_no_pending_responses()
+
+    async def test_lock_501_fallback_readback_foreign_owner_returns_false(self, no_sleep):
+        """Best-effort read-back verification: if another device's payload
+        won the unconditional-PUT race, we did NOT acquire."""
+        adapter, stub = _stubbed_adapter()
+        stub.add_client_error(
+            "put_object", service_error_code="NotImplemented", http_status_code=501,
+        )
+        stub.add_client_error(
+            "get_object", service_error_code="NoSuchKey", http_status_code=404,
+            expected_params={"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        stub.add_response("put_object", {}, None)
+        stub.add_response(
+            "get_object", {"Body": _body(make_lock_payload("dev-racer", 300))},
+            {"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        with stub:
+            assert await adapter.lock(ttl_s=300) is False
+        assert no_sleep == []
+        stub.assert_no_pending_responses()
+
+    async def test_get_midstream_body_failure_retried(self, no_sleep):
+        """get_object returns at headers; the body streams afterwards. A
+        mid-stream failure (IncompleteReadError) must retry inside the
+        adapter's envelope, not escape raw after a success audit line."""
+        from botocore.response import StreamingBody
+
+        adapter, stub = _stubbed_adapter()
+        stub.add_response(
+            "get_object",
+            {"Body": StreamingBody(io.BytesIO(b"xy"), 10)},  # lies: 10 != 2
+            {"Bucket": "bkt", "Key": "format.json"},
+        )
+        stub.add_response(
+            "get_object", {"Body": _body(b"v1")},
+            {"Bucket": "bkt", "Key": "format.json"},
+        )
+        with stub:
+            assert await adapter.get("format.json") == b"v1"
+        assert len(no_sleep) == 1  # one backoff between the two attempts
+        stub.assert_no_pending_responses()
 
     def test_encrypt_default_on(self):
         assert S3Adapter.encrypt_default is True  # spec §5
