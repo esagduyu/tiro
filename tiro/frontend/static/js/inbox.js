@@ -375,7 +375,7 @@ function renderArticle(a, showScore) {
     const sourceTypePill = `<span class="pill source-type-pill source-type-${sourceType} clickable-tag" data-tag="${esc(sourceTypeLabel)}">${sourceTypeLabel}</span>`;
 
     const suggestionPill = suggestionCounts[a.id] ? `<a class="pill suggestion-pill"
-        href="/articles/${num(a.id)}#suggestions"
+        href="/articles/${num(a.id)}#reader-suggestions"
         title="${num(suggestionCounts[a.id])} pending suggestions">
         ${icon("message", { size: 12 })} ${num(suggestionCounts[a.id])}</a>` : "";
 

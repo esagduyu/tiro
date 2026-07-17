@@ -318,14 +318,19 @@ async function loadSuggestionsPanel(articleId) {
                 <button type="button" class="btn btn-ghost" data-d>Dismiss</button>
             </div>`;
         const resolve = async (action) => {
-            const r = await fetch(`/api/suggestions/${encodeURIComponent(s.uid)}/${action}`, { method: "POST" });
-            if (r.ok) {
-                card.remove();
-                showToast(action === "accept" ? "Applied" : "Dismissed");
-            } else {
-                showToast((await r.json()).detail || "Failed", "error");
+            try {
+                const r = await fetch(`/api/suggestions/${encodeURIComponent(s.uid)}/${action}`, { method: "POST" });
+                if (r.ok) {
+                    card.remove();
+                    showToast(action === "accept" ? "Applied" : "Dismissed");
+                } else {
+                    showToast((await r.json().catch(() => ({}))).detail || "Failed", "error");
+                }
+            } catch {
+                showToast("Network error", "error");
+            } finally {
+                if (!host.querySelector(".suggestion-card")) host.style.display = "none";
             }
-            if (!host.querySelector(".suggestion-card")) host.style.display = "none";
         };
         card.querySelector("[data-a]").addEventListener("click", () => resolve("accept"));
         card.querySelector("[data-d]").addEventListener("click", () => resolve("dismiss"));
