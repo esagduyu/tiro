@@ -265,6 +265,22 @@ def load_config(config_path: str | Path | None = None) -> TiroConfig:
     return config
 
 
+def yaml_quote(value: str) -> str:
+    """Pin a string for persist_config as a single-quoted YAML scalar.
+
+    persist_config writes through ruamel's YAML 1.2 emitter, which leaves
+    values like ``on``/``off``/``yes``/``no`` as plain scalars — but
+    load_config reads with pyyaml (YAML 1.1), where those plain scalars
+    parse as BOOLEANS. Any persisted string whose value can collide with a
+    YAML 1.1 boolean literal (sync_encrypt's "on"/"off") must go through
+    this helper so it round-trips as the string it is instead of poisoning
+    the config (the S5.6-fix `_pin` trap, centralized here in S5.7).
+    """
+    from ruamel.yaml.scalarstring import SingleQuotedScalarString
+
+    return SingleQuotedScalarString(value)
+
+
 def persist_config(config: TiroConfig, updates: dict) -> None:
     """Merge updates into the YAML file at config.config_path.
 

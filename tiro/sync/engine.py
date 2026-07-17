@@ -244,6 +244,59 @@ def upsert_remote_device(
         conn.close()
 
 
+def load_sync_status(config: TiroConfig) -> dict:
+    """One status dict for every sync-status surface (GET /api/settings/sync,
+    the sidebar dot, S6 doctor). Pure read, NEVER raises: a missing/unreadable
+    DB degrades to empty defaults — no table minting, no device-identity
+    side effects (unlike adapter_for_config).
+
+    dot semantics: "err" when the last cycle errored; "warn" when it needs
+    attention OR sync is enabled but has never completed a cycle; else "ok"
+    (skipped_lock counts as ok — another device legitimately held the lock).
+    """
+    configured = bool(config.sync_path or config.sync_s3_bucket
+                      or config.sync_webdav_url)
+    last_cycle = None
+    device_name = None
+    devices: list[dict] = []
+    try:
+        if config.db_path.exists():
+            state = read_sync_state(config)
+            last_cycle = state["last_cycle"]
+            self_row = state["self"]
+            if self_row is not None:
+                device_name = self_row.get("name") or None
+            devices = [
+                {
+                    "device_id": r["device_id"],
+                    "name": r["name"],
+                    "is_self": bool(r["is_self"]),
+                    "last_seq": r["last_seq"] or 0,
+                    "last_seen": r["last_seen"],
+                }
+                for r in state["devices"]
+            ]
+    except Exception as e:  # read_sync_state already degrades; belt on top
+        logger.warning("load_sync_status: unreadable sync state: %s", e)
+    result = (last_cycle or {}).get("result")
+    if result == "error":
+        dot = "err"
+    elif result == "needs_attention" or (config.sync_enabled
+                                         and last_cycle is None):
+        dot = "warn"
+    else:
+        dot = "ok"
+    return {
+        "configured": configured,
+        "enabled": config.sync_enabled,
+        "dot": dot,
+        "last_cycle": last_cycle,
+        "last_synced_at": (last_cycle or {}).get("finished_at"),
+        "device_name": device_name,
+        "devices": devices,
+    }
+
+
 class SyncConfigError(Exception):
     """Sync is not (fully) configured, or configured inconsistently."""
 

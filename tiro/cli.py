@@ -1017,7 +1017,7 @@ def _sync_setup(config):
     import asyncio
     import getpass
 
-    from tiro.config import persist_config
+    from tiro.config import persist_config, yaml_quote
     from tiro.database import get_connection
     from tiro.sync.crypto import SyncFormatError, parse_format_json
     from tiro.sync.engine import (
@@ -1031,16 +1031,6 @@ def _sync_setup(config):
         verify_passphrase,
     )
     from tiro.sync.snapshot import FORMAT_KEY
-
-    def _pin(value: str) -> str:
-        # persist_config writes through ruamel's YAML 1.2 emitter, which
-        # leaves `on`/`off` as plain scalars — but load_config reads with
-        # pyyaml (YAML 1.1), where plain on/off are BOOLEANS. Persist the
-        # encryption pin quoted so it round-trips as the string
-        # resolve_encryption expects instead of poisoning the config.
-        from ruamel.yaml.scalarstring import SingleQuotedScalarString
-
-        return SingleQuotedScalarString(value)
 
     updates: dict = {}
     try:
@@ -1097,18 +1087,18 @@ def _sync_setup(config):
                     encrypt = "off"
                 else:
                     print("Keeping encryption ON.")
-            updates["sync_encrypt"] = _pin(encrypt)
+            updates["sync_encrypt"] = yaml_quote(encrypt)
             config.sync_encrypt = encrypt
         else:
             answer = input("Encrypt blobs? [y/N] ").strip().lower()
             if answer in ("y", "yes"):
-                updates["sync_encrypt"] = _pin("on")
+                updates["sync_encrypt"] = yaml_quote("on")
                 config.sync_encrypt = "on"
             else:
                 # A "no" pins auto (= off for filesystem) EXPLICITLY — a
                 # re-run answering "no" must not silently inherit a stale
                 # "on" from an earlier ceremony.
-                updates["sync_encrypt"] = _pin("auto")
+                updates["sync_encrypt"] = yaml_quote("auto")
                 config.sync_encrypt = "auto"
     except KeyboardInterrupt:
         print("\nAborted. Nothing was changed.")
@@ -1160,7 +1150,7 @@ def _sync_setup(config):
                         if typed != "UNENCRYPTED":
                             print("Aborted. Nothing was changed.")
                             return
-                        updates["sync_encrypt"] = _pin("off")
+                        updates["sync_encrypt"] = yaml_quote("off")
                         config.sync_encrypt = "off"
                 elif fmt_exists:
                     # Backend is ENCRYPTED: verify the passphrase.
@@ -1181,7 +1171,7 @@ def _sync_setup(config):
                         # Joining an encrypted backend with a pin that
                         # resolves off (filesystem auto): pin ON so the
                         # cycle's mode check matches reality.
-                        updates["sync_encrypt"] = _pin("on")
+                        updates["sync_encrypt"] = yaml_quote("on")
                         config.sync_encrypt = "on"
                         print("Backend is encrypted — encryption enabled "
                               "for this device.")
