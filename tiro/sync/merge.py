@@ -52,7 +52,15 @@ from tiro.sync.journal import (
     RowPut,
     canonical_json,
 )
-from tiro.sync.manifest import shadow_tombstone, shadow_upsert
+from tiro.sync.manifest import (
+    _ROW_COLUMNS,
+    LINK_TABLES,
+    META_FIELDS,
+    ROW_TABLES,
+    _fields_hash,
+    shadow_tombstone,
+    shadow_upsert,
+)
 from tiro.sync.reconcile import refresh_article_from_file, write_conflict_file
 
 logger = logging.getLogger(__name__)
@@ -61,6 +69,21 @@ MASS_DELETE_FLOOR = 10
 MASS_DELETE_FRACTION = 0.2
 
 _ALLOWED_ROOTS = ("articles", "notes", "wiki")
+
+# Meta/row/link apply targets (Task 6): single-sourced from manifest.py's
+# sync-set definitions (ROW_TABLES / LINK_TABLES / META_FIELDS /
+# _ROW_COLUMNS) — duplicating the tuples here would let the manifest and
+# apply sides drift. META_FIELDS doubles as the SQL-identifier allowlist
+# (_apply_meta interpolates op.field only after membership passes).
+_LINK_SIDES = {
+    # table -> (a-side table, a fk col, b-side table, b fk col, extra cols)
+    "article_tags": ("articles", "article_id", "tags", "tag_id", ()),
+    "article_entities": ("articles", "article_id", "entities", "entity_id", ()),
+    "article_authors": ("articles", "article_id", "authors", "author_id", ()),
+    "article_relations": ("articles", "article_id", "articles",
+                          "related_article_id",
+                          ("similarity_score", "connection_note")),
+}
 
 
 @dataclass
@@ -180,8 +203,7 @@ def _ordered(ops: list) -> list:
     then files, meta, lines, links, then deletes, aliases last."""
     def rank(op) -> tuple:
         if isinstance(op, RowPut):
-            k = 0 if op.table in ("sources", "authors", "tags", "entities",
-                                  "saved_views", "digests") else 4
+            k = 0 if op.table in ROW_TABLES else 4
         elif isinstance(op, FilePut):
             k = 1
         elif isinstance(op, Meta):
@@ -709,18 +731,291 @@ def _apply_line_del(config: TiroConfig, op: LineDel, report: ApplyReport) -> Non
         conn.close()
 
 
-# Task 6/7 handlers land next; stubs keep _ordered dispatch importable.
-def _apply_meta(config, op, report):  # pragma: no cover - Task 6
-    raise NotImplementedError
+# --- meta / row / link / article-tombstone ops ----------------------------------
 
 
-def _apply_row_put(config, op, report):  # pragma: no cover - Task 6
-    raise NotImplementedError
+def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
+    # META_FIELDS is the single injection barrier: op.field is interpolated
+    # into SQL below ONLY after this allowlist check. Raising (not silently
+    # counting) is deliberate — apply_ops' per-op try/except converts it to
+    # report.errors, keeping the disallowed-field surface visible.
+    if op.field not in META_FIELDS:
+        raise ValueError(f"meta field not allowed: {op.field!r}")
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, meta_updated_at, opened_count FROM articles WHERE uid = ?",
+            (op.uid,)).fetchone()
+        if row is None:
+            report.deferred += 1
+            report._count(op, "deferred_unknown_article")
+            return
+        if op.field == "opened_count":
+            # max()-merge (spec §4): ts irrelevant, monotone counter.
+            conn.execute(
+                "UPDATE articles SET opened_count = MAX(opened_count, ?) "
+                "WHERE id = ?", (int(op.value or 0), row["id"]))
+            conn.commit()
+            report.applied += 1
+            report._count(op, "applied")
+            return
+        local_ts = row["meta_updated_at"]
+        if local_ts and op.ts and op.ts < local_ts:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        if op.ts == local_ts and op.ts is not None:
+            # Deterministic symmetric tiebreak (plan decision #7):
+            # keep whichever value serializes larger; equal values are a no-op.
+            cur = conn.execute(
+                f"SELECT {op.field if op.field != 'source_uid' else 'source_id'} "
+                "AS v FROM articles WHERE id = ?", (row["id"],)).fetchone()
+            if canonical_json(op.value) <= canonical_json(cur["v"]):
+                report.skipped_stale += 1
+                report._count(op, "skipped_stale_tie")
+                return
+        if op.field == "source_uid":
+            src = conn.execute("SELECT id FROM sources WHERE uid = ?",
+                               (op.value,)).fetchone()
+            if src is None:
+                report.deferred += 1
+                report._count(op, "deferred_unknown_source")
+                return
+            conn.execute(
+                "UPDATE articles SET source_id = ?, meta_updated_at = ? "
+                "WHERE id = ?", (src["id"], op.ts, row["id"]))
+        else:  # rating / is_read / snoozed_until — allowlisted identifiers only
+            conn.execute(
+                f"UPDATE articles SET {op.field} = ?, meta_updated_at = ? "
+                "WHERE id = ?", (op.value, op.ts, row["id"]))
+        conn.commit()
+        report.applied += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
 
 
-def _apply_row_del(config, op, report):  # pragma: no cover - Task 6
-    raise NotImplementedError
+def _apply_row_put(config: TiroConfig, op: RowPut, report: ApplyReport) -> None:
+    if op.table in LINK_TABLES:
+        _apply_link_put(config, op, report)
+        return
+    if op.table not in ROW_TABLES:
+        raise ValueError(f"table not in the sync set: {op.table!r}")
+    conn = get_connection(config.db_path)
+    try:
+        kind = f"row:{op.table}"
+        shadow = _shadow_get(conn, kind, op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        cols = _ROW_COLUMNS[op.table]
+        # COLUMN PROJECTION, not the raw wire row: the shadow's hash AND
+        # fields must byte-match what build_manifest's _add_rows computes
+        # from SQLite next cycle — a wire row with extra keys stored raw
+        # would diverge and echo a phantom RowPut.
+        fields = {c: op.row.get(c) for c in cols}
+        values = [fields[c] for c in cols]
+        if op.table == "digests":
+            # prefer-newer created_at (spec §4 digests rule), not plain LWW.
+            cur = conn.execute(
+                "SELECT created_at FROM digests WHERE date = ? AND digest_type = ?",
+                (fields["date"], fields["digest_type"])).fetchone()
+            if cur and (cur["created_at"] or "") >= (fields["created_at"] or ""):
+                report.skipped_stale += 1
+                report._count(op, "skipped_older_digest")
+                return
+            conn.execute(
+                "INSERT INTO digests (date, digest_type, content, article_ids, "
+                "created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(date, digest_type) DO UPDATE SET "
+                "content = excluded.content, article_ids = excluded.article_ids, "
+                "created_at = excluded.created_at", values)
+        else:
+            placeholders = ", ".join("?" for _ in cols)
+            updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "uid")
+            conn.execute(
+                f"INSERT INTO {op.table} ({', '.join(cols)}) "
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT(uid) DO UPDATE SET {updates}", values)
+        shadow_upsert(conn, kind, op.uid, hash=_fields_hash(fields),
+                      fields=fields, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
 
 
+def _link_local_ids(conn, table: str, a_uid: str, b_uid: str):
+    a_tab, _a_col, b_tab, _b_col, _extras = _LINK_SIDES[table]
+    a = conn.execute(f"SELECT id FROM {a_tab} WHERE uid = ?", (a_uid,)).fetchone()
+    b = conn.execute(f"SELECT id FROM {b_tab} WHERE uid = ?", (b_uid,)).fetchone()
+    return (a["id"] if a else None), (b["id"] if b else None)
+
+
+def _apply_link_put(config: TiroConfig, op: RowPut, report: ApplyReport) -> None:
+    conn = get_connection(config.db_path)
+    try:
+        kind = f"link:{op.table}"
+        shadow = _shadow_get(conn, kind, op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        a_uid, b_uid = op.row.get("a_uid"), op.row.get("b_uid")
+        a_id, b_id = _link_local_ids(conn, op.table, a_uid, b_uid)
+        if a_id is None or b_id is None:
+            report.deferred += 1
+            report._count(op, "deferred_unresolved_link")
+            return
+        a_tab, a_col, b_tab, b_col, extras = _LINK_SIDES[op.table]
+        extra_cols = "".join(f", {c}" for c in extras)
+        extra_ph = "".join(", ?" for _ in extras)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {op.table} ({a_col}, {b_col}{extra_cols}) "
+            f"VALUES (?, ?{extra_ph})",
+            (a_id, b_id, *[op.row.get(c) for c in extras]))
+        # Same projection rule as rows: shadow fields/hash must match
+        # _add_links' shape ({a_uid, b_uid} + extras), never the raw wire row.
+        fields = {"a_uid": a_uid, "b_uid": b_uid}
+        for c in extras:
+            fields[c] = op.row.get(c)
+        shadow_upsert(conn, kind, op.uid, hash=_fields_hash(fields),
+                      fields=fields, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
+
+
+def _apply_row_del(config: TiroConfig, op: RowDel, report: ApplyReport) -> None:
+    if op.table == "articles":
+        _apply_article_tombstone(config, op, report)
+        return
+    if op.table in LINK_TABLES:
+        _apply_link_del(config, op, report)
+        return
+    if op.table not in ROW_TABLES:
+        raise ValueError(f"table not in the sync set: {op.table!r}")
+    conn = get_connection(config.db_path)
+    try:
+        kind = f"row:{op.table}"
+        shadow = _shadow_get(conn, kind, op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        if op.table == "digests":
+            date, _sep, digest_type = op.uid.partition(":")
+            conn.execute("DELETE FROM digests WHERE date = ? AND digest_type = ?",
+                         (date, digest_type))
+        else:
+            # Referential safety: rows still referenced locally are kept
+            # (retention bias — the local link will re-op the row next diff).
+            conn.execute(f"DELETE FROM {op.table} WHERE uid = ?", (op.uid,))
+        shadow_tombstone(conn, kind, op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report.tombstones += 1
+        report._count(op, "applied")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _apply_link_del(config: TiroConfig, op: RowDel, report: ApplyReport) -> None:
+    conn = get_connection(config.db_path)
+    try:
+        kind = f"link:{op.table}"
+        shadow = _shadow_get(conn, kind, op.uid)
+        # Add-wins (spec §4, plan decision #10): the remove only applies if
+        # the local link's add-hlc is <= what the remover observed. A newer
+        # local (re-)add survives; a never-synced local link survives too.
+        if shadow and shadow["hlc"]:
+            if op.observed is None or shadow["hlc"] > op.observed:
+                report.skipped_stale += 1
+                report._count(op, "add_wins_over_remove")
+                return
+        elif shadow is None or shadow["deleted_at"] is None:
+            local_exists = _link_exists(conn, op)
+            if local_exists and op.observed is None:
+                report.skipped_stale += 1
+                report._count(op, "add_wins_over_remove")
+                return
+        a_uid, _sep, b_uid = op.uid.partition(":")
+        a_id, b_id = _link_local_ids(conn, op.table, a_uid, b_uid)
+        if a_id is not None and b_id is not None:
+            _a_tab, a_col, _b_tab, b_col, _extras = _LINK_SIDES[op.table]
+            conn.execute(f"DELETE FROM {op.table} WHERE {a_col} = ? AND {b_col} = ?",
+                         (a_id, b_id))
+        shadow_tombstone(conn, kind, op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report.tombstones += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
+
+
+def _link_exists(conn, op: RowDel) -> bool:
+    a_uid, _sep, b_uid = op.uid.partition(":")
+    a_id, b_id = _link_local_ids(conn, op.table, a_uid, b_uid)
+    if a_id is None or b_id is None:
+        return False
+    _a_tab, a_col, _b_tab, b_col, _extras = _LINK_SIDES[op.table]
+    return conn.execute(
+        f"SELECT 1 FROM {op.table} WHERE {a_col} = ? AND {b_col} = ?",
+        (a_id, b_id)).fetchone() is not None
+
+
+def _apply_article_tombstone(config: TiroConfig, op: RowDel,
+                             report: ApplyReport) -> None:
+    conn = get_connection(config.db_path)
+    try:
+        shadow = _shadow_get(conn, "article", op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        row = conn.execute(
+            "SELECT id, body_hash FROM articles WHERE uid = ?",
+            (op.uid,)).fetchone()
+        if row is None:
+            shadow_tombstone(conn, "article", op.uid, hlc=op.hlc.to_str())
+            conn.commit()
+            report.tombstones += 1
+            report._count(op, "already_gone")
+            return
+        # Edit-wins comparison is BODY-space vs BODY-space (hash spaces,
+        # module docstring): diff emits observed=prev.hash and article
+        # shadow/manifest hashes are body_hash — never op.object_hash.
+        if op.observed is not None and row["body_hash"] != op.observed:
+            # Spec §4: delete vs concurrent body edit -> edit wins, article
+            # resurrects (retention bias). The local edit out-ops the delete
+            # on the next diff.
+            report.resurrected += 1
+            report._count(op, "resurrected_edit_wins")
+            return
+        article_id = row["id"]
+    finally:
+        conn.close()
+    from tiro.lifecycle import delete_article
+    delete_article(config, article_id)  # seven-store coordinator, own conn
+    conn = get_connection(config.db_path)
+    try:
+        shadow_tombstone(conn, "article", op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+    finally:
+        conn.close()
+    report.applied += 1
+    report.tombstones += 1
+    report._count(op, "applied")
+
+
+# Task 7 handler lands next; the stub keeps _ordered dispatch importable.
 def _apply_alias(config, op, report):  # pragma: no cover - Task 7
     raise NotImplementedError
