@@ -304,7 +304,16 @@ def open_format(
 ) -> tuple[SyncFormat, PlainCodec | AgeCodec]:
     """Parse + version-check format.json and return the matching codec.
     Wrong passphrase/recovery code -> clean CryptoError HERE, before any
-    blob is ever fetched or decrypted (spec para 9 'clean refusal')."""
+    blob is ever fetched or decrypted (spec para 9 'clean refusal').
+
+    S5 OBLIGATION (whole-branch review Minor #5 — downgrade resistance):
+    format.json is PLAINTEXT and unauthenticated, and this function silently
+    returns PlainCodec when it declares encryption='none' — even with a
+    passphrase supplied. A tampered format.json could therefore flip an
+    encrypted library's client to plaintext, and its next PUSH would upload
+    unencrypted blobs. The engine must pin the expected encryption mode
+    locally (config, set at `tiro sync setup`) and refuse to proceed when
+    fmt.encryption differs from the pinned mode."""
     fmt = parse_format_json(text)
     if fmt.encryption == "none":
         return fmt, PlainCodec()

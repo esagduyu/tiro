@@ -211,7 +211,11 @@ def build_snapshot(
     is REQUIRED for article entries (never defaulted from entry.hash). For
     note/wiki/pathfile the two spaces coincide, so a missing map entry
     defaults to entry.hash. Keyed by path_hint, not uid — notes share their
-    article's uid."""
+    article's uid. Where addresses come from (whole-branch review Minor #3):
+    the S5 snapshot writer takes them from hydrate_bodies' POST-hydration
+    FilePut.object_hash values — `{op.path_hint: op.object_hash for op in
+    hydrate_bodies(config, diff(manifest, Shadow())) if isinstance(op,
+    FilePut)}` — exactly as tests/test_sync_backend_roundtrip.py does."""
     entries = []
     hashes: set[str] = set()
     for (kind, _uid), e in sorted(manifest.entries.items()):
@@ -272,6 +276,19 @@ def parse_snapshot(text: str) -> SnapshotDoc:
         for e in d["entries"]:
             entry = ManifestEntry(kind=e["kind"], uid=e["uid"], hash=e.get("hash"),
                                   fields=e.get("fields") or {}, hlc=e.get("hlc"))
+            if not isinstance(entry.fields, dict):
+                # Whole-branch review Major #1: a non-dict fields value would
+                # escape materialize as AttributeError inside S2's diff —
+                # keep every malformed shape inside the quarantine taxonomy.
+                raise SnapshotError(
+                    f"entry {entry.kind}:{entry.uid} fields is not an object")
+            if entry.kind == "highlight" and (
+                    not isinstance(entry.fields.get("article_uid"), str)
+                    or not isinstance(entry.fields.get("line"), dict)):
+                # diff reads fields["article_uid"]/["line"] unguarded; a
+                # bare highlight entry escaped as KeyError (same review).
+                raise SnapshotError(
+                    f"highlight entry {entry.uid!r} missing article_uid/line")
             entries[(entry.kind, entry.uid)] = entry
             if entry.kind in FILE_KINDS:
                 if not entry.hash:
@@ -340,12 +357,25 @@ def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str],
     state, which is exactly the covers contract (only seq > covers replays).
     The `clock` kwarg exists for S5 to override consciously; passing a
     wall-time clock re-opens the drop-the-tail bug."""
-    ops = diff(doc.manifest, Shadow(),
-               clock=clock or HLCClock("snapshot", now_ms=lambda: 0))
+    try:
+        ops = diff(doc.manifest, Shadow(),
+                   clock=clock or HLCClock("snapshot", now_ms=lambda: 0))
+    except Exception as e:
+        # Belt to parse_snapshot's shape validation (whole-branch review
+        # Major #1): whatever slips through must still quarantine, never
+        # escape as KeyError/AttributeError into S5's cycle.
+        raise SnapshotError(
+            f"snapshot manifest cannot be materialized: {e}") from e
     out = []
     for op in ops:
         if isinstance(op, FilePut) and op.body is None:
-            addr = doc.objects.get(op.path_hint, op.object_hash)
+            addr = doc.objects.get(op.path_hint)
+            if addr is None:
+                # No silent body-space fallback (review Nit #7): a doc built
+                # by parse_snapshot always carries the address; a hand-built
+                # doc missing one is a caller bug surfaced honestly.
+                raise SnapshotError(
+                    f"no object address for {op.path_hint!r} in snapshot doc")
             if addr not in objects_plain:
                 raise SnapshotError(
                     f"snapshot references missing object {addr!r}")
@@ -359,6 +389,15 @@ def materialize_ops(doc: SnapshotDoc, objects_plain: Mapping[str, str],
 
 @dataclass(frozen=True)
 class DeviceInfo:
+    """One devices/{device_id}.json doc (spec para 5). Maintenance semantics
+    for the S5 engine (whole-branch review Minor #4): `last_seq` is this
+    device's OWN journal head (highest seq it has pushed); `acked` maps
+    FOREIGN device id -> highest seq of that device's journal this device
+    has applied (self is excluded — plan_gc derives the implicit self-ack
+    from last_seq); `last_seen` must be refreshed (strict "%Y-%m-%dT%H:%M:%SZ"
+    — see _parse_iso) on every sync cycle, or the 90-day rule eventually
+    drops this device from GC ack-blocking and it may need to re-bootstrap."""
+
     device_id: str
     name: str = ""
     last_seen: str = ""

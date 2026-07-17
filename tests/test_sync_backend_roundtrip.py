@@ -60,8 +60,18 @@ def _fresh_library(root: Path):
 
 def _populate(config):
     """A small but representative library: 2 articles (one unicode-heavy),
-    a highlight with a note, an article-level note, a rating."""
+    a highlight with a note, an article-level note, a rating, and a wiki
+    page (whole-branch review test-debt (a): exercises the note/wiki
+    'hash spaces coincide' fallback end-to-end — trips if S2's wiki
+    hashing ever stops being full-file text)."""
     from tiro.annotations import append_highlight, write_note
+
+    wiki_dir = config.wiki_dir / "entities"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "a-writer.md").write_text(
+        f"---\nuid: {new_ulid()}\nkind: entity\ntitle: A. Writer\n---\n\n"
+        "Wiki body — cites [[hello|Hello World]].\n",
+        encoding="utf-8")
 
     a1 = process_article(title="Hello World", author="A. Writer",
                          content_md="# Hello\n\nSome body text to highlight.\n",
@@ -145,6 +155,17 @@ def _assert_equal_libraries(src, dst):
                      for p in (Path(dst.library) / sub).glob("*.md")}
         assert dst_files == src_files, f"{sub}/ not byte-equal"
 
+    def _wiki_tree(cfg):
+        base = Path(cfg.library) / "wiki"
+        if not base.exists():
+            return {}
+        return {p.relative_to(base).as_posix(): p.read_bytes()
+                for p in base.rglob("*.md")}
+
+    src_wiki = _wiki_tree(src)
+    assert src_wiki, "populate should have created a wiki page"
+    assert _wiki_tree(dst) == src_wiki, "wiki/ not byte-equal"
+
     # Annotations: per-uid line equality (writer may reorder deterministically).
     def _lines(cfg):
         out = {}
@@ -219,6 +240,33 @@ def test_snapshot_bootstrap_roundtrip(initialized_library, tmp_path, crypto_mode
     report = apply_ops(fresh, ops)
     assert not report.errors, report.details
     _assert_equal_libraries(initialized_library, fresh)
+
+
+def test_object_gc_against_real_backend(initialized_library, tmp_path):
+    """Whole-branch review test-debt (b): plan_object_gc against a REAL
+    backend's snapshot + segment outputs — every referenced address is
+    live (empty plan), a dead blob is planned for deletion."""
+    from tiro.sync.snapshot import plan_object_gc
+
+    fmt_text = build_format_json("01LIBTEST0000000000000001")
+    _, codec = open_format(fmt_text)
+    _populate(initialized_library)
+    root = tmp_path / "backend"
+    snap_id = _write_backend(initialized_library, root, codec, fmt_text)
+
+    # Receiver-side live set, exactly as S5 computes it: the snapshot doc's
+    # addresses UNION the kept segment's referenced (hydrated) addresses.
+    doc = decode_snapshot((root / snapshot_key(snap_id)).read_bytes(), codec)
+    seg_ops = decode_segment((root / journal_key("dev-a", 1)).read_bytes(),
+                             codec, _read_objects(root))
+    live = set(doc.objects.values()) | {
+        op.object_hash for op in seg_ops if isinstance(op, FilePut)}
+    keys = [f"objects/{p.parent.name}/{p.name}"
+            for p in (root / "objects").rglob("*.age")]
+    assert keys, "backend should contain object blobs"
+    assert plan_object_gc(live, keys) == []
+    dead = object_key("e" * 64)
+    assert plan_object_gc(live, keys + [dead]) == [dead]
 
 
 def test_bootstrap_then_older_tail_op_applies(initialized_library, tmp_path):

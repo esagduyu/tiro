@@ -373,7 +373,9 @@ def st_state_ops(draw):
 
 @st.composite
 def st_state_ops_pair(draw):
-    """TWO batches over DISJOINT device sets (A: deva; B: devb+devc),
+    """TWO batches over DISJOINT device sets (a RANDOM proper 2-partition
+    of DEVICES per example — whole-branch review Minor #2: a static
+    partition would never reorder devb-vs-devc ops across the pair),
     sharing ONE set of per-device clocks — see _draw_state_ops' docstring
     for why sharing is load-bearing.
 
@@ -391,8 +393,10 @@ def st_state_ops_pair(draw):
     counterexample, remain generated across the partition and converge —
     the property's assertion is untouched."""
     clocks = _fresh_clocks(draw)
-    return (_draw_state_ops(draw, clocks, devices=DEVICES[:1]),
-            _draw_state_ops(draw, clocks, devices=DEVICES[1:]))
+    perm = draw(st.permutations(DEVICES))
+    pivot = draw(st.integers(1, len(DEVICES) - 1))
+    return (_draw_state_ops(draw, clocks, devices=tuple(perm[:pivot])),
+            _draw_state_ops(draw, clocks, devices=tuple(perm[pivot:])))
 
 
 def _observable_state(config):

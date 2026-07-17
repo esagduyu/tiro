@@ -102,6 +102,54 @@ class TestSnapshotDoc:
         with pytest.raises(SnapshotError):
             parse_snapshot("not json")
 
+    def test_malformed_entry_shapes_stay_in_taxonomy(self):
+        """Whole-branch review Major #1 (snapshot twin of the S3.4 segment
+        matrix): valid-JSON docs with malformed entry shapes must raise
+        SnapshotError, never KeyError/AttributeError out of parse or
+        materialize."""
+        base = {
+            "sync_format": 1, "snapshot": "01SNAPZ",
+            "created_at": "2026-07-11T00:00:00Z", "created_by": "dev-a",
+            "covers": {},
+        }
+        hostiles = (
+            # non-dict fields on a row entry
+            [{"kind": "row:sources", "uid": "01X", "hash": None,
+              "fields": [1, 2], "hlc": None}],
+            # bare highlight entry (no article_uid / line)
+            [{"kind": "highlight", "uid": "01H", "hash": "h",
+              "fields": {}, "hlc": None}],
+            # highlight with non-dict line
+            [{"kind": "highlight", "uid": "01H", "hash": "h",
+              "fields": {"article_uid": "01A", "line": "x"}, "hlc": None}],
+        )
+        for entries in hostiles:
+            with pytest.raises(SnapshotError):
+                parse_snapshot(json.dumps({**base, "entries": entries}))
+
+    def test_materialize_wraps_diff_failures_into_taxonomy(self):
+        """Belt for hand-built docs that bypass parse_snapshot's validation:
+        whatever diff chokes on must still quarantine."""
+        from tiro.sync.snapshot import SnapshotDoc
+        bad_entry = ManifestEntry(kind="highlight", uid="01H", hash="h",
+                                  fields={}, hlc=None)
+        doc = SnapshotDoc(snapshot_id="01SNAPZ", created_at="", created_by="",
+                          covers={},
+                          manifest=Manifest(entries={("highlight", "01H"): bad_entry}),
+                          objects={})
+        with pytest.raises(SnapshotError):
+            materialize_ops(doc, {})
+
+    def test_materialize_missing_address_is_honest_error(self):
+        """Review Nit #7: no silent body-space fallback for a hand-built doc
+        lacking an address."""
+        from tiro.sync.snapshot import SnapshotDoc
+        m = _manifest()
+        doc = SnapshotDoc(snapshot_id="01SNAPZ", created_at="", created_by="",
+                          covers={}, manifest=m, objects={})
+        with pytest.raises(SnapshotError, match="no object address"):
+            materialize_ops(doc, {ADDRESS: BODY})
+
     def test_article_without_object_hashes_refused(self):
         # Article entry hashes are BODY-space, never a blob address — the
         # caller MUST supply the address; there is no fallback.
