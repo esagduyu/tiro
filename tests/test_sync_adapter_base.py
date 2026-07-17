@@ -38,9 +38,12 @@ class TestContractShape:
         assert issubclass(AdapterError, Exception)
 
     def test_contract_method_names_frozen(self):
-        # Skeleton-FROZEN signatures: put/get/list/delete/lock/unlock.
-        for name in ("put", "get", "list", "delete", "lock", "unlock"):
-            assert name in StorageAdapter.__abstractmethods__
+        # Skeleton-FROZEN signatures: put/get/list/delete/lock/unlock —
+        # exactly these (aclose must stay concrete: the shared conformance
+        # suite calls it on every adapter).
+        assert StorageAdapter.__abstractmethods__ == frozenset(
+            ("put", "get", "list", "delete", "lock", "unlock")
+        )
 
 
 class TestKeyValidation:
@@ -58,6 +61,8 @@ class TestKeyValidation:
     @pytest.mark.parametrize("key", [
         "", "/abs/path", "a//b", "../evil", "a/../b", "a/./b",
         "a\\b", "journal/",
+        "C:/evil", "C:evil",  # Windows drive-letter root escape via Path join
+        "a\x00b",  # NUL: open() would raise raw ValueError, not AdapterError
     ])
     def test_rejects_bad_keys(self, key):
         with pytest.raises(AdapterError):
@@ -67,7 +72,7 @@ class TestKeyValidation:
     def test_accepts_prefixes(self, prefix):
         assert validate_prefix(prefix) == prefix
 
-    @pytest.mark.parametrize("prefix", ["/abs", "../x", "a/../b", "a\\b"])
+    @pytest.mark.parametrize("prefix", ["/abs", "../x", "a/../b", "a\\b", "C:/x", "a\x00b"])
     def test_rejects_bad_prefixes(self, prefix):
         with pytest.raises(AdapterError):
             validate_prefix(prefix)

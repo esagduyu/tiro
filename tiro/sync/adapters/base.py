@@ -53,8 +53,13 @@ class TransientAdapterError(AdapterError):
 
 def validate_key(key: str) -> str:
     """Reject traversal/absolute/malformed keys. Load-bearing for the
-    filesystem adapter; enforced by all adapters for symmetry."""
-    if not key or key.startswith("/") or "\\" in key:
+    filesystem adapter; enforced by all adapters for symmetry.
+
+    ":" is rejected because a Windows drive-letter key ("C:/evil", "C:evil")
+    joined via ``Path(root) / key`` REPLACES the root — a root escape. No
+    spec §5 key contains a colon. NUL is rejected for error-type hygiene
+    (open() would raise a raw ValueError instead of AdapterError)."""
+    if not key or key.startswith("/") or "\\" in key or ":" in key or "\x00" in key:
         raise AdapterError(f"invalid key: {key!r}")
     if any(part in ("", ".", "..") for part in key.split("/")):
         raise AdapterError(f"invalid key: {key!r}")
@@ -65,7 +70,7 @@ def validate_prefix(prefix: str) -> str:
     """Prefixes may be '' or end with '/' (unlike keys); traversal still rejected."""
     if prefix == "":
         return prefix
-    if prefix.startswith("/") or "\\" in prefix:
+    if prefix.startswith("/") or "\\" in prefix or ":" in prefix or "\x00" in prefix:
         raise AdapterError(f"invalid prefix: {prefix!r}")
     if any(part in (".", "..") for part in prefix.split("/")):
         raise AdapterError(f"invalid prefix: {prefix!r}")
