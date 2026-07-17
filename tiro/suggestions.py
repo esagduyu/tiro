@@ -149,6 +149,33 @@ def _apply_note(config: TiroConfig, suggestion: dict) -> dict:
     return upsert_article_note(config, article_id, new_body)
 
 
+def _apply_contradiction(config: TiroConfig, suggestion: dict) -> dict:
+    """Accept = append the composed contradiction markdown to the NEW
+    article's note — the same validated write path as the note kind
+    (K4 decision 6). Dismiss needs no applier."""
+    from tiro.annotations import read_note, sidecar_stem, upsert_article_note
+
+    payload = suggestion["payload"]
+    article_id = int(payload["article_id"])
+    markdown = str(payload.get("markdown", "")).strip()
+    if not markdown:
+        raise SuggestionApplyError("contradiction suggestion has no body")
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, markdown_path FROM articles WHERE id = ?",
+            (article_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise SuggestionApplyError(f"article {article_id} no longer exists")
+    attribution = f"*Flagged by the contradiction detector:*\n\n{markdown}"
+    existing = read_note(config, sidecar_stem(row))
+    new_body = (f"{existing}\n\n---\n\n{attribution}" if existing
+                else attribution)
+    return upsert_article_note(config, article_id, new_body)
+
+
 def _apply_tier(config: TiroConfig, suggestion: dict) -> dict:
     payload = suggestion["payload"]
     tier = payload.get("tier")
@@ -223,7 +250,7 @@ _APPLIERS = {
     "tier_suggestion": _apply_tier,
     "digest_section": _apply_digest_section,
     "wiki_page": _apply_wiki_page,
-    # "contradiction": K4 decides its accept semantics; dismiss works today.
+    "contradiction": _apply_contradiction,
 }
 
 

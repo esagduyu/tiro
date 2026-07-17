@@ -296,12 +296,29 @@ def test_apply_wiki_page_updates_existing_only(initialized_library):
     assert page["user_pinned_note"] == "KEEP ME"       # survives, always
 
 
-def test_apply_contradiction_has_no_applier_yet(initialized_library):
-    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+def test_apply_contradiction_now_has_applier(initialized_library):
+    """K4 flipped this test CONSCIOUSLY: through K3, contradiction accept
+    raised no_applier; K4's _apply_contradiction appends the payload's
+    markdown to the article's note (details in tests/test_contradiction.py)."""
+    from tiro.annotations import read_note, sidecar_stem
+    from tiro.database import get_connection
+    from tiro.suggestions import apply_suggestion
 
-    with pytest.raises(SuggestionApplyError, match="no applier"):
-        apply_suggestion(initialized_library, _mk_suggestion(
-            initialized_library, "contradiction", {"claim": "x"}))
+    aid, _uid = _seed_article(initialized_library, title="Contra Applied")
+    apply_suggestion(initialized_library, _mk_suggestion(
+        initialized_library, "contradiction",
+        {"article_id": aid, "markdown": "**Challenges** something."}))
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT markdown_path FROM articles WHERE id = ?",
+            (aid,)).fetchone()
+    finally:
+        conn.close()
+    note = read_note(initialized_library, sidecar_stem(row))
+    assert "Flagged by the contradiction detector" in note
+    assert "**Challenges** something." in note
 
 
 # --- Task 9: export/backup posture -----------------------------------------

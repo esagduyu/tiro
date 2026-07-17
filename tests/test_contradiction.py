@@ -5,6 +5,8 @@ Hook/dispatch tests live in tests/test_ingest_hooks.py.
 
 import json
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Shared helpers (self-contained on purpose: mirrors the seeder pattern in
 # tests/test_suggestions.py but adds rating/ai_tier — do not import across
@@ -252,3 +254,74 @@ def test_detector_no_similars_makes_zero_llm_calls(initialized_library,
     out = _run_detector(initialized_library, aid).outputs.model_dump()
     assert out["candidates_considered"] == 0
     assert out["suggestion_uids"] == []
+
+
+# --- Task 4: accept applier --------------------------------------------------
+
+
+def _contradiction_suggestion(config, article_id, markdown="**Challenges** x"):
+    from tiro.suggestions import create_suggestion
+
+    return create_suggestion(
+        config, persona="contradiction-detector", kind="contradiction",
+        payload={"article_id": article_id, "markdown": markdown,
+                 "candidate_title": "Trusted Fed Piece"},
+        citations=[])
+
+
+def test_apply_contradiction_appends_note(initialized_library):
+    from tiro.annotations import read_note
+    from tiro.database import get_connection
+    from tiro.suggestions import apply_suggestion
+
+    aid, _ = _seed_article(initialized_library, title="Apply Target")
+    s = _contradiction_suggestion(initialized_library, aid,
+                                  markdown="**Challenges** claim vs counter")
+    applied = apply_suggestion(initialized_library, s)
+    assert applied["body_markdown"]
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, markdown_path FROM articles WHERE id = ?",
+            (aid,)).fetchone()
+    finally:
+        conn.close()
+    note = read_note(initialized_library, row["markdown_path"][:-3])
+    assert "Flagged by the contradiction detector" in note
+    assert "**Challenges** claim vs counter" in note
+
+
+def test_apply_contradiction_appends_after_existing_note(initialized_library):
+    from tiro.annotations import read_note, upsert_article_note
+    from tiro.database import get_connection
+    from tiro.suggestions import apply_suggestion
+
+    aid, _ = _seed_article(initialized_library, title="Apply Existing")
+    upsert_article_note(initialized_library, aid, "My prior thoughts.")
+    s = _contradiction_suggestion(initialized_library, aid)
+    apply_suggestion(initialized_library, s)
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT markdown_path FROM articles WHERE id = ?",
+            (aid,)).fetchone()
+    finally:
+        conn.close()
+    note = read_note(initialized_library, row["markdown_path"][:-3])
+    assert note.startswith("My prior thoughts.")
+    assert "\n\n---\n\n" in note
+
+
+def test_apply_contradiction_validates(initialized_library):
+    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+
+    s = _contradiction_suggestion(initialized_library, 999999)
+    with pytest.raises(SuggestionApplyError, match="no longer exists"):
+        apply_suggestion(initialized_library, s)
+
+    aid, _ = _seed_article(initialized_library, title="Apply Empty")
+    s2 = _contradiction_suggestion(initialized_library, aid, markdown="   ")
+    with pytest.raises(SuggestionApplyError, match="no body"):
+        apply_suggestion(initialized_library, s2)
