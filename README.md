@@ -246,7 +246,27 @@ Personas are small, forkable AI agents you write yourself: a markdown file at `{
 
 **Security posture, in one paragraph:** a persona file is untrusted input, and the sandbox is structural rather than a request to behave. A persona only ever sees a read-only context built from its own scope (an article, a day's articles, a search, a wiki page) — it cannot read the rest of your library, cannot reach the network, and cannot write anything directly. Its only output path is `ctx.suggest(...)`, which lands as a **pending suggestion**, never an immediate change. Library content interpolated into the prompt is wrapped in a fence the persona's own text can't forge or escape.
 
-You review suggestions from the inbox/reader chips or the `/agents` queue and accept or dismiss each one; accepting runs the same validated write path Tiro's own features use (append a note, set a tier, add a digest section, update an existing wiki page). Runs are manual-only for now — there's no on-ingest or scheduled dispatch yet, that's a later phase. To try your own: copy one of the defaults and edit the body; a broken persona just won't appear as runnable until you fix it.
+You review suggestions from the inbox/reader chips or the `/agents` queue and accept or dismiss each one; accepting runs the same validated write path Tiro's own features use (append a note, set a tier, add a digest section, update an existing wiki page). Personas with `schedule: on-ingest` (article scope) run automatically when an article is saved; everything else runs manually from `/agents` (`schedule: cron` is accepted but not dispatched yet). To try your own: copy one of the defaults and edit the body; a broken persona just won't appear as runnable until you fix it.
+
+### ContradictionDetector
+
+When you save an article, Tiro compares it against the most similar
+articles you've *trusted* (rated 👍/❤️ or classified must-read). If a new
+piece contradicts one of them, a pending suggestion appears on the article
+("challenges something you trusted") with the two conflicting claims —
+accept it to pin the contradiction into the article's note, or dismiss it.
+
+- Kill-switch: `contradiction_detector_enabled: false` in `config.yaml`
+  (or `TIRO_CONTRADICTION_DETECTOR_ENABLED=false`) disables the on-save
+  hook. Manual runs still work.
+- Backfill an existing library: `uv run tiro agent run
+  contradiction-detector --backfill [--limit N]` — resumable (skips
+  articles already checked), newest first. Bulk imports never trigger the
+  on-save hook; backfill is the intended path after an import.
+- Personas with `schedule: on-ingest` (article scope) now run on save too.
+  `schedule: cron` is still not dispatched (planned).
+- Re-running the detector manually on the same article can produce
+  duplicate suggestions; dismiss handles them.
 
 ### Reading
 
