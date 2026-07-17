@@ -316,6 +316,266 @@ class TestArticleTombstone:
             conn.close()
 
 
+class TestS26ReviewFixes:
+    """Targeted pins for the S2.6 review findings (F1, F3–F8)."""
+
+    TS = "2026-07-11T00:00:00Z"
+
+    def _article_uid(self, config):
+        art = _ingest(config)
+        conn = get_connection(config.db_path)
+        try:
+            return art, conn.execute(
+                "SELECT uid FROM articles WHERE id = ?",
+                (art["id"],)).fetchone()["uid"]
+        finally:
+            conn.close()
+
+    def _mk_source(self, config, src_uid, name):
+        conn = get_connection(config.db_path)
+        try:
+            conn.execute("INSERT INTO sources (uid, name, source_type) "
+                         "VALUES (?, ?, 'web')", (src_uid, name))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _current_source_uid(self, config, uid):
+        conn = get_connection(config.db_path)
+        try:
+            return conn.execute(
+                "SELECT s.uid AS v, a.meta_updated_at AS ts FROM articles a "
+                "LEFT JOIN sources s ON s.id = a.source_id "
+                "WHERE a.uid = ?", (uid,)).fetchone()
+        finally:
+            conn.close()
+
+    def _seed_source_tie(self, config):
+        """Stamp meta_updated_at = TS by applying a first source_uid op.
+        Note Task 8's property strategy excludes source_uid — these example
+        tests are the pin for the F1 tie-break."""
+        _art, uid = self._article_uid(config)
+        mid = "01TIESRCMMMMMMMMMMMMMMMMMM"
+        self._mk_source(config, mid, "Mid")
+        r = apply_ops(config, [_meta(uid, "source_uid", mid, self.TS)])
+        assert r.applied == 1
+        return uid, mid
+
+    def test_f1_equal_ts_source_uid_larger_wins(self, initialized_library):
+        uid, _mid = self._seed_source_tie(initialized_library)
+        larger = "01TIESRCZZZZZZZZZZZZZZZZZZ"
+        self._mk_source(initialized_library, larger, "Larger")
+        r = apply_ops(initialized_library,
+                      [_meta(uid, "source_uid", larger, self.TS)])
+        assert r.applied == 1
+        cur = self._current_source_uid(initialized_library, uid)
+        assert cur["v"] == larger and cur["ts"] == self.TS
+
+    def test_f1_equal_ts_source_uid_smaller_skipped(self, initialized_library):
+        uid, mid = self._seed_source_tie(initialized_library)
+        smaller = "01TIESRCAAAAAAAAAAAAAAAAAA"
+        self._mk_source(initialized_library, smaller, "Smaller")
+        r = apply_ops(initialized_library,
+                      [_meta(uid, "source_uid", smaller, self.TS)])
+        assert r.skipped_stale == 1
+        cur = self._current_source_uid(initialized_library, uid)
+        assert cur["v"] == mid and cur["ts"] == self.TS
+
+    def test_f1_equal_ts_source_uid_echo_is_idempotent_skip(
+            self, initialized_library):
+        uid, mid = self._seed_source_tie(initialized_library)
+        r = apply_ops(initialized_library,
+                      [_meta(uid, "source_uid", mid, self.TS)])
+        assert r.skipped_stale == 1 and r.applied == 0
+        assert self._current_source_uid(initialized_library, uid)["v"] == mid
+
+    def test_f2_equal_ts_ordinary_field_larger_value_wins_both_orders(
+            self, initialized_library):
+        # F2 was verified SOUND — this pins the algebra: at equal ts the
+        # canonical-JSON-larger value wins regardless of arrival order.
+        _a1, uid1 = self._article_uid(initialized_library)
+        art2 = _ingest(initialized_library, title="Second",
+                       url="https://example.com/second")
+        conn = get_connection(initialized_library.db_path)
+        try:
+            uid2 = conn.execute("SELECT uid FROM articles WHERE id = ?",
+                                (art2["id"],)).fetchone()["uid"]
+        finally:
+            conn.close()
+        # Order A: 1 then 2 — the later, larger op applies.
+        apply_ops(initialized_library, [_meta(uid1, "rating", 1, self.TS)])
+        ra = apply_ops(initialized_library, [_meta(uid1, "rating", 2, self.TS)])
+        assert ra.applied == 1
+        # Order B: 2 then 1 — the later, smaller op is skipped.
+        apply_ops(initialized_library, [_meta(uid2, "rating", 2, self.TS)])
+        rb = apply_ops(initialized_library, [_meta(uid2, "rating", 1, self.TS)])
+        assert rb.skipped_stale == 1
+        assert _row(initialized_library, "articles", uid1)["rating"] == 2
+        assert _row(initialized_library, "articles", uid2)["rating"] == 2
+
+    def test_f3_never_synced_link_survives_remove_with_observed(
+            self, initialized_library):
+        _art, a_uid = self._article_uid(initialized_library)
+        t_uid = new_ulid()
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute("INSERT INTO tags (uid, name) VALUES (?, 'localonly')",
+                         (t_uid,))
+            tag_id = conn.execute("SELECT id FROM tags WHERE uid = ?",
+                                  (t_uid,)).fetchone()["id"]
+            art_id = conn.execute("SELECT id FROM articles WHERE uid = ?",
+                                  (a_uid,)).fetchone()["id"]
+            conn.execute("INSERT INTO article_tags (article_id, tag_id) "
+                         "VALUES (?, ?)", (art_id, tag_id))
+            conn.commit()  # local link, NO sync_shadow row
+        finally:
+            conn.close()
+        clock = _clock(ms=5000)
+        rem = RowDel(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                     uid=f"{a_uid}:{t_uid}", table="article_tags",
+                     observed=_clock(ms=999, device="dev-x").tick().to_str())
+        r = apply_ops(initialized_library, [rem])
+        assert r.skipped_stale == 1 and r.applied == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute(
+                "SELECT 1 FROM article_tags j JOIN tags t ON t.id = j.tag_id "
+                "WHERE t.uid = ?", (t_uid,)).fetchone() is not None
+        finally:
+            conn.close()
+
+    def test_f4_article_tombstone_observed_none_resurrects(
+            self, initialized_library):
+        art = _ingest(initialized_library)
+        conn = get_connection(initialized_library.db_path)
+        try:
+            row = conn.execute(
+                "SELECT uid, markdown_path FROM articles WHERE id = ?",
+                (art["id"],)).fetchone()
+        finally:
+            conn.close()
+        clock = _clock()
+        op = RowDel(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                    uid=row["uid"], table="articles", observed=None)
+        r = apply_ops(initialized_library, [op])
+        assert r.resurrected == 1 and r.tombstones == 0 and r.applied == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT 1 FROM articles WHERE uid = ?",
+                                (row["uid"],)).fetchone() is not None
+        finally:
+            conn.close()
+        assert (initialized_library.articles_dir / row["markdown_path"]).exists()
+
+    def test_f5_row_del_of_referenced_tag_is_deferred(self, initialized_library):
+        _art, a_uid = self._article_uid(initialized_library)
+        t_uid = new_ulid()
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute("INSERT INTO tags (uid, name) VALUES (?, 'pinned')",
+                         (t_uid,))
+            tag_id = conn.execute("SELECT id FROM tags WHERE uid = ?",
+                                  (t_uid,)).fetchone()["id"]
+            art_id = conn.execute("SELECT id FROM articles WHERE uid = ?",
+                                  (a_uid,)).fetchone()["id"]
+            conn.execute("INSERT INTO article_tags (article_id, tag_id) "
+                         "VALUES (?, ?)", (art_id, tag_id))
+            conn.commit()
+        finally:
+            conn.close()
+        clock = _clock()
+        op = RowDel(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                    uid=t_uid, table="tags", observed=None)
+        r = apply_ops(initialized_library, [op])
+        assert r.deferred == 1 and r.errors == 0 and r.tombstones == 0
+        assert _row(initialized_library, "tags", t_uid) is not None
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute(
+                "SELECT 1 FROM sync_shadow WHERE kind = 'row:tags' AND uid = ?",
+                (t_uid,)).fetchone() is None  # no shadow tombstone
+        finally:
+            conn.close()
+
+    def test_f5_row_del_of_unreferenced_tag_applies(self, initialized_library):
+        t_uid = new_ulid()
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute("INSERT INTO tags (uid, name) VALUES (?, 'loose')",
+                         (t_uid,))
+            conn.commit()
+        finally:
+            conn.close()
+        clock = _clock()
+        op = RowDel(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                    uid=t_uid, table="tags", observed=None)
+        r = apply_ops(initialized_library, [op])
+        assert r.applied == 1 and r.tombstones == 1
+        assert _row(initialized_library, "tags", t_uid) is None
+        conn = get_connection(initialized_library.db_path)
+        try:
+            srow = conn.execute(
+                "SELECT deleted_at FROM sync_shadow WHERE kind = 'row:tags' "
+                "AND uid = ?", (t_uid,)).fetchone()
+            assert srow is not None and srow["deleted_at"] is not None
+        finally:
+            conn.close()
+
+    def test_f6_digest_prefer_newer_is_order_independent(
+            self, initialized_library):
+        # The previously-diverging order: hlc-NEWER/created-OLDER arrives
+        # first — the shadow hlc gate must not block the created-newer op.
+        base = {"date": "2026-07-10", "digest_type": "ranked",
+                "article_ids": "[]"}
+        hi_clock = _clock(ms=9000)
+        lo_clock = _clock(ms=1000)
+        hlc_newer_created_older = RowPut(
+            op_id=new_ulid(), hlc=hi_clock.tick(), device="dev-b",
+            uid="2026-07-10:ranked", table="digests",
+            row={**base, "content": "OLD",
+                 "created_at": "2026-07-10 07:00:00"})
+        hlc_older_created_newer = RowPut(
+            op_id=new_ulid(), hlc=lo_clock.tick(), device="dev-c",
+            uid="2026-07-10:ranked", table="digests",
+            row={**base, "content": "NEW",
+                 "created_at": "2026-07-10 09:00:00"})
+        apply_ops(initialized_library, [hlc_newer_created_older])
+        r = apply_ops(initialized_library, [hlc_older_created_newer])
+        assert r.applied == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            d = conn.execute(
+                "SELECT content FROM digests WHERE date='2026-07-10' "
+                "AND digest_type='ranked'").fetchone()
+            assert d["content"] == "NEW"
+        finally:
+            conn.close()
+
+    def test_f7_ts_none_meta_op_never_regresses_the_clock(
+            self, initialized_library):
+        _art, uid = self._article_uid(initialized_library)
+        apply_ops(initialized_library, [_meta(uid, "rating", 2, self.TS)])
+        r = apply_ops(initialized_library, [_meta(uid, "rating", -1, None)])
+        assert r.skipped_stale == 1 and r.applied == 0
+        a = _row(initialized_library, "articles", uid)
+        assert a["rating"] == 2 and a["meta_updated_at"] == self.TS
+
+    def test_f8_digest_uid_payload_mismatch_is_error(self, initialized_library):
+        clock = _clock()
+        op = RowPut(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                    uid="2026-07-10:ranked", table="digests",
+                    row={"date": "2026-07-11", "digest_type": "ranked",
+                         "content": "X", "article_ids": "[]",
+                         "created_at": "2026-07-11 09:00:00"})
+        r = apply_ops(initialized_library, [op])
+        assert r.errors == 1 and r.applied == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT 1 FROM digests").fetchone() is None
+        finally:
+            conn.close()
+
+
 class TestMassDeleteGuard:
     def test_guard_halts_whole_batch(self, initialized_library):
         for i in range(12):

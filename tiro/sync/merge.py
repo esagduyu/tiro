@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -760,16 +761,36 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
             report._count(op, "applied")
             return
         local_ts = row["meta_updated_at"]
+        if local_ts and not op.ts:
+            # S2.6 review F7: a ts-less (None/"") meta op must never
+            # overwrite a stamped field — it would bypass both LWW guards
+            # AND null meta_updated_at, regressing the clock. Mirror of the
+            # NULL-local-loses rule.
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
         if local_ts and op.ts and op.ts < local_ts:
             report.skipped_stale += 1
             report._count(op, "skipped_stale")
             return
         if op.ts == local_ts and op.ts is not None:
             # Deterministic symmetric tiebreak (plan decision #7):
-            # keep whichever value serializes larger; equal values are a no-op.
-            cur = conn.execute(
-                f"SELECT {op.field if op.field != 'source_uid' else 'source_id'} "
-                "AS v FROM articles WHERE id = ?", (row["id"],)).fetchone()
+            # keep whichever value serializes larger; equal values are a
+            # no-op. source_uid must compare uid-vs-uid (S2.6 review F1):
+            # comparing op.value (a uid STRING) against the local INTEGER
+            # source_id is asymmetric — in canonical JSON a quoted string
+            # always sorts below any integer, so every equal-ts repoint
+            # (the NORMAL post-sync state, since apply stamps
+            # meta_updated_at = op.ts) would be skipped forever.
+            if op.field == "source_uid":
+                cur = conn.execute(
+                    "SELECT s.uid AS v FROM articles a "
+                    "LEFT JOIN sources s ON s.id = a.source_id "
+                    "WHERE a.id = ?", (row["id"],)).fetchone()
+            else:
+                cur = conn.execute(
+                    f"SELECT {op.field} AS v FROM articles WHERE id = ?",
+                    (row["id"],)).fetchone()
             if canonical_json(op.value) <= canonical_json(cur["v"]):
                 report.skipped_stale += 1
                 report._count(op, "skipped_stale_tie")
@@ -805,7 +826,12 @@ def _apply_row_put(config: TiroConfig, op: RowPut, report: ApplyReport) -> None:
     try:
         kind = f"row:{op.table}"
         shadow = _shadow_get(conn, kind, op.uid)
-        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+        # Digests SKIP the shadow-hlc stale gate (S2.6 review F6): prefer-
+        # newer created_at alone decides, so the outcome is deterministic
+        # regardless of arrival order — with the gate, a hlc-newer/created-
+        # older op arriving first would shadow-block the created-newer one.
+        if (op.table != "digests" and shadow and shadow["hlc"]
+                and op.hlc.to_str() <= shadow["hlc"]):
             report.skipped_stale += 1
             report._count(op, "skipped_stale")
             return
@@ -817,6 +843,13 @@ def _apply_row_put(config: TiroConfig, op: RowPut, report: ApplyReport) -> None:
         fields = {c: op.row.get(c) for c in cols}
         values = [fields[c] for c in cols]
         if op.table == "digests":
+            # Identity guard (S2.6 review F8): the table write keys off the
+            # PAYLOAD's date/digest_type while the shadow keys off op.uid —
+            # a mismatched op would desync them. Per-op error via apply_ops.
+            expected = f"{op.row.get('date')}:{op.row.get('digest_type')}"
+            if op.uid != expected:
+                raise ValueError(
+                    f"digest uid/payload mismatch: {op.uid!r} != {expected!r}")
             # prefer-newer created_at (spec §4 digests rule), not plain LWW.
             cur = conn.execute(
                 "SELECT created_at FROM digests WHERE date = ? AND digest_type = ?",
@@ -912,9 +945,17 @@ def _apply_row_del(config: TiroConfig, op: RowDel, report: ApplyReport) -> None:
             conn.execute("DELETE FROM digests WHERE date = ? AND digest_type = ?",
                          (date, digest_type))
         else:
-            # Referential safety: rows still referenced locally are kept
-            # (retention bias — the local link will re-op the row next diff).
-            conn.execute(f"DELETE FROM {op.table} WHERE uid = ?", (op.uid,))
+            # Referential safety (S2.6 review F5): FKs are ON, so deleting a
+            # row still referenced locally raises IntegrityError — catch it
+            # and DEFER (row kept, NO shadow tombstone) instead of erroring;
+            # the local link re-ops the row on the next diff (retention bias).
+            try:
+                conn.execute(f"DELETE FROM {op.table} WHERE uid = ?", (op.uid,))
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                report.deferred += 1
+                report._count(op, "deferred_still_referenced")
+                return
         shadow_tombstone(conn, kind, op.uid, hlc=op.hlc.to_str())
         conn.commit()
         report.applied += 1
@@ -941,8 +982,12 @@ def _apply_link_del(config: TiroConfig, op: RowDel, report: ApplyReport) -> None
                 report._count(op, "add_wins_over_remove")
                 return
         elif shadow is None or shadow["deleted_at"] is None:
-            local_exists = _link_exists(conn, op)
-            if local_exists and op.observed is None:
+            # A NEVER-SYNCED local link has no shadow hlc the remover could
+            # possibly have observed — whatever op.observed cites is some
+            # OTHER device's add, never this one, so the local add survives
+            # regardless of observed (S2.6 review F3; plan decision #10's
+            # retention clause).
+            if _link_exists(conn, op):
                 report.skipped_stale += 1
                 report._count(op, "add_wins_over_remove")
                 return
@@ -993,7 +1038,11 @@ def _apply_article_tombstone(config: TiroConfig, op: RowDel,
         # Edit-wins comparison is BODY-space vs BODY-space (hash spaces,
         # module docstring): diff emits observed=prev.hash and article
         # shadow/manifest hashes are body_hash — never op.object_hash.
-        if op.observed is not None and row["body_hash"] != op.observed:
+        # observed=None on an EXISTING article mirrors _apply_file_del's
+        # posture (S2.6 review F4): our own diff always stamps
+        # observed=prev.hash, so None here means a foreign/degraded op —
+        # retention bias resurrects, never blind-deletes.
+        if op.observed is None or row["body_hash"] != op.observed:
             # Spec §4: delete vs concurrent body edit -> edit wins, article
             # resurrects (retention bias). The local edit out-ops the delete
             # on the next diff.
