@@ -198,6 +198,9 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
     from tiro.database import init_db
 
     registry.ensure_builtins()
+    from tiro.agents import personas as personas_module
+
+    personas_module.sync_registry(config)
     try:
         agent = registry.get(name)
     except KeyError:

@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import frontmatter
+from pydantic import BaseModel
 
 from tiro.config import TiroConfig
 from tiro.intelligence.prompts import load_template
+from tiro.llm import strip_json_fences
 
 logger = logging.getLogger(__name__)
 
@@ -313,3 +315,86 @@ def build_persona_prompt(persona: Persona, data: dict[str, str]) -> str:
     middle; interpolated content is fenced and neutralized."""
     body = PLACEHOLDER_RE.sub(lambda m: data.get(m.group(1), ""), persona.body)
     return PERSONA_PREAMBLE + body + OUTPUT_EPILOGUES[persona.output]
+
+
+# --- PersonaAgent: the TiroAgent adapter over a persona file ----------------
+
+VALID_TIER_SUGGESTIONS = ("must-read", "summary-enough", "discard")
+
+
+class PersonaOutput(BaseModel):
+    kind: str
+    payload: dict
+
+
+def parse_persona_output(persona: Persona, inputs: dict, text: str) -> dict:
+    """LLM response -> suggestion payload. The KIND is forced by the
+    persona's frontmatter and the payload is built field-by-field from
+    OUR values (inputs + parsed allowlisted fields) -- nothing in the
+    model's response can add fields or change the kind (spec §5)."""
+    import json as _json
+
+    if persona.output in ("note", "digest_section", "wiki_page"):
+        markdown = text.strip()
+        if not markdown:
+            raise ValueError(f"{persona.slug}: persona produced empty output")
+        if persona.output == "note":
+            return {"article_id": inputs["article_id"], "markdown": markdown}
+        if persona.output == "digest_section":
+            return {"title": persona.name, "markdown": markdown}
+        return {"slug": inputs["wiki_slug"], "markdown": markdown}
+    # tier_suggestion: strict JSON, allowlisted value
+    try:
+        parsed = _json.loads(strip_json_fences(text))
+    except _json.JSONDecodeError as e:
+        raise ValueError(
+            f"{persona.slug}: tier_suggestion output was not valid JSON") from e
+    tier = parsed.get("tier") if isinstance(parsed, dict) else None
+    if tier not in VALID_TIER_SUGGESTIONS:
+        raise ValueError(
+            f"{persona.slug}: invalid tier {tier!r} "
+            f"(expected one of {VALID_TIER_SUGGESTIONS})")
+    return {"article_id": inputs["article_id"], "tier": tier}
+
+
+class PersonaAgent:
+    """TiroAgent over one persona file. run() is the entire sandbox flow:
+    scope-gather (ScopedContext) -> fenced prompt -> ONE llm call ->
+    forced-kind parse -> ctx.suggest. No other reads, no other writes."""
+
+    output_model = PersonaOutput
+
+    def __init__(self, persona: Persona):
+        self._persona = persona
+        self.name = f"persona:{persona.slug}"
+        self.version = persona.version
+        self.tier = persona.tier
+        self.inputs = dict(SCOPE_INPUTS[persona.scope])
+
+    def run(self, ctx, **inputs):
+        persona = self._persona
+        scoped = ScopedContext(ctx, persona.scope)
+        data = gather_scope_data(scoped, persona, inputs)
+        prompt = build_persona_prompt(persona, data)
+        text = scoped.llm(persona.tier, prompt,
+                          purpose=f"persona:{persona.slug}")
+        payload = parse_persona_output(persona, inputs, text)
+        scoped.suggest(persona.output, payload, citations=ctx.citations)
+        return scoped.result(PersonaOutput(kind=persona.output,
+                                           payload=payload))
+
+
+def sync_registry(config: TiroConfig) -> None:
+    """Refresh persona:* registrations from disk. Called on every
+    run_agent and by the personas API -- user edits apply immediately,
+    disabled/broken personas are structurally absent from the registry."""
+    from tiro.agents import registry
+
+    ensure_personas(config)
+    registry.unregister_prefix("persona:")
+    personas, _errors = load_personas(config)
+    disabled = set(config.personas_disabled or [])
+    for persona in personas:
+        if persona.slug in disabled:
+            continue
+        registry.register(PersonaAgent(persona))

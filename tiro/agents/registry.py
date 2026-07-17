@@ -23,6 +23,14 @@ def unregister(name: str) -> None:
     _REGISTRY.pop(name, None)
 
 
+def unregister_prefix(prefix: str) -> None:
+    """Remove every registration whose name starts with prefix (persona
+    re-sync: files on disk are the source of truth, the registry is a
+    per-process cache)."""
+    for name in [n for n in _REGISTRY if n.startswith(prefix)]:
+        _REGISTRY.pop(name, None)
+
+
 def get(name: str) -> TiroAgent:
     return _REGISTRY[name]  # KeyError is the contract for unknown names
 

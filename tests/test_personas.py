@@ -227,3 +227,84 @@ def test_scoped_context_never_leaks_its_own_storage(initialized_library, tmp_pat
     # allowed names still resolve to the underlying context's bound methods
     assert callable(scoped.get_article) and callable(scoped.llm)
     tw.close()
+
+
+# --- Task 5: PersonaAgent + registry sync + end-to-end ---------------------
+
+
+def test_parse_persona_output_markdown_kinds(test_config):
+    from tiro.agents.personas import parse_persona, parse_persona_output
+
+    p = parse_persona(write_persona(test_config))
+    payload = parse_persona_output(p, {"article_id": 4}, "  A counterpoint. ")
+    assert payload == {"article_id": 4, "markdown": "A counterpoint."}
+    with pytest.raises(ValueError, match="empty"):
+        parse_persona_output(p, {"article_id": 4}, "   \n ")
+
+
+def test_parse_persona_output_tier_strict_and_allowlisted(test_config):
+    from tiro.agents.personas import parse_persona, parse_persona_output
+
+    p = parse_persona(write_persona(
+        test_config, "gut-check", output="tier_suggestion",
+        body="Rate:\n{{article}}"))
+    out = parse_persona_output(
+        p, {"article_id": 9},
+        '```json\n{"tier": "must-read", "evil_extra": "x"}\n```')
+    # field-by-field construction: extra keys physically dropped
+    assert out == {"article_id": 9, "tier": "must-read"}
+    with pytest.raises(ValueError, match="tier"):
+        parse_persona_output(p, {"article_id": 9}, '{"tier": "banana"}')
+    with pytest.raises(ValueError):
+        parse_persona_output(p, {"article_id": 9}, "not json at all")
+
+
+def test_sync_registry_registers_enabled_skips_disabled_and_broken(
+        initialized_library):
+    from tiro.agents import registry
+    from tiro.agents.personas import sync_registry
+
+    write_persona(initialized_library, "good")
+    write_persona(initialized_library, "broken", scope="galaxy")
+    initialized_library.personas_disabled = ["daily-themes"]
+    sync_registry(initialized_library)
+    try:
+        names = set(registry.all_agents())
+        assert "persona:good" in names
+        assert "persona:broken" not in names          # structurally absent
+        assert "persona:daily-themes" not in names    # disabled
+        assert "persona:devils-advocate" in names     # packaged default
+        # re-sync after a file edit replaces cleanly (no duplicate error)
+        sync_registry(initialized_library)
+        assert "persona:good" in set(registry.all_agents())
+    finally:
+        registry.unregister_prefix("persona:")
+
+
+def test_persona_run_end_to_end(initialized_library, fake_llm):
+    from tiro.agents.runtime import run_agent
+    from tiro.suggestions import list_suggestions
+
+    aid, uid = _seed_article(initialized_library, title="E2E Article")
+    write_persona(initialized_library, "devil")
+    fake_llm("Here is the strongest counterargument.")
+    result = run_agent(initialized_library, "persona:devil",
+                       {"article_id": aid})
+    assert result.outputs.kind == "note"
+    assert result.citations == [uid]
+    rows = list_suggestions(initialized_library, status="pending")
+    assert len(rows) == 1
+    assert rows[0]["persona"] == "persona:devil"
+    assert rows[0]["payload"]["markdown"] == \
+        "Here is the strongest counterargument."
+    assert rows[0]["citations"] == [uid]
+
+
+def test_disabled_persona_cannot_run(initialized_library, fake_llm):
+    from tiro.agents.base import AgentRunError
+    from tiro.agents.runtime import run_agent
+
+    write_persona(initialized_library, "off")
+    initialized_library.personas_disabled = ["off"]
+    with pytest.raises(AgentRunError, match="unknown agent"):
+        run_agent(initialized_library, "persona:off", {"article_id": 1})
