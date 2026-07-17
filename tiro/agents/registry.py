@@ -62,6 +62,7 @@ def ensure_builtins() -> None:
     if _builtins_loaded:
         return
     _builtins_loaded = True
+    from tiro.agents.builtin.contradiction_detector import ContradictionDetector
     from tiro.agents.builtin.digest_writer import DigestWriter
     from tiro.agents.builtin.ingenuity_analyst import IngenuityAnalyst
     from tiro.agents.builtin.metadata_extractor import MetadataExtractor
@@ -71,3 +72,4 @@ def ensure_builtins() -> None:
     register(PreferenceClassifier())
     register(DigestWriter())
     register(IngenuityAnalyst())
+    register(ContradictionDetector())

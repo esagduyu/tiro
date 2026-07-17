@@ -115,3 +115,140 @@ def test_similar_articles_includes_rating_and_ai_tier(
     assert by_id[aid2]["rating"] == 2 and by_id[aid2]["ai_tier"] is None
     assert by_id[aid3]["rating"] is None
     assert by_id[aid3]["ai_tier"] == "must-read"
+
+
+# --- Task 3: the agent -------------------------------------------------------
+
+
+def _run_detector(config, article_id):
+    from tiro.agents.runtime import run_agent
+
+    return run_agent(config, "contradiction-detector",
+                     {"article_id": article_id})
+
+
+def test_detector_files_gated_suggestion(initialized_library, fake_llm,
+                                         monkeypatch):
+    from tiro.suggestions import list_suggestions
+
+    aid, uid = _seed_article(initialized_library, title="New Fed Piece",
+                             body="Rates rose in 2025 according to the Fed.")
+    cand_id, cand_uid = _seed_article(
+        initialized_library, title="Trusted Fed Piece",
+        body="The Fed cut rates through 2025.", rating=2)
+    _fake_similars(monkeypatch, [(cand_id, 0.9)])
+    fake_llm(VERDICT_HIGH)
+
+    res = _run_detector(initialized_library, aid)
+    out = res.outputs.model_dump()
+    assert out["article_id"] == aid
+    assert out["candidates_considered"] == 1
+    assert out["trusted_candidates"] == 1
+    assert out["contradictions_found"] == 1
+    assert out["verdict_errors"] == 0
+    assert len(out["suggestion_uids"]) == 1
+
+    rows = list_suggestions(initialized_library, status="pending")
+    assert len(rows) == 1
+    s = rows[0]
+    assert s["kind"] == "contradiction"
+    assert s["persona"] == "contradiction-detector"
+    assert s["payload"]["article_id"] == aid
+    assert s["payload"]["article_uid"] == uid
+    assert s["payload"]["candidate_uid"] == cand_uid
+    assert s["payload"]["candidate_title"] == "Trusted Fed Piece"
+    assert s["payload"]["claim"] == "Rates rose in 2025."
+    assert s["payload"]["counter_claim"] == "Rates fell in 2025."
+    assert s["payload"]["confidence"] == "high"
+    assert "Challenges something you trusted" in s["payload"]["markdown"]
+    # citations: both articles, both actually read
+    assert set(s["citations"]) == {uid, cand_uid}
+    # the inbox chip depends on json_extract($.article_id) finding it
+    assert list_suggestions(initialized_library, article_id=aid)
+
+
+def test_detector_gates_low_confidence_and_non_contradictions(
+        initialized_library, fake_llm, monkeypatch):
+    from tiro.suggestions import list_suggestions
+
+    aid, _ = _seed_article(initialized_library, title="New Multi")
+    c1, _ = _seed_article(initialized_library, title="Trusted A", rating=1)
+    c2, _ = _seed_article(initialized_library, title="Trusted B", rating=2)
+    _fake_similars(monkeypatch, [(c1, 0.9), (c2, 0.8)])
+    fake_llm(VERDICT_LOW, VERDICT_NONE)
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["trusted_candidates"] == 2
+    assert out["contradictions_found"] == 0
+    assert out["verdict_errors"] == 0
+    assert list_suggestions(initialized_library) == []
+
+
+def test_detector_normalizes_medium_confidence(initialized_library, fake_llm,
+                                               monkeypatch):
+    aid, _ = _seed_article(initialized_library, title="New Med")
+    c1, _ = _seed_article(initialized_library, title="Trusted Med", rating=1)
+    _fake_similars(monkeypatch, [(c1, 0.9)])
+    fake_llm(VERDICT_MED)          # says "medium", not "med"
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["contradictions_found"] == 1
+
+
+def test_detector_counts_malformed_verdicts_and_continues(
+        initialized_library, fake_llm, monkeypatch):
+    aid, _ = _seed_article(initialized_library, title="New Malformed")
+    c1, _ = _seed_article(initialized_library, title="Trusted C", rating=1)
+    c2, _ = _seed_article(initialized_library, title="Trusted D", rating=1)
+    _fake_similars(monkeypatch, [(c1, 0.9), (c2, 0.8)])
+    fake_llm("utter nonsense, not json", VERDICT_HIGH)
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["verdict_errors"] == 1
+    assert out["contradictions_found"] == 1     # the second candidate landed
+
+
+def test_detector_trusted_filter_semantics(initialized_library, fake_llm,
+                                           monkeypatch):
+    """Trusted = rating > 0 OR ai_tier == 'must-read'; disliked and plain
+    articles are OUT (spec §6)."""
+    aid, _ = _seed_article(initialized_library, title="New Filter")
+    liked, _ = _seed_article(initialized_library, title="Liked", rating=1)
+    disliked, _ = _seed_article(initialized_library, title="Disliked",
+                                rating=-1)
+    tiered, _ = _seed_article(initialized_library, title="MustRead",
+                              ai_tier="must-read")
+    plain, _ = _seed_article(initialized_library, title="Plain")
+    _fake_similars(monkeypatch,
+                   [(liked, 0.9), (disliked, 0.8), (tiered, 0.7), (plain, 0.6)])
+    fake_llm(VERDICT_NONE, VERDICT_NONE)   # exactly TWO calls expected
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["candidates_considered"] == 4
+    assert out["trusted_candidates"] == 2
+
+
+def test_detector_empty_trusted_set_makes_zero_llm_calls(
+        initialized_library, fake_llm, monkeypatch):
+    """FROZEN gate: empty trusted set = zero LLM calls. Proof: the fake
+    backend RAISES on an empty queue — we queue nothing, so a green run
+    proves ctx.llm was never called."""
+    aid, _ = _seed_article(initialized_library, title="New Lonely")
+    plain, _ = _seed_article(initialized_library, title="Unrated Neighbor")
+    _fake_similars(monkeypatch, [(plain, 0.9)])
+    # fake_llm fixture active (routes tiers to fake) but queue left EMPTY
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["trusted_candidates"] == 0
+    assert out["contradictions_found"] == 0
+    assert out["suggestion_uids"] == []
+
+
+def test_detector_no_similars_makes_zero_llm_calls(initialized_library,
+                                                   fake_llm, monkeypatch):
+    aid, _ = _seed_article(initialized_library, title="New Isolated")
+    _fake_similars(monkeypatch, [])
+
+    out = _run_detector(initialized_library, aid).outputs.model_dump()
+    assert out["candidates_considered"] == 0
+    assert out["suggestion_uids"] == []
