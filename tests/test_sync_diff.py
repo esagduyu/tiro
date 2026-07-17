@@ -160,6 +160,69 @@ class TestDiff:
         ops = diff(_manifest(_article()), _shadow(), clock=_clock())
         assert not any(isinstance(o, Alias) for o in ops)
 
+    def test_changed_highlight_emits_line_put(self):
+        old_line = {"uid": "01H", "article_uid": "01A", "quote": "q",
+                    "color": "yellow", "updated_at": "2026-07-10T00:00:00Z"}
+        new_line = {**old_line, "color": "pink",
+                    "updated_at": "2026-07-11T00:00:00Z"}
+        cur = ManifestEntry(kind="highlight", uid="01H", hash="lh2",
+                            fields={"article_uid": "01A", "line": new_line})
+        prev = ManifestEntry(kind="highlight", uid="01H", hash="lh1",
+                             fields={"article_uid": "01A", "line": old_line},
+                             hlc="0000000000001-000000-x")
+        (op,) = diff(_manifest(cur), _shadow(prev), clock=_clock())
+        assert isinstance(op, LinePut) and op.line == new_line
+
+    def test_changed_link_extras_emit_row_put(self):
+        # article_relations carries similarity_score/connection_note extras —
+        # a changed note re-emits the link row even with the same endpoints.
+        old = ManifestEntry(kind="link:article_relations", uid="01A:01B",
+                            hash="l1",
+                            fields={"a_uid": "01A", "b_uid": "01B",
+                                    "similarity_score": 0.5,
+                                    "connection_note": "old"},
+                            hlc="0000000000001-000000-x")
+        cur = ManifestEntry(kind="link:article_relations", uid="01A:01B",
+                            hash="l2",
+                            fields={"a_uid": "01A", "b_uid": "01B",
+                                    "similarity_score": 0.9,
+                                    "connection_note": "new"})
+        (op,) = diff(_manifest(cur), _shadow(old), clock=_clock())
+        assert isinstance(op, RowPut) and op.table == "article_relations"
+        assert op.row["connection_note"] == "new"
+
+    def test_changed_pathfile_emits_file_put(self):
+        prev = ManifestEntry(kind="pathfile",
+                             uid="path:articles/x.conflict-devb-20260710.md",
+                             hash="p1",
+                             fields={"path_hint":
+                                     "articles/x.conflict-devb-20260710.md"},
+                             hlc="0000000000001-000000-x")
+        cur = ManifestEntry(kind="pathfile",
+                            uid="path:articles/x.conflict-devb-20260710.md",
+                            hash="p2",
+                            fields={"path_hint":
+                                    "articles/x.conflict-devb-20260710.md"})
+        (op,) = diff(_manifest(cur), _shadow(prev), clock=_clock())
+        assert isinstance(op, FilePut) and op.base_hash == "p1"
+
+    def test_puts_ordered_before_deletes(self):
+        cur = _article(uid="01Z")  # sorts AFTER the deleted entry's uid
+        prev = ManifestEntry(kind="article", uid="01A", hash="h1",
+                             fields=_article().fields,
+                             hlc="0000000000001-000000-x")
+        ops = diff(_manifest(cur), _shadow(prev), clock=_clock())
+        kinds = [type(o) for o in ops]
+        assert kinds.index(FilePut) < kinds.index(RowDel)
+
+    def test_op_ids_unique_and_hlcs_monotone(self):
+        a, b = _article(uid="01A"), _article(uid="01B", h="h2", rating=1)
+        ops = diff(_manifest(a, b), _shadow(), clock=_clock())
+        ids = [o.op_id for o in ops]
+        assert len(set(ids)) == len(ids)
+        hlcs = [o.hlc for o in ops]
+        assert all(x < y for x, y in zip(hlcs, hlcs[1:], strict=False))
+
 
 class TestUnreadable:
     """manifest.unreadable = files that EXIST but could not be read at build
@@ -191,6 +254,20 @@ class TestUnreadable:
         assert not any(isinstance(o, FilePut) for o in ops)
         assert [o.field for o in ops if isinstance(o, Meta)] == ["rating"]
 
+    def test_unreadable_sidecar_emits_no_line_del(self):
+        """S2.3 review Major #2: highlights are inside the unreadable
+        contract too — a shadow highlight whose sidecar is unreadable/
+        partially corrupt must never diff into a LineDel."""
+        line = {"uid": "01H", "article_uid": "01A", "quote": "q",
+                "updated_at": "2026-07-10T00:00:00Z"}
+        prev = ManifestEntry(kind="highlight", uid="01H", hash="lh1",
+                             fields={"article_uid": "01A", "line": line,
+                                     "path_hint": "annotations/x.jsonl"},
+                             hlc="0000000000001-000000-x")
+        m = _manifest()
+        m.unreadable = {"annotations/x.jsonl"}
+        assert diff(m, _shadow(prev), clock=_clock()) == []
+
 
 class TestHydrate:
     def test_hydrate_fills_bodies_and_drops_vanished(self, initialized_library):
@@ -208,3 +285,39 @@ class TestHydrate:
         ]
         out = hydrate_bodies(initialized_library, ops)
         assert len(out) == 1 and out[0].body == "# X\n"
+
+    def test_hydrated_article_object_hash_is_full_file_space(
+            self, initialized_library):
+        """S2.3 review Major #1 pin: for a frontmatter-bearing article the
+        hydrated object_hash (FULL file text — the blob address) and the
+        manifest/diff-time BODY-space hash genuinely differ. Apply must
+        compare base_hash in body space and never against object_hash."""
+        import frontmatter
+
+        from tiro.anchors import content_hash
+        from tiro.sync.manifest import hydrate_bodies
+
+        p = initialized_library.articles_dir / "fm.md"
+        p.write_text("---\ntitle: T\n---\n\n# Body\n")
+        full_text = p.read_text()
+        body_space = content_hash(frontmatter.loads(full_text).content)
+        clock = _clock()
+        op = FilePut(op_id="1", hlc=clock.tick(), device="dev-a", uid="01A",
+                     path_hint="articles/fm.md", object_hash=body_space)
+        (out,) = hydrate_bodies(initialized_library, [op])
+        assert out.body == full_text
+        assert out.object_hash == content_hash(full_text)
+        assert out.object_hash != body_space  # two spaces, always distinct
+
+    def test_hydrate_passes_through_non_file_and_hydrated_ops(
+            self, initialized_library):
+        from tiro.sync.manifest import hydrate_bodies
+
+        clock = _clock()
+        meta = Meta(op_id="1", hlc=clock.tick(), device="dev-a", uid="01A",
+                    field="rating", value=2, ts="2026-07-10T00:00:00Z")
+        hydrated = FilePut(op_id="2", hlc=clock.tick(), device="dev-a",
+                           uid="01B", path_hint="articles/absent.md",
+                           object_hash="a" * 64, body="already here")
+        out = hydrate_bodies(initialized_library, [meta, hydrated])
+        assert out == [meta, hydrated]  # untouched, nothing dropped

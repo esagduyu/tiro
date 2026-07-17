@@ -206,6 +206,60 @@ class TestShadowStore:
         assert note_key not in s.tombstones   # NOT propagated as a delete
         assert s.entries[note_key].hash == m1.entries[note_key].hash
 
+    def test_corrupt_sidecar_highlights_not_tombstoned(
+            self, initialized_library):
+        """S2.3 review Major #2: a sidecar whose lines are corrupt-but-
+        readable (truncation, partial materialization — spec §10) must not
+        report its highlights as deleted: the file is marked unreadable,
+        diff emits no LineDel, save_shadow keeps the shadow rows live."""
+        art = _ingest(initialized_library)
+        from tiro.annotations import append_highlight, sidecar_stem
+        conn = get_connection(initialized_library.db_path)
+        try:
+            arow = conn.execute("SELECT * FROM articles WHERE id = ?",
+                                (art["id"],)).fetchone()
+            body = frontmatter.load(str(
+                initialized_library.articles_dir /
+                arow["markdown_path"])).content
+            start = body.index("body")
+            hl_uid = append_highlight(
+                initialized_library, conn, arow, quote="body",
+                prefix=body[max(0, start - 8):start],
+                suffix=body[start + 4:start + 12],
+                position_start=start, position_end=start + 4,
+                content_hash=content_hash(body), color="yellow",
+                note_markdown="precious highlight note")
+            conn.commit()
+        finally:
+            conn.close()
+        stem = sidecar_stem(arow)
+        m1 = build_manifest(initialized_library)
+        hl_key = ("highlight", hl_uid)
+        assert hl_key in m1.entries
+        assert m1.entries[hl_key].fields["path_hint"] == \
+            f"annotations/{stem}.jsonl"
+        save_shadow(initialized_library, m1,
+                    clock=HLCClock("dev-a", now_ms=lambda: 1))
+
+        # Truncation: the valid line replaced by garbage (still utf-8).
+        sidecar = (initialized_library.library / "annotations" /
+                   f"{stem}.jsonl")
+        sidecar.write_text('{"uid": "01TRUNC\n')
+        m2 = build_manifest(initialized_library)
+        assert hl_key not in m2.entries
+        assert f"annotations/{stem}.jsonl" in m2.unreadable
+
+        from tiro.sync.manifest import diff
+        ops = diff(m2, load_shadow(initialized_library),
+                   clock=HLCClock("dev-a", now_ms=lambda: 2))
+        assert not any(type(o).kind == "line_del" for o in ops)
+
+        save_shadow(initialized_library, m2,
+                    clock=HLCClock("dev-a", now_ms=lambda: 3))
+        s = load_shadow(initialized_library)
+        assert hl_key in s.entries          # carried forward, still live
+        assert hl_key not in s.tombstones   # NOT propagated as a delete
+
     def test_save_shadow_keeps_hlc_for_unchanged_entries(
             self, initialized_library):
         """Monotone shadow: re-saving an unchanged manifest must NOT restamp

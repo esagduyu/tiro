@@ -19,6 +19,11 @@ Kinds and identity (plan decisions #4/#5):
 NEVER in the manifest (spec §2): ChromaDB, audio, reading_sessions,
 reading_stats, auth tables, feeds/feed_entries (device-local subscriptions
 travel via export/backup, not sync — S5 may revisit), backups/, config.
+
+Accepted limitation (S2.3 review nit, deliberate): frontmatter-ONLY article
+edits (e.g. hand-fixing a title in the file) are invisible to change
+detection — article hashes are BODY-space (frontmatter-stripped, the S1
+body_hash decision) — and piggyback on the next body change instead.
 """
 
 from __future__ import annotations
@@ -287,20 +292,45 @@ def _add_pathfiles(config: TiroConfig, m: Manifest) -> None:
 
 
 def _add_highlights(config: TiroConfig, m: Manifest) -> None:
-    from tiro.annotations import annotations_dir, read_annotations
+    # _parse_jsonl_lines is annotations' private parser, used here instead of
+    # read_annotations because the MALFORMED COUNT is load-bearing for sync
+    # (S2.3 review Major #2): read_annotations hides it, and a sidecar whose
+    # lines are corrupt-but-readable (iCloud/Dropbox partial materialization,
+    # spec §10) must mark the file unreadable so its invisible lines are
+    # never diffed into LineDels — highlights join the same unreadable
+    # contract notes/wiki/articles already have.
+    from tiro.annotations import _parse_jsonl_lines, annotations_dir
 
     an_dir = annotations_dir(config)
     if not an_dir.exists():
         return
     for path in sorted(an_dir.glob("*.jsonl")):
-        for line in read_annotations(config, path.stem):
+        rel = f"annotations/{path.name}"
+        try:
+            lines, malformed = _parse_jsonl_lines(path)
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            logger.warning("Manifest: unreadable sidecar %s: %s", path, e)
+            m.unreadable.add(rel)
+            continue
+        if malformed:
+            # Sync the lines that ARE readable, but protect the rest: with
+            # the file marked unreadable, diff/save_shadow never treat the
+            # missing lines as deleted, and shadow rows for this sidecar
+            # don't advance (conservative lag; re-diffed when clean).
+            logger.warning(
+                "Manifest: %d malformed line(s) in %s — sidecar marked "
+                "unreadable, its absent highlights are protected from "
+                "delete propagation", malformed, path)
+            m.unreadable.add(rel)
+        for line in lines:
             uid = line.get("uid")
             if not uid:
                 continue
             m.add(ManifestEntry(
                 kind="highlight", uid=uid,
                 hash=content_hash(canonical_json(line)),
-                fields={"article_uid": line.get("article_uid"), "line": line},
+                fields={"article_uid": line.get("article_uid"), "line": line,
+                        "path_hint": rel},
             ))
 
 
@@ -407,6 +437,14 @@ def save_shadow(config: TiroConfig, manifest: Manifest, *,
     conn = get_connection(config.db_path)
     try:
         for key, entry in manifest.entries.items():
+            if entry.fields.get("path_hint") in manifest.unreadable:
+                # Entry PRESENT but its file was unreadable at build time
+                # (e.g. an article row whose NULL-body_hash disk fallback
+                # failed, or a highlight from a partially-corrupt sidecar):
+                # keep the previous shadow row untouched rather than
+                # clobbering its hash with the failed read's result
+                # (S2.3 review Minor #1).
+                continue
             old = prev.entries.get(key)
             # Keep the existing hlc when nothing changed (monotone shadow).
             keep = old.hlc if (old and old.hash == entry.hash
@@ -466,6 +504,11 @@ def diff(manifest: Manifest, shadow: Shadow, *, clock=None) -> list[Op]:
         if entry.kind == "article":
             if changed_hash and not unreadable:
                 base, h = _stamp()
+                # object_hash here is the MANIFEST hash — BODY-space
+                # (frontmatter-stripped) for articles — a placeholder until
+                # hydrate_bodies replaces it with the full-file blob hash
+                # (a DIFFERENT space; see hydrate_bodies' docstring). Apply
+                # must never compare an article body hash to op.object_hash.
                 ops.append(FilePut(**base, uid=entry.uid,
                                    path_hint=entry.fields["path_hint"],
                                    object_hash=entry.hash or "",
@@ -515,23 +558,29 @@ def diff(manifest: Manifest, shadow: Shadow, *, clock=None) -> list[Op]:
         prev = shadow.entries[key]
         if prev.fields.get("path_hint") in manifest.unreadable:
             continue  # unreadable, not deleted — mirrors save_shadow
-        base, _h = _stamp()
+        # _stamp() inside each branch: an unhandled kind must not burn a
+        # clock tick + ULID without emitting an op (S2.3 review nit).
         if prev.kind == "article":
+            base, _h = _stamp()
             ops.append(RowDel(**base, uid=prev.uid, table="articles",
                               observed=prev.hash))
         elif prev.kind in ("note", "wiki", "pathfile"):
+            base, _h = _stamp()
             ops.append(FileDel(**base, uid=prev.uid,
                                path_hint=prev.fields.get("path_hint", ""),
                                base_hash=prev.hash))
         elif prev.kind == "highlight":
             line = prev.fields.get("line") or {}
+            base, _h = _stamp()
             ops.append(LineDel(**base, uid=prev.uid,
                                article_uid=prev.fields.get("article_uid", ""),
                                observed_updated_at=line.get("updated_at")))
         elif prev.kind.startswith("row:"):
+            base, _h = _stamp()
             ops.append(RowDel(**base, uid=prev.uid,
                               table=prev.kind.split(":", 1)[1], observed=None))
         elif prev.kind.startswith("link:"):
+            base, _h = _stamp()
             ops.append(RowDel(**base, uid=prev.uid,
                               table=prev.kind.split(":", 1)[1],
                               observed=prev.hlc))
@@ -542,7 +591,18 @@ def hydrate_bodies(config: TiroConfig, ops: list[Op]) -> list[Op]:
     """Fill FilePut.body from disk (push-path helper — spec §6.4 uploads
     objects first, and apply_ops requires hydrated bodies). Path hints are
     library-relative; a file that vanished since diff is dropped with a
-    WARNING (it will re-diff next cycle). Non-file ops pass through."""
+    WARNING (it will re-diff next cycle). Non-file ops pass through.
+
+    HASH SPACES (S2.3 review Major #1): for ARTICLES the hydrated
+    object_hash — sha256 of the FULL file text, the content address S3's
+    objects/ store keys blobs on — and base_hash — BODY-space,
+    frontmatter-stripped, the edit-wins baseline — are DIFFERENT spaces,
+    always (every article has frontmatter). Apply-side rules (Task 4 /
+    decision #8) must therefore compare base_hash against
+    body_hash_of_file(current file), treat object_hash purely as a blob
+    address, and store BODY-space hashes into sync_shadow so the receiver's
+    next build_manifest doesn't see a phantom change. For notes/wiki/
+    pathfiles the two spaces coincide (whole file = body)."""
     out: list[Op] = []
     for op in ops:
         if not isinstance(op, FilePut) or op.body is not None:
