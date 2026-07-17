@@ -207,9 +207,12 @@ def _sync_tags_from_frontmatter(conn, article_id: int, tag_names: list[str]) -> 
         )
 
 
-def _reanchor_census(conn, article_id: int, body: str, report: ReconcileReport) -> None:
+def _reanchor_census(conn, article_id: int, body: str,
+                     report: ReconcileReport | None) -> None:
     """Live census only — statuses are computed on GET by the annotations API;
-    sidecar content_hash is creation-time provenance and is NEVER rewritten."""
+    sidecar content_hash is creation-time provenance and is NEVER rewritten.
+    `report=None` (the S2 apply path) skips the census bookkeeping but still
+    logs anchor warnings."""
     rows = conn.execute(
         "SELECT uid, quote_text, prefix_context, suffix_context, "
         "text_position_start, text_position_end, content_hash "
@@ -226,15 +229,64 @@ def _reanchor_census(conn, article_id: int, body: str, report: ReconcileReport) 
             "content_hash": row["content_hash"],
         })["status"]
         if status in ("exact", "shifted"):
-            report.re_anchored += 1
+            if report is not None:
+                report.re_anchored += 1
         else:
-            _detail(report, "anchor_warnings").append(
-                {"highlight_uid": row["uid"], "article_id": article_id, "status": status}
-            )
+            if report is not None:
+                _detail(report, "anchor_warnings").append(
+                    {"highlight_uid": row["uid"], "article_id": article_id, "status": status}
+                )
             logger.warning(
                 "Highlight %s on article %d no longer anchors after external edit (%s)",
                 row["uid"], article_id, status,
             )
+
+
+def refresh_article_from_file(config: TiroConfig, conn, row, path: Path,
+                              body: str, new_hash: str,
+                              report: ReconcileReport | None = None, *,
+                              meta: dict | None = None) -> None:
+    """Refresh one article's derived SQLite state from its (already-settled)
+    markdown file. Shared by S1's changed pipeline and S2's apply_ops
+    (file_put on a known article). Never rewrites the file; never commits;
+    never swallows exceptions — the caller owns transaction/SAVEPOINT policy
+    and error classification. `report=None` (the S2 path) skips the re-anchor
+    census bookkeeping but still logs anchor warnings.
+
+    `meta` is the file's already-parsed frontmatter metadata; passing it
+    keeps meta and `body`/`new_hash` provably from the SAME read (S1's
+    third-edit-race posture). When None it is re-read from `path` (the S2
+    path passes it explicitly from the op body it just wrote)."""
+    if meta is None:
+        meta = frontmatter.load(str(path)).metadata or {}
+    # title is NOT NULL and display-critical (an empty title
+    # would break list rendering), so any falsy frontmatter
+    # value (missing key, "", None) falls back to the existing
+    # row title. author/summary are nullable, so they instead
+    # honor explicit user intent: key absent -> keep row value,
+    # key present (even as "" or null) -> overwrite with it.
+    title = str(meta.get("title") or row["title"])
+    author = meta["author"] if "author" in meta else row["author"]
+    summary = meta["summary"] if "summary" in meta else row["summary"]
+    word_count = len(body.split())
+    conn.execute(
+        "UPDATE articles SET title = ?, author = ?, summary = ?, "
+        "word_count = ?, reading_time_min = ?, body_hash = ?, "
+        "vector_status = 'pending' WHERE id = ?",
+        (title, author, summary, word_count,
+         max(1, math.ceil(word_count / 250)), new_hash, row["id"]),
+    )
+    if isinstance(meta.get("tags"), list):
+        _sync_tags_from_frontmatter(
+            conn, row["id"], [str(t) for t in meta["tags"]]
+        )
+    try:
+        from tiro.wiki import mark_pages_stale
+        mark_pages_stale(config, conn, row["id"])
+    except Exception as e:
+        logger.error("mark_pages_stale failed for %d (non-fatal): %s",
+                     row["id"], e)
+    _reanchor_census(conn, row["id"], body, report)
 
 
 def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
@@ -257,16 +309,6 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
                 post = frontmatter.load(str(scan.disk[name]))
                 body = post.content
                 meta = post.metadata or {}
-                # title is NOT NULL and display-critical (an empty title
-                # would break list rendering), so any falsy frontmatter
-                # value (missing key, "", None) falls back to the existing
-                # row title. author/summary are nullable, so they instead
-                # honor explicit user intent: key absent -> keep row value,
-                # key present (even as "" or null) -> overwrite with it.
-                title = str(meta.get("title") or row["title"])
-                author = meta["author"] if "author" in meta else row["author"]
-                summary = meta["summary"] if "summary" in meta else row["summary"]
-                word_count = len(body.split())
                 # Recompute from the body we just read (not the settle-time
                 # scan.hashes[name]) so the stored body_hash always matches
                 # the exact content the other row fields were derived from —
@@ -288,24 +330,8 @@ def _apply_changed(config: TiroConfig, scan: _Scan, report: ReconcileReport,
             # cleanly under an explicit SAVEPOINT/RELEASE/ROLLBACK TO.
             conn.execute("SAVEPOINT apply_file")
             try:
-                conn.execute(
-                    "UPDATE articles SET title = ?, author = ?, summary = ?, "
-                    "word_count = ?, reading_time_min = ?, body_hash = ?, "
-                    "vector_status = 'pending' WHERE id = ?",
-                    (title, author, summary, word_count,
-                     max(1, math.ceil(word_count / 250)), body_hash, row["id"]),
-                )
-                if isinstance(meta.get("tags"), list):
-                    _sync_tags_from_frontmatter(
-                        conn, row["id"], [str(t) for t in meta["tags"]]
-                    )
-                try:
-                    from tiro.wiki import mark_pages_stale
-                    mark_pages_stale(config, conn, row["id"])
-                except Exception as e:
-                    logger.error("mark_pages_stale failed for %d (non-fatal): %s",
-                                 row["id"], e)
-                _reanchor_census(conn, row["id"], body, report)
+                refresh_article_from_file(config, conn, row, scan.disk[name],
+                                          body, body_hash, report, meta=meta)
             except Exception as e:
                 conn.execute("ROLLBACK TO apply_file")
                 conn.execute("RELEASE apply_file")
@@ -579,16 +605,20 @@ def _apply_created(config: TiroConfig, scan: _Scan, report: ReconcileReport,
 # --- sidecar (highlights/notes) reconcile -----------------------------------
 
 
-def write_conflict_file(dir_path: Path, stem: str, body: str) -> Path:
-    """Preserve a losing version as {stem}.conflict-local-{yyyymmdd}[-n].md
-    (spec §4 naming, device-short 'local' until S5 mints device ids).
-    Collision-safe; never overwrites."""
+def write_conflict_file(dir_path: Path, stem: str, body: str, *,
+                        device: str = "local") -> Path:
+    """Preserve a losing version as {stem}.conflict-{device}-{yyyymmdd}[-n].md
+    (spec §4 naming; S1 passes the default 'local', S2's merge passes the
+    losing op's device label). Collision-safe; never overwrites. `device` is
+    sanitized to the `_CONFLICT_RE` alphabet ([A-Za-z0-9]) so the file always
+    round-trips as a conflict file (excluded from ingest/orphan handling)."""
+    device = re.sub(r"[^A-Za-z0-9]", "", device) or "peer"
     dir_path.mkdir(parents=True, exist_ok=True)
     day = datetime.now(UTC).strftime("%Y%m%d")
-    dest = dir_path / f"{stem}.conflict-local-{day}.md"
+    dest = dir_path / f"{stem}.conflict-{device}-{day}.md"
     n = 2
     while dest.exists():
-        dest = dir_path / f"{stem}.conflict-local-{day}-{n}.md"
+        dest = dir_path / f"{stem}.conflict-{device}-{day}-{n}.md"
         n += 1
     dest.write_text(body)
     return dest
