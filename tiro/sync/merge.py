@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -285,7 +285,11 @@ def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
             row = conn.execute("SELECT * FROM articles WHERE uid = ?",
                                (op.uid,)).fetchone()
             if row is None and current is None:
-                _materialize_article(config, conn, op, report)
+                if not _materialize_article(config, conn, op, report, clock):
+                    # URL-deduped into an existing article: the recursive
+                    # _apply_file_put under the surviving uid owned all
+                    # shadow/report bookkeeping for this op.
+                    return False
                 # Deliberate accepted noise: this shadow row carries only
                 # path_hint in fields, so the next local diff before the
                 # cycle-end save_shadow may re-emit Meta ops for non-default
@@ -339,7 +343,12 @@ def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
                                (op.uid,)).fetchone()
             post = frontmatter.loads(op.body)
             if row is None:
-                _materialize_article(config, conn, op, report)
+                if not _materialize_article(config, conn, op, report, clock):
+                    # URL-deduped (see above). The body written to
+                    # op.path_hint just above stays behind as a rowless
+                    # orphan file — reconcile's external ingest URL-dedupes
+                    # (skips it) and doctor censuses it; never resurrections.
+                    return False
                 materialized = True
             else:
                 refresh_article_from_file(config, conn, row, path, post.content,
@@ -431,16 +440,68 @@ def _upsert_note_row(conn, config: TiroConfig, op: FilePut) -> None:
 
 
 def _materialize_article(config: TiroConfig, conn, op: FilePut,
-                         report: ApplyReport) -> None:
+                         report: ApplyReport, clock: HLCClock) -> bool:
     """Create the article row for an unknown-uid file_put (plan decision #9).
     Frontmatter is the row source (the processor writes title/author/url/
-    tags/summary/published); NO enrichment, NO LLM, NO stats. URL dedupe
-    (decision #12) is wired in Task 7 — this function gains a dedupe
-    pre-check there."""
+    tags/summary/published); NO enrichment, NO LLM, NO stats.
+
+    Returns True when a new row was materialized. Returns False when the op
+    was URL-DEDUPED into an existing article (decision #12) and re-routed
+    through _apply_file_put under the surviving uid — the caller must then
+    skip its own shadow/applied bookkeeping (the recursive apply did it)."""
     path = _resolve_path(config, op.path_hint)
-    post = frontmatter.loads(op.body)
+    post = frontmatter.loads(op.body)  # ONE parse: dedupe + row source share it
     body = post.content
     meta = post.metadata or {}
+
+    # URL dedupe (spec §4, plan decision #12 FROZEN): the same canonical URL
+    # arriving under a DIFFERENT uid keeps the ULID-OLDER (lexicographically
+    # smaller) uid and emits an Alias op for the journal. The incoming body
+    # is re-routed through the normal file-merge path against the survivor,
+    # so a concurrent local edit still resolves via decision #8's rules.
+    url = str(meta.get("url") or "")
+    if url:
+        from tiro.ingestion.rss import _find_existing_article_by_url
+        existing_id = _find_existing_article_by_url(conn, url)
+        if existing_id is not None:
+            existing = conn.execute(
+                "SELECT uid, markdown_path FROM articles WHERE id = ?",
+                (existing_id,)).fetchone()
+            if existing and existing["uid"] and existing["uid"] != op.uid:
+                survivor = min(existing["uid"], op.uid)
+                loser = max(existing["uid"], op.uid)
+                if survivor == op.uid:
+                    # Incoming uid is OLDER: it survives — the LOCAL article
+                    # adopts it before the re-routed put targets it.
+                    _rewrite_local_uid(config, conn, existing["uid"], op.uid)
+                # Record the alias exactly ONCE, always old_uid -> surviving
+                # uid; the sync_shadow 'alias' row is TTL-exempt (decision
+                # #18) so late ops for the dead uid can re-target forever.
+                _record_alias(conn, loser, survivor)
+                # Emitted aliases are DEDUPLICATED (decision #11): a second
+                # file_put for the same duplicate in one batch must not
+                # journal the mapping twice.
+                if not any(isinstance(o, Alias) and o.uid == loser
+                           and o.new_uid == survivor
+                           for o in report.emitted_ops):
+                    report.emitted_ops.append(Alias(
+                        op_id=new_ulid(), hlc=op.hlc, device=op.device,
+                        uid=loser, new_uid=survivor))
+                # details-only, deliberately NOT report._count: one by_kind
+                # increment per wire op, and the recursive apply below owns
+                # this op's single count (applied / conflict / noop).
+                report.details.setdefault("deduped_into", []).append(
+                    {"kind": type(op).kind, "uid": op.uid,
+                     "survivor": survivor})
+                # Commit before recursing — _apply_file_put opens its own
+                # connection and must not contend with this write txn.
+                conn.commit()
+                merged_op = replace(
+                    op, uid=survivor,
+                    path_hint=f"articles/{existing['markdown_path']}")
+                _apply_file_put(config, merged_op, report, clock)
+                return False
+
     _atomic_write(path, op.body)
 
     title = str(meta.get("title") or path.stem)
@@ -475,6 +536,7 @@ def _materialize_article(config: TiroConfig, conn, op: FilePut,
         logger.error("link_article_author failed for %s (non-fatal): %s",
                      op.uid, e)
     report._count(op, "materialized")
+    return True
 
 
 def _source_for(conn, meta: dict) -> int:
@@ -1065,6 +1127,176 @@ def _apply_article_tombstone(config: TiroConfig, op: RowDel,
     report._count(op, "applied")
 
 
-# Task 7 handler lands next; the stub keeps _ordered dispatch importable.
-def _apply_alias(config, op, report):  # pragma: no cover - Task 7
-    raise NotImplementedError
+# --- alias ops (Task 7: URL dedupe companions, spec §4 dedupe row) --------------
+
+
+def _record_alias(conn, old_uid: str, new_uid: str) -> None:
+    """Persist old_uid -> new_uid as a sync_shadow kind='alias' row —
+    deleted_at stays NULL and expire_tombstones exempts the kind anyway
+    (decision #18: alias mappings never age out)."""
+    conn.execute(
+        "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, deleted_at) "
+        "VALUES ('alias', ?, NULL, ?, NULL, NULL) "
+        "ON CONFLICT(kind, uid) DO UPDATE SET fields_json = excluded.fields_json",
+        (old_uid, canonical_json({"new_uid": new_uid})))
+
+
+def _rewrite_local_uid(config: TiroConfig, conn, old_uid: str,
+                       new_uid: str) -> None:
+    """The local article loses the uid contest: adopt the surviving uid.
+    Rows keyed by article_id are untouched; only articles.uid and the
+    sidecar lines' article_uid field need rewriting."""
+    from tiro.annotations import read_annotations, sidecar_stem, write_annotations
+
+    row = conn.execute("SELECT id, markdown_path FROM articles WHERE uid = ?",
+                       (old_uid,)).fetchone()
+    if row is None:
+        return
+    conn.execute("UPDATE articles SET uid = ? WHERE id = ?",
+                 (new_uid, row["id"]))
+    stem = sidecar_stem(row)
+    lines = read_annotations(config, stem)
+    if lines:
+        for ln in lines:
+            if ln.get("article_uid") == old_uid:
+                ln["article_uid"] = new_uid
+        write_annotations(config, stem, lines)
+    # Shadow entries for the old uid are now dead weight; tombstone them.
+    # UPDATE (not shadow_tombstone) on purpose: only rows that EXIST get
+    # tombstoned — never fabricate a tombstone for a never-synced entry.
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for kind in ("article", "note"):
+        conn.execute(
+            "UPDATE sync_shadow SET deleted_at = ? WHERE kind = ? AND uid = ?",
+            (now, kind, old_uid))
+    # Highlight shadow rows are DELIBERATELY left alone: they key by the
+    # highlight's own uid, and the old article_uid only lives inside their
+    # fields' `line` dict. The next build_manifest reads the rewritten
+    # sidecar lines from disk, so the fields/hash comparison in diff/
+    # save_shadow re-stamps them (a bounded one-cycle LinePut echo, same
+    # accepted posture as the materialize branch's Meta echo) — NOT an
+    # oversight for the whole-branch review to flag.
+
+
+def _apply_alias(config: TiroConfig, op: Alias, report: ApplyReport) -> None:
+    """alias(old_uid, new_uid): repoint everything from old to new, then
+    remove the duplicate old article via delete_article (its sidecar lines
+    are moved to the survivor FIRST — delete_article would destroy them)."""
+    from tiro.annotations import (
+        notes_dir,
+        read_annotations,
+        read_note,
+        sidecar_stem,
+        write_annotations,
+        write_note,
+    )
+
+    if op.uid == op.new_uid:
+        # A self-alias would repoint rows onto themselves and then hand the
+        # SURVIVOR to delete_article — refuse (per-op error via apply_ops).
+        raise ValueError(f"self-referential alias for uid {op.uid!r}")
+
+    conn = get_connection(config.db_path)
+    try:
+        _record_alias(conn, op.uid, op.new_uid)
+        old = conn.execute("SELECT * FROM articles WHERE uid = ?",
+                           (op.uid,)).fetchone()
+        new = conn.execute("SELECT * FROM articles WHERE uid = ?",
+                           (op.new_uid,)).fetchone()
+        if old is None:
+            # Nothing local under the dead uid (already applied, or the
+            # duplicate never reached this device): keep the mapping only.
+            conn.commit()
+            report.applied += 1
+            report._count(op, "applied_mapping_only")
+            return
+        if new is None:
+            # Survivor not here yet — mapping persisted so later ops (and a
+            # re-delivered alias after the survivor's file_put) re-target.
+            conn.commit()
+            report.deferred += 1
+            report._count(op, "deferred_survivor_absent")
+            return
+
+        # 1. Sidecar lines old-stem -> new-stem, FILE FIRST (M2.1 invariant:
+        #    a crash leaves truth ahead of the derived rows). Lines travel
+        #    VERBATIM except article_uid (the Task-5 validation contract).
+        old_stem, new_stem = sidecar_stem(old), sidecar_stem(new)
+        old_lines = read_annotations(config, old_stem)
+        if old_lines:
+            for ln in old_lines:
+                ln["article_uid"] = op.new_uid
+            merged = merge_jsonl(read_annotations(config, new_stem), old_lines,
+                                 label_a="local", label_b=op.device)
+            write_annotations(config, new_stem, merged)
+            # Emptied, not unlinked (write primitive is not a policy) — the
+            # file itself is removed by delete_article below.
+            write_annotations(config, old_stem, [])
+
+        # 2. Article-level note: survivor keeps its own; a differing loser
+        #    note is preserved as a conflict file (never merged silently) —
+        #    device-label sanitization happens inside write_conflict_file.
+        note_moved = False
+        old_note = read_note(config, old_stem)
+        if old_note is not None:
+            new_note = read_note(config, new_stem)
+            if new_note is None:
+                write_note(config, new_stem, old_note)
+                note_moved = True
+            elif old_note != new_note:
+                write_conflict_file(notes_dir(config), new_stem, old_note,
+                                    device=op.device)
+                report.conflicts += 1
+
+        # 3. Repoint SQLite rows keyed by article_id. UNIQUE collisions on
+        #    the junction PKs (same tag on both) leave stale rows on the old
+        #    id under OR IGNORE; delete_article clears them below (verified:
+        #    lifecycle.py still deletes all junctions by article_id).
+        for table in ("article_tags", "article_entities", "article_authors",
+                      "highlights"):
+            conn.execute(
+                f"UPDATE OR IGNORE {table} SET article_id = ? WHERE article_id = ?",
+                (new["id"], old["id"]))
+        # Highlight-anchored note rows travel with their highlights; the
+        # loser's ARTICLE-LEVEL note row moves only when its FILE moved —
+        # a wholesale repoint would hand the survivor a SECOND
+        # highlight_id-IS-NULL row (the singleton every note route/
+        # reconcile pass fetchone()s on). When it stays, delete_article
+        # cleans it (its body already preserved as a conflict file above,
+        # or identical to the survivor's).
+        conn.execute(
+            "UPDATE OR IGNORE notes SET article_id = ? "
+            "WHERE article_id = ? AND highlight_id IS NOT NULL",
+            (new["id"], old["id"]))
+        if note_moved:
+            conn.execute(
+                "UPDATE OR IGNORE notes SET article_id = ? "
+                "WHERE article_id = ? AND highlight_id IS NULL",
+                (new["id"], old["id"]))
+        conn.execute(
+            "UPDATE OR IGNORE article_relations SET article_id = ? "
+            "WHERE article_id = ?", (new["id"], old["id"]))
+        conn.execute(
+            "UPDATE OR IGNORE article_relations SET related_article_id = ? "
+            "WHERE related_article_id = ?", (new["id"], old["id"]))
+        conn.execute(
+            "DELETE FROM article_relations WHERE article_id = related_article_id")
+        # Tombstone the dead uid's article/note shadow rows at op.hlc so a
+        # late, stale file_put for the old uid gates as skipped_stale instead
+        # of resurrecting the duplicate as a fresh materialize.
+        shadow_tombstone(conn, "article", op.uid, hlc=op.hlc.to_str())
+        shadow_tombstone(conn, "note", op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+        old_id = old["id"]
+    finally:
+        conn.close()
+    # The repointed highlights keep their uids, but their shadow rows'
+    # fields still cite the OLD article_uid inside `line`/`article_uid` and
+    # the old stem in path_hint. The next build_manifest/save_shadow cycle
+    # heals this from the rewritten on-disk sidecar (fields comparison ->
+    # fresh hlc stamp) — proven end-to-end by
+    # tests/test_sync_alias.py::test_alias_heals_highlight_manifest_entries.
+    from tiro.lifecycle import delete_article
+    delete_article(config, old_id)  # clears the duplicate row/file/leftovers
+    report.applied += 1
+    report._count(op, "applied")
