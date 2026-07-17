@@ -128,17 +128,16 @@ def encode_segment(ops: list[Op], codec) -> tuple[bytes, dict[str, bytes]]:
     )
 
 
-def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]:
-    """Decrypt + parse a segment, decrypting exactly the object blobs its
-    file_put ops reference. Raises a QUARANTINE_ERRORS member on ANY
-    corruption — callers must treat that as quarantine, never skip-a-line."""
+def _decrypt_segment_text(blob: bytes, codec) -> str:
     try:
-        text = codec.decrypt(blob).decode("utf-8")
+        return codec.decrypt(blob).decode("utf-8")
     except CryptoError:
         raise
     except UnicodeDecodeError as e:
         raise JournalError(f"segment blob is not valid UTF-8: {e}") from e
 
+
+def _scan_object_refs(text: str) -> set[str]:
     needed: set[str] = set()
     # split("\n"), NEVER splitlines(): canonical_json(ensure_ascii=False)
     # legally emits U+0085/U+2028/U+2029 raw inside JSON strings, and
@@ -161,6 +160,26 @@ def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]
                 h = payload.get("object_hash")
                 if isinstance(h, str) and h:
                     needed.add(h)
+    return needed
+
+
+def segment_object_refs(blob: bytes, codec) -> set[str]:
+    """Object addresses a segment's file_put ops reference — WITHOUT
+    decoding the ops. The S5 engine calls this to learn which objects/
+    blobs it must fetch BEFORE decode_segment can hydrate them (S3
+    obligation: the NEL-shear-safe pre-scan is single-sourced here, never
+    duplicated in engine code). Error surface matches decode_segment's own
+    decrypt+scan: CryptoError on a bad decrypt, JournalError on a non-UTF-8
+    blob or an invalid JSON line."""
+    return _scan_object_refs(_decrypt_segment_text(blob, codec))
+
+
+def decode_segment(blob: bytes, codec, objects: Mapping[str, bytes]) -> list[Op]:
+    """Decrypt + parse a segment, decrypting exactly the object blobs its
+    file_put ops reference. Raises a QUARANTINE_ERRORS member on ANY
+    corruption — callers must treat that as quarantine, never skip-a-line."""
+    text = _decrypt_segment_text(blob, codec)
+    needed = _scan_object_refs(text)
 
     plain: dict[str, str] = {}
     for h in sorted(needed):

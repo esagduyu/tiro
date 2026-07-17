@@ -171,3 +171,377 @@ async def test_audited_adapter_delete_logs_line(initialized_library, tmp_path):
     entries = [e for e in _sync_audit_entries(initialized_library)
                if e["endpoint"] == "delete"]
     assert len(entries) == 1 and entries[0]["success"] is True
+
+
+# --- Task 3: pull path — watermarks, gap/quarantine, guard, alias remap ------
+
+
+def _seed_segment(backend_root, device_id, seq, ops):
+    """Seed a backend the way a real push would: objects first, then the
+    segment, plus a device doc. PlainCodec — crypto-ON is Task 9's job."""
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.snapshot import (
+        DeviceInfo,
+        device_key,
+        encode_device_doc,
+        encode_segment,
+        journal_key,
+        object_key,
+    )
+
+    codec = PlainCodec()
+    blob, objects = encode_segment(ops, codec)
+    for h, obj_blob in objects.items():
+        p = backend_root / object_key(h)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(obj_blob)
+    seg = backend_root / journal_key(device_id, seq)
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(blob)
+    doc = backend_root / device_key(device_id)
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(encode_device_doc(DeviceInfo(
+        device_id=device_id, name="remote",
+        last_seen="2026-07-17T00:00:00Z", last_seq=seq)))
+
+
+async def _run_pull(config, backend_root, *, accept_mass_delete=False):
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.engine import (
+        CycleReport,
+        _pull,
+        adapter_for_config,
+        get_or_create_device,
+    )
+    from tiro.sync.journal import HLCClock
+
+    config.sync_backend = "filesystem"
+    config.sync_path = str(backend_root)
+    adapter = adapter_for_config(config)
+    device_id, _name = get_or_create_device(config)
+    report = CycleReport()
+    clock_state: dict = {}
+    ok = await _pull(config, adapter, PlainCodec(), HLCClock(device_id),
+                     clock_state, report,
+                     accept_mass_delete=accept_mass_delete)
+    return ok, report, clock_state
+
+
+def _article_val(config, article_id, col):
+    from tiro.database import get_connection
+
+    conn = get_connection(config.db_path)
+    try:
+        return conn.execute(
+            f"SELECT {col} AS v FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()["v"]
+    finally:
+        conn.close()
+
+
+def _article_count(config):
+    from tiro.database import get_connection
+
+    conn = get_connection(config.db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def _synced_article(config):
+    """Ingest one article and mark it 'already synced' (shadow saved)."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync.manifest import build_manifest, save_shadow
+
+    art = _ingest(config)
+    save_shadow(config, build_manifest(config))
+    return art["id"], _article_val(config, art["id"], "uid")
+
+
+REMOTE_DEV = "01REMOTEDEV00000000000000A"
+
+
+def _remote_meta(uid, *, field="rating", value=2, seq_clock=None):
+    from tiro.migrations import new_ulid
+    from tiro.sync.journal import HLCClock, Meta
+
+    clock = seq_clock or HLCClock(REMOTE_DEV)
+    return Meta(op_id=new_ulid(), hlc=clock.tick(), device=REMOTE_DEV,
+                uid=uid, field=field, value=value,
+                ts="2026-07-17T09:00:00Z")
+
+
+async def test_pull_applies_remote_meta_and_advances_watermark(
+    initialized_library, tmp_path
+):
+    from tiro.sync.engine import read_sync_state
+
+    article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(uid)])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is True
+    assert report.result == "ok"
+    assert report.pulled_segments == 1
+    assert report.applied >= 1
+    assert _article_val(initialized_library, article_id, "rating") == 2
+    state = read_sync_state(initialized_library)
+    assert state["watermarks"] == {REMOTE_DEV: 1}
+
+
+async def test_pull_quarantines_corrupt_segment(initialized_library, tmp_path):
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.snapshot import journal_key
+
+    article_id, _uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    seg = backend / journal_key(REMOTE_DEV, 1)
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"\xff\xfe not a segment at all")
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert REMOTE_DEV in report.reason
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+    # Nothing half-applied.
+    assert report.applied == 0
+    assert _article_val(initialized_library, article_id, "rating") is None
+
+
+async def test_pull_mass_delete_guard_and_acceptance(
+    initialized_library, tmp_path
+):
+    from tests.test_reconcile import _ingest
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+    from tiro.sync.journal import HLCClock, RowDel
+    from tiro.sync.manifest import build_manifest, save_shadow
+
+    for i in range(12):
+        _ingest(initialized_library, title=f"Article {i}",
+                url=f"https://example.com/a{i}")
+    save_shadow(initialized_library, build_manifest(initialized_library))
+    conn = get_connection(initialized_library.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT uid, body_hash FROM articles").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 12
+
+    clock = HLCClock(REMOTE_DEV)
+    ops = [RowDel(op_id=new_ulid(), hlc=clock.tick(), device=REMOTE_DEV,
+                  uid=r["uid"], table="articles", observed=r["body_hash"])
+           for r in rows]
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, ops)
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert report.guard
+    assert report.reason == "mass_delete_guard"
+    assert _article_count(initialized_library) == 12
+
+    ok2, report2, _state2 = await _run_pull(
+        initialized_library, backend, accept_mass_delete=True)
+    assert ok2 is True
+    assert _article_count(initialized_library) == 0
+
+
+async def test_pull_gap_detection(initialized_library, tmp_path):
+    article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 3, [_remote_meta(uid)])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert "gap" in report.reason
+    assert REMOTE_DEV in report.reason
+    assert report.applied == 0
+    assert _article_val(initialized_library, article_id, "rating") is None
+
+
+async def test_pull_remaps_aliased_uid_to_survivor(
+    initialized_library, tmp_path
+):
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+    from tiro.sync.journal import canonical_json
+
+    article_id, survivor_uid = _synced_article(initialized_library)
+    old_uid = new_ulid()
+    # Exactly the row shape merge.py::_record_alias writes.
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('alias', ?, NULL, ?, NULL, NULL)",
+            (old_uid, canonical_json({"new_uid": survivor_uid})))
+        conn.commit()
+    finally:
+        conn.close()
+
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(old_uid)])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is True
+    assert report.applied >= 1
+    assert _article_val(initialized_library, article_id, "rating") == 2
+
+
+def test_remap_alias_uids_chain_cycle_and_scope():
+    from dataclasses import replace as dc_replace
+
+    from tiro.sync.engine import _remap_alias_uids
+    from tiro.sync.journal import HLC, Alias, FileDel, FilePut, Meta, RowDel
+
+    hlc = HLC(1, 0, "dev")
+    meta = Meta(op_id="o1", hlc=hlc, device="dev", uid="a",
+                field="rating", value=1, ts="t")
+
+    # Chain a -> b -> c follows to the survivor.
+    out = _remap_alias_uids([meta], {"a": "b", "b": "c"})
+    assert out[0].uid == "c"
+
+    # Cycle a -> b -> a stops safely, op untouched.
+    out = _remap_alias_uids([meta], {"a": "b", "b": "a"})
+    assert out[0].uid == "a"
+
+    # Article-scoped ops remap; everything else passes through untouched.
+    aliases = {"a": "z"}
+    row_del_articles = RowDel(op_id="o2", hlc=hlc, device="dev", uid="a",
+                              table="articles", observed=None)
+    row_del_tags = dc_replace(row_del_articles, op_id="o3", table="tags")
+    fp_article = FilePut(op_id="o4", hlc=hlc, device="dev", uid="a",
+                         path_hint="articles/x.md", object_hash="h")
+    fp_note = dc_replace(fp_article, op_id="o5", path_hint="notes/x.md")
+    fd_article = FileDel(op_id="o6", hlc=hlc, device="dev", uid="a",
+                         path_hint="articles/x.md")
+    alias_op = Alias(op_id="o7", hlc=hlc, device="dev", uid="a",
+                     new_uid="z")
+    out = _remap_alias_uids(
+        [row_del_articles, row_del_tags, fp_article, fp_note, fd_article,
+         alias_op], aliases)
+    assert out[0].uid == "z"      # RowDel(articles) remapped
+    assert out[1].uid == "a"      # RowDel(tags) untouched
+    assert out[2].uid == "z"      # FilePut under articles/ remapped
+    assert out[3].uid == "a"      # FilePut under notes/ untouched
+    assert out[4].uid == "z"      # FileDel under articles/ remapped
+    assert out[5].uid == "a"      # Alias op itself untouched
+
+
+async def test_pull_refreshes_remote_device_registry(
+    initialized_library, tmp_path
+):
+    from tiro.sync.engine import get_or_create_device, read_sync_state
+
+    _article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(uid)])
+
+    ok, _report, _state = await _run_pull(initialized_library, backend)
+    assert ok is True
+
+    state = read_sync_state(initialized_library)
+    remote = next(d for d in state["devices"]
+                  if d["device_id"] == REMOTE_DEV)
+    assert remote["is_self"] == 0
+    assert remote["name"] == "remote"
+    assert remote["last_seq"] == 1
+    assert remote["last_wall_ms"]  # segment op walls were tracked
+    self_id, _n = get_or_create_device(initialized_library)
+    assert state["self"]["device_id"] == self_id
+    assert state["self"]["is_self"] == 1
+
+
+async def test_pull_per_op_errors_do_not_quarantine(
+    initialized_library, tmp_path
+):
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.journal import HLCClock
+
+    article_id, uid = _synced_article(initialized_library)
+    clock = HLCClock(REMOTE_DEV)
+    good = _remote_meta(uid, seq_clock=clock)
+    bad = _remote_meta(uid, field="title", value="nope", seq_clock=clock)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [good, bad])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is True
+    assert report.errors == 1
+    assert report.applied >= 1
+    assert _article_val(initialized_library, article_id, "rating") == 2
+    assert read_sync_state(initialized_library)["watermarks"] == {
+        REMOTE_DEV: 1}
+
+
+# --- segment_object_refs (S3 pre-scan single-sourcing) -----------------------
+
+
+def test_segment_object_refs_file_put():
+    from tiro.anchors import content_hash
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.journal import HLC, FilePut
+    from tiro.sync.snapshot import encode_segment, segment_object_refs
+
+    body = "# Hello\n\nbody\n"
+    op = FilePut(op_id="o1", hlc=HLC(1, 0, "dev"), device="dev", uid="u1",
+                 path_hint="articles/x.md", object_hash=content_hash(body),
+                 body=body)
+    blob, objects = encode_segment([op], PlainCodec())
+    refs = segment_object_refs(blob, PlainCodec())
+    assert refs == {content_hash(body)}
+    assert refs == set(objects)
+
+
+def test_segment_object_refs_meta_only_segment():
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.journal import HLC, Meta
+    from tiro.sync.snapshot import encode_segment, segment_object_refs
+
+    op = Meta(op_id="o1", hlc=HLC(1, 0, "dev"), device="dev", uid="u1",
+              field="rating", value=1, ts="2026-07-17T00:00:00Z")
+    blob, objects = encode_segment([op], PlainCodec())
+    assert objects == {}
+    assert segment_object_refs(blob, PlainCodec()) == set()
+
+
+def test_segment_object_refs_garbage_raises_journal_error():
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.journal import JournalError
+    from tiro.sync.snapshot import segment_object_refs
+
+    with pytest.raises(JournalError):
+        segment_object_refs(b"{not json\n", PlainCodec())
+    with pytest.raises(JournalError):
+        segment_object_refs(b"\xff\xfe not utf-8", PlainCodec())
+
+
+# --- codec_for_config --------------------------------------------------------
+
+
+def test_codec_for_config_plain_and_identity_required(test_config):
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.engine import codec_for_config
+
+    test_config.sync_backend = "filesystem"
+    test_config.sync_encrypt = "auto"
+    assert isinstance(codec_for_config(test_config), PlainCodec)
+
+    test_config.sync_encrypt = "on"
+    test_config.sync_identity = ""
+    with pytest.raises(SyncConfigError, match="sync_identity"):
+        codec_for_config(test_config)
