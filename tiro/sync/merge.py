@@ -520,7 +520,16 @@ def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
         merged = dict(winner)
         w_note = winner.get("note_markdown")
         l_note = loser.get("note_markdown")
-        if l_note and l_note != w_note and l_note not in (w_note or ""):
+        quoted_l_note = ("\n".join("> " + ln for ln in l_note.splitlines() or [""])
+                         if l_note else "")
+        # Skip when the loser's note is already present RAW (substring
+        # heuristic, plan decision #15 / D20) or already present as a
+        # BLOCKQUOTE — without the second check a multi-line loser note
+        # re-presented on a later merge (third device, re-delivered file)
+        # appends the same conflict block again (S2.5 review F2; single-line
+        # notes were only coincidentally protected by their "> " prefix).
+        if (l_note and l_note != w_note and l_note not in (w_note or "")
+                and quoted_l_note not in (w_note or "")):
             block = _conflict_blockquote(l_note, loser.get("updated_at"), l_label)
             merged["note_markdown"] = (w_note + "\n\n" + block) if w_note else block
         by_uid[uid] = (merged, cur_label if winner is cur else label)
@@ -576,6 +585,21 @@ def _highlight_row_from_line(conn, article_id: int, line: dict) -> None:
 
 def _apply_line_put(config: TiroConfig, op: LinePut, report: ApplyReport) -> None:
     from tiro.annotations import read_annotations, sidecar_stem, write_annotations
+
+    # Validate BEFORE any file write (S2.5 review F1): an invalid line —
+    # uid mismatch or missing/empty quote (mirroring _parse_jsonl_lines'
+    # requirements and the NOT NULL highlights.quote_text column) — must
+    # error WITHOUT mutating the sidecar. Writing it first would destroy
+    # the existing good line for that uid in the whole-file rewrite, leave
+    # a poison line the next read counts as malformed (the sidecar then
+    # gets marked unreadable, permanently degrading that stem's sync), and
+    # cascade into reconcile_annotations deleting the user's rows.
+    line = op.line
+    if (not isinstance(line, dict) or line.get("uid") != op.uid
+            or not isinstance(line.get("quote"), str) or not line["quote"]):
+        report.errors += 1
+        report._count(op, "errors", error="invalid line payload (uid/quote)")
+        return
 
     conn = get_connection(config.db_path)
     try:

@@ -101,6 +101,23 @@ class TestMergeJsonl:
         merged = merge_jsonl(lines, [])
         assert [ln["uid"] for ln in merged] == ["01H1", "01H2", "01H3"]
 
+    def test_multiline_loser_note_not_reappended_on_remerge(self):
+        """S2.5 review F2: a MULTI-line loser note re-presented on a later
+        merge (third device, re-delivered file) must not append the same
+        conflict block twice — the blockquoted form differs from the raw
+        note, so the raw-substring guard alone missed it."""
+        loser = _line(note="line one\nline two",
+                      updated="2026-07-10T00:00:00Z")
+        winner = _line(note="winner text", color="pink",
+                       updated="2026-07-11T00:00:00Z")
+        (once,) = merge_jsonl([loser], [winner], label_a="a", label_b="b")
+        assert "line one" in once["note_markdown"]
+        assert once["note_markdown"].count("[conflict") == 1
+        # The stale loser arrives again against the merged result:
+        (twice,) = merge_jsonl([once], [loser], label_a="a", label_b="c")
+        assert twice["note_markdown"] == once["note_markdown"]
+        assert twice["note_markdown"].count("[conflict") == 1
+
 
 def _ingest(config, title="Hello World",
             body="# Hello\n\nalpha bravo charlie delta.",
@@ -128,6 +145,60 @@ class TestLineOps:
         art = _ingest(config)
         row = _arow(config, art["id"])
         return art, row, row["markdown_path"].rsplit(".", 1)[0]
+
+    def test_line_put_invalid_line_errors_without_touching_sidecar(
+            self, initialized_library):
+        """S2.5 review F1 (destructive-write bug pin): a wire line with a
+        missing/empty quote or a uid mismatch must error BEFORE any file
+        write — previously it was written first, destroying the existing
+        good line in the whole-file rewrite and leaving a poison line that
+        marked the sidecar unreadable forever."""
+        art, row, stem = self._seed(initialized_library)
+        from tiro.annotations import append_highlight
+        conn = get_connection(initialized_library.db_path)
+        try:
+            hl_uid = append_highlight(
+                initialized_library, conn, row, quote="bravo",
+                prefix="alpha ", suffix=" charlie", position_start=6,
+                position_end=11, content_hash="d" * 64, color="yellow",
+                note_markdown="precious local note",
+                now="2026-07-10T00:00:00Z")
+            conn.commit()
+        finally:
+            conn.close()
+        sidecar = (initialized_library.library / "annotations" /
+                   f"{stem}.jsonl")
+        before = sidecar.read_bytes()
+
+        clock = _clock()
+        # Same uid as the good line, quote missing — would win LWW (newer
+        # updated_at) and rewrite the file if not validated first.
+        bad = _line(uid=hl_uid, article_uid=row["uid"], quote=None,
+                    note="attacker note", updated="2026-07-12T00:00:00Z")
+        op = LinePut(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                     uid=hl_uid, article_uid=row["uid"], line=bad)
+        report = apply_ops(initialized_library, [op])
+        assert report.errors == 1 and report.applied == 0
+        assert sidecar.read_bytes() == before  # byte-identical, no poison
+
+        # uid-mismatch variant: envelope uid != line uid.
+        other = _line(uid=new_ulid(), article_uid=row["uid"],
+                      updated="2026-07-12T00:00:00Z")
+        op2 = LinePut(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                      uid=new_ulid(), article_uid=row["uid"], line=other)
+        report2 = apply_ops(initialized_library, [op2])
+        assert report2.errors == 1 and report2.applied == 0
+        assert sidecar.read_bytes() == before
+
+    def test_line_put_replay_is_skipped_stale(self, initialized_library):
+        art, row, stem = self._seed(initialized_library)
+        line = _line(uid=new_ulid(), article_uid=row["uid"])
+        clock = _clock()
+        op = LinePut(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                     uid=line["uid"], article_uid=row["uid"], line=line)
+        assert apply_ops(initialized_library, [op]).applied == 1
+        replay = apply_ops(initialized_library, [op])
+        assert replay.skipped_stale == 1 and replay.applied == 0
 
     def test_line_put_creates_sidecar_line_and_row(self, initialized_library):
         art, row, stem = self._seed(initialized_library)
