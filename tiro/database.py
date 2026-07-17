@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS sync_shadow (
     hlc TEXT,
     deleted_at TEXT,
     PRIMARY KEY (kind, uid)
+);
 
 -- Suggestions (Phase 6 K3): persona (and probabilistic code-agent) outputs
 -- pending user accept/dismiss. Columns FROZEN from the agent-runtime spec
