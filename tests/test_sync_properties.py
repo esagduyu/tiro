@@ -534,7 +534,14 @@ def test_apply_never_loses_note_text(ops):
                           for lines in sidecars.values() for ln in lines)]
         notes_root = config.library / "notes"
         if notes_root.exists():
-            pool += [p.read_text() for p in notes_root.glob("*.md")]
+            # read_bytes().decode(), NOT read_text(): universal-newline
+            # translation folds a lone "\r" inside a preserved note into
+            # "\n", making a byte-perfect conflict-note file look like note
+            # loss (hypothesis-found harness false-negative, 2026-07-17 —
+            # bytes on disk verified exact: b"0\r"). Oracle precision fix;
+            # the assertion below is untouched.
+            pool += [p.read_bytes().decode("utf-8")
+                     for p in notes_root.glob("*.md")]
         haystack = "\n".join(pool)
 
         latest: dict[str, LinePut] = {}
