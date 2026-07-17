@@ -112,3 +112,127 @@ def set_suggestion_status(config: TiroConfig, uid: str, status: str) -> bool:
         return cur.rowcount == 1
     finally:
         conn.close()
+
+
+# --- Task 6: accept appliers ------------------------------------------------
+
+
+class SuggestionApplyError(ValueError):
+    """Accept-path validation failure. The suggestion stays PENDING."""
+
+
+VALID_TIERS = ("must-read", "summary-enough", "discard")
+
+
+def _apply_note(config: TiroConfig, suggestion: dict) -> dict:
+    from tiro.annotations import read_note, sidecar_stem, upsert_article_note
+
+    payload = suggestion["payload"]
+    article_id = int(payload["article_id"])
+    markdown = str(payload.get("markdown", "")).strip()
+    if not markdown:
+        raise SuggestionApplyError("suggestion has an empty note body")
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, markdown_path FROM articles WHERE id = ?",
+            (article_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise SuggestionApplyError(f"article {article_id} no longer exists")
+    attribution = (f'*Suggested by persona "{suggestion["persona"]}":*'
+                   f"\n\n{markdown}")
+    existing = read_note(config, sidecar_stem(row))
+    new_body = (f"{existing}\n\n---\n\n{attribution}" if existing
+                else attribution)
+    return upsert_article_note(config, article_id, new_body)
+
+
+def _apply_tier(config: TiroConfig, suggestion: dict) -> dict:
+    payload = suggestion["payload"]
+    tier = payload.get("tier")
+    if tier not in VALID_TIERS:
+        raise SuggestionApplyError(f"invalid tier {tier!r}")
+    conn = get_connection(config.db_path)
+    try:
+        # The same statement the classifier's writeback uses
+        # (tiro/agents/context.py's RunContext.set_tier -- K2 moved the
+        # writeback off preferences.py onto the agent runtime).
+        cur = conn.execute("UPDATE articles SET ai_tier = ? WHERE id = ?",
+                           (tier, int(payload["article_id"])))
+        conn.commit()
+    finally:
+        conn.close()
+    if cur.rowcount == 0:
+        raise SuggestionApplyError(
+            f"article {payload['article_id']} no longer exists")
+    return {"article_id": payload["article_id"], "ai_tier": tier}
+
+
+def _apply_digest_section(config: TiroConfig, suggestion: dict) -> dict:
+    from datetime import date
+
+    payload = suggestion["payload"]
+    markdown = str(payload.get("markdown", "")).strip()
+    if not markdown:
+        raise SuggestionApplyError("suggestion has an empty section body")
+    title = str(payload.get("title") or "Persona section").strip()
+    today = date.today().isoformat()
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, content FROM digests WHERE date = ? AND "
+            "digest_type = 'ranked'", (today,)).fetchone()
+        if row is None:
+            raise SuggestionApplyError(
+                "no cached digest for today — generate one first")
+        conn.execute("UPDATE digests SET content = ? WHERE id = ?",
+                     (f"{row['content']}\n\n## {title}\n\n{markdown}",
+                      row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"date": today, "digest_type": "ranked"}
+
+
+def _apply_wiki_page(config: TiroConfig, suggestion: dict) -> dict:
+    from tiro.wiki import read_page, write_page
+
+    payload = suggestion["payload"]
+    slug = str(payload.get("slug", ""))
+    markdown = str(payload.get("markdown", "")).strip()
+    if not markdown:
+        raise SuggestionApplyError("suggestion has an empty page body")
+    prior = read_page(config, slug)
+    if prior is None:
+        raise SuggestionApplyError(
+            f"wiki page {slug!r} does not exist — personas may only "
+            "update existing pages")
+    return write_page(
+        config, slug=slug, kind=prior["kind"], title=prior["title"],
+        entity_type=prior.get("entity_type"),
+        article_uids=suggestion.get("citations") or [],
+        body=markdown, generated_by=f"persona:{suggestion['persona']}",
+        user_pinned_note=prior.get("user_pinned_note") or "",
+        uid=prior["uid"])
+
+
+_APPLIERS = {
+    "note": _apply_note,
+    "tier_suggestion": _apply_tier,
+    "digest_section": _apply_digest_section,
+    "wiki_page": _apply_wiki_page,
+    # "contradiction": K4 decides its accept semantics; dismiss works today.
+}
+
+
+def apply_suggestion(config: TiroConfig, suggestion: dict) -> dict:
+    """Run the kind's validated write. Raises SuggestionApplyError on any
+    validation failure -- callers flip status to accepted ONLY after this
+    returns (apply first, resolve second: a failed apply stays pending)."""
+    applier = _APPLIERS.get(suggestion["kind"])
+    if applier is None:
+        raise SuggestionApplyError(
+            f"no applier for kind {suggestion['kind']!r}")
+    return applier(config, suggestion)

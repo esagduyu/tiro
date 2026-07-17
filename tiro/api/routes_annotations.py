@@ -48,8 +48,8 @@ from tiro.annotations import (
     delete_note,
     read_annotations,
     sidecar_stem,
+    upsert_article_note,
     write_annotations,
-    write_note,
 )
 from tiro.database import get_connection
 from tiro.migrations import new_ulid
@@ -429,38 +429,12 @@ async def upsert_note(article_id: int, body: NoteRequest, request: Request):
 
     conn = get_connection(config.db_path)
     try:
-        article = _get_article_row(conn, article_id)
-        stem = sidecar_stem(article)
-        now = _now_iso()
-
-        # 1. FILE FIRST.
-        write_note(config, stem, body.body_markdown)
-
-        # 2. INDEX SECOND.
-        existing = conn.execute(
-            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL", (article_id,)
-        ).fetchone()
-        if existing is None:
-            uid = new_ulid()
-            conn.execute(
-                "INSERT INTO notes (uid, article_id, highlight_id, body_markdown,"
-                " created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?)",
-                (uid, article_id, body.body_markdown, now, now),
-            )
-        else:
-            uid = existing["uid"]
-            conn.execute(
-                "UPDATE notes SET body_markdown = ?, updated_at = ? WHERE id = ?",
-                (body.body_markdown, now, existing["id"]),
-            )
-        conn.commit()
-
-        return {
-            "success": True,
-            "data": {"uid": uid, "body_markdown": body.body_markdown, "updated_at": now},
-        }
+        _get_article_row(conn, article_id)   # keeps the exact 404 behavior
     finally:
         conn.close()
+
+    data = upsert_article_note(config, article_id, body.body_markdown)
+    return {"success": True, "data": data}
 
 
 @router.delete("/articles/{article_id}/note")

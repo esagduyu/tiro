@@ -183,3 +183,122 @@ def test_ctx_list_recent_articles_window_and_citation(initialized_library, tmp_p
     tw.close()
     assert [r["id"] for r in rows] == [aid]
     assert ctx.citations == [uid]
+
+
+# --- Task 6: accept appliers ----------------------------------------------
+
+
+def _mk_suggestion(config, kind, payload, citations=None):
+    from tiro.suggestions import create_suggestion
+
+    return create_suggestion(config, persona="persona:test", kind=kind,
+                             payload=payload, citations=citations or [])
+
+
+def test_apply_note_creates_then_appends(initialized_library):
+    from tiro.annotations import read_note, sidecar_stem
+    from tiro.database import get_connection
+    from tiro.suggestions import apply_suggestion
+
+    aid, _uid = _seed_article(initialized_library, title="Note Target")
+    s1 = _mk_suggestion(initialized_library, "note",
+                        {"article_id": aid, "markdown": "First insight."})
+    apply_suggestion(initialized_library, s1)
+
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute("SELECT markdown_path FROM articles WHERE id = ?",
+                           (aid,)).fetchone()
+    finally:
+        conn.close()
+    stem = sidecar_stem(row)
+    assert read_note(initialized_library, stem) is not None
+    assert "First insight." in read_note(initialized_library, stem)
+
+    s2 = _mk_suggestion(initialized_library, "note",
+                        {"article_id": aid, "markdown": "Second insight."})
+    apply_suggestion(initialized_library, s2)
+    note = read_note(initialized_library, stem)
+    assert "First insight." in note and "Second insight." in note
+    assert '*Suggested by persona "persona:test":*' in note
+
+
+def test_apply_tier_same_write_as_classifier(initialized_library):
+    from tiro.database import get_connection
+    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+
+    aid, _uid = _seed_article(initialized_library, title="Tier Target")
+    apply_suggestion(initialized_library, _mk_suggestion(
+        initialized_library, "tier_suggestion",
+        {"article_id": aid, "tier": "must-read"}))
+    conn = get_connection(initialized_library.db_path)
+    try:
+        assert conn.execute("SELECT ai_tier FROM articles WHERE id = ?",
+                            (aid,)).fetchone()["ai_tier"] == "must-read"
+    finally:
+        conn.close()
+    with pytest.raises(SuggestionApplyError, match="tier"):
+        apply_suggestion(initialized_library, _mk_suggestion(
+            initialized_library, "tier_suggestion",
+            {"article_id": aid, "tier": "banana"}))
+
+
+def test_apply_digest_section_appends_or_409s(initialized_library):
+    from datetime import date
+
+    from tiro.database import get_connection
+    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+
+    s = _mk_suggestion(initialized_library, "digest_section",
+                       {"title": "Daily Themes", "markdown": "Theme body."})
+    with pytest.raises(SuggestionApplyError, match="no cached digest"):
+        apply_suggestion(initialized_library, s)
+
+    today = date.today().isoformat()
+    conn = get_connection(initialized_library.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO digests (date, digest_type, content, article_ids) "
+            "VALUES (?, 'ranked', 'Existing digest.', '[]')", (today,))
+        conn.commit()
+    finally:
+        conn.close()
+    apply_suggestion(initialized_library, s)
+    conn = get_connection(initialized_library.db_path)
+    try:
+        content = conn.execute(
+            "SELECT content FROM digests WHERE date = ? AND digest_type = "
+            "'ranked'", (today,)).fetchone()["content"]
+    finally:
+        conn.close()
+    assert content.startswith("Existing digest.")
+    assert "## Daily Themes" in content and "Theme body." in content
+
+
+def test_apply_wiki_page_updates_existing_only(initialized_library):
+    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+    from tiro.wiki import read_page, write_page
+
+    with pytest.raises(SuggestionApplyError, match="does not exist"):
+        apply_suggestion(initialized_library, _mk_suggestion(
+            initialized_library, "wiki_page",
+            {"slug": "entities/nobody", "markdown": "New body."}))
+
+    write_page(initialized_library, slug="entities/ada", kind="entity",
+               title="Ada", entity_type="person", article_uids=[],
+               body="Old body.", generated_by="test",
+               user_pinned_note="KEEP ME")
+    apply_suggestion(initialized_library, _mk_suggestion(
+        initialized_library, "wiki_page",
+        {"slug": "entities/ada", "markdown": "Persona body."}))
+    page = read_page(initialized_library, "entities/ada")
+    assert "Persona body." in page["body"]
+    assert page["user_pinned_note"] == "KEEP ME"       # survives, always
+
+
+def test_apply_contradiction_has_no_applier_yet(initialized_library):
+    from tiro.suggestions import SuggestionApplyError, apply_suggestion
+
+    with pytest.raises(SuggestionApplyError, match="no applier"):
+        apply_suggestion(initialized_library, _mk_suggestion(
+            initialized_library, "contradiction", {"claim": "x"}))

@@ -296,6 +296,46 @@ def write_note(config: TiroConfig, stem: str, body_markdown: str) -> None:
     _atomic_write_text(path, body_markdown)
 
 
+def upsert_article_note(config: TiroConfig, article_id: int,
+                        body_markdown: str) -> dict:
+    """The one validated article-note write (file FIRST, notes row second).
+    Shared by PUT /api/articles/{id}/note and the suggestion accept path
+    (spec §5: accept runs the same validated writes). Raises ValueError on
+    empty body, LookupError on unknown article."""
+    if not body_markdown.strip():
+        raise ValueError("body_markdown must not be empty")
+    conn = get_connection(config.db_path)
+    try:
+        article = conn.execute(
+            "SELECT id, markdown_path FROM articles WHERE id = ?",
+            (article_id,)).fetchone()
+        if article is None:
+            raise LookupError(f"Article {article_id} not found")
+        stem = sidecar_stem(article)
+        now = _now_iso()
+        write_note(config, stem, body_markdown)          # 1. FILE FIRST
+        existing = conn.execute(                         # 2. INDEX SECOND
+            "SELECT * FROM notes WHERE article_id = ? AND highlight_id IS NULL",
+            (article_id,)).fetchone()
+        if existing is None:
+            uid = new_ulid()
+            conn.execute(
+                "INSERT INTO notes (uid, article_id, highlight_id,"
+                " body_markdown, created_at, updated_at)"
+                " VALUES (?, ?, NULL, ?, ?, ?)",
+                (uid, article_id, body_markdown, now, now))
+        else:
+            uid = existing["uid"]
+            conn.execute(
+                "UPDATE notes SET body_markdown = ?, updated_at = ?"
+                " WHERE id = ?",
+                (body_markdown, now, existing["id"]))
+        conn.commit()
+        return {"uid": uid, "body_markdown": body_markdown, "updated_at": now}
+    finally:
+        conn.close()
+
+
 def delete_note(config: TiroConfig, stem: str) -> None:
     """Remove `{notes}/{stem}.md` if present. No-op if already absent."""
     path = notes_dir(config) / f"{stem}.md"
