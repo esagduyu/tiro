@@ -903,6 +903,7 @@ def cmd_sync(args):
     import asyncio
 
     from tiro.config import load_config
+    from tiro.database import migrate_db
     from tiro.sync.engine import (
         SyncConfigError,
         adapter_for_config,
@@ -913,7 +914,18 @@ def cmd_sync(args):
     )
 
     config = getattr(args, "_config_override", None) or load_config(args.config)
+    # Same preamble as cmd_reconcile: refuse without a library, then bring
+    # the schema current (sync tables ride migrations). No vectorstore init
+    # needed — sync's apply side treats ChromaDB as best-effort.
+    if not config.db_path.exists():
+        print("No Tiro library found. Run `uv run tiro init` first.")
+        sys.exit(1)
+    migrate_db(config.db_path)
     sync_cmd = getattr(args, "sync_cmd", None)
+
+    if args.accept_mass_delete and not args.now:
+        print("Warning: --accept-mass-delete only applies with --now — "
+              "ignored.")
 
     if sync_cmd == "setup":
         _sync_setup(config)
@@ -935,13 +947,20 @@ def cmd_sync(args):
         except SyncConfigError as e:
             print(f"Sync is not configured correctly: {e}")
             return
-        try:
-            report = asyncio.run(repair(config, adapter))
-        finally:
+
+        async def _repair():
+            # ONE event loop for repair + aclose: a webdav adapter's
+            # httpx.AsyncClient must never span two asyncio.run() loops
+            # (cross-loop reuse -> "Event loop is closed").
             try:
-                asyncio.run(adapter.aclose())
-            except Exception:  # noqa: S110 - best-effort close
-                pass
+                return await repair(config, adapter)
+            finally:
+                try:
+                    await adapter.aclose()
+                except Exception:  # noqa: S110 - best-effort close
+                    pass
+
+        report = asyncio.run(_repair())
         print(f"Repair: {report.result}")
         if report.reason:
             print(f"  reason: {report.reason}")
@@ -988,12 +1007,19 @@ def _sync_setup(config):
     """Interactive sync setup (spec §9): backend + encryption + passphrase,
     with the recovery-code show-once ceremony. Nothing is persisted until
     every check passes; the recovery code is printed exactly once and
-    NEVER written anywhere by Tiro."""
+    NEVER written anywhere by Tiro.
+
+    ALL backend IO (format.json probe, verify/init, the optional bootstrap
+    and the final aclose) runs inside ONE asyncio.run() event loop — a
+    webdav adapter's httpx.AsyncClient must never be reused across two
+    loops (cross-loop reuse -> "Event loop is closed"). Blocking input()/
+    getpass() calls inside the coroutine are fine for a CLI."""
     import asyncio
     import getpass
 
     from tiro.config import persist_config
     from tiro.database import get_connection
+    from tiro.sync.crypto import SyncFormatError, parse_format_json
     from tiro.sync.engine import (
         SyncConfigError,
         _get_or_none,
@@ -1006,107 +1032,172 @@ def _sync_setup(config):
     )
     from tiro.sync.snapshot import FORMAT_KEY
 
+    def _pin(value: str) -> str:
+        # persist_config writes through ruamel's YAML 1.2 emitter, which
+        # leaves `on`/`off` as plain scalars — but load_config reads with
+        # pyyaml (YAML 1.1), where plain on/off are BOOLEANS. Persist the
+        # encryption pin quoted so it round-trips as the string
+        # resolve_encryption expects instead of poisoning the config.
+        from ruamel.yaml.scalarstring import SingleQuotedScalarString
+
+        return SingleQuotedScalarString(value)
+
     updates: dict = {}
-    adapter = None
-    fmt_exists = False
     try:
+        # 1. Backend + connection fields (local input only, no backend IO).
+        while True:
+            backend = input(
+                "Backend [filesystem/s3/webdav] (filesystem): "
+            ).strip().lower() or "filesystem"
+            if backend in ("filesystem", "s3", "webdav"):
+                break
+            print("Please answer filesystem, s3 or webdav.")
+        updates["sync_backend"] = backend
+        config.sync_backend = backend
+        if backend == "filesystem":
+            fields = ((
+                "sync_path",
+                "Sync folder (e.g. a Dropbox/iCloud/Syncthing dir): ",
+                False,
+            ),)
+        elif backend == "s3":
+            fields = (
+                ("sync_s3_endpoint", "S3 endpoint URL: ", False),
+                ("sync_s3_bucket", "Bucket name: ", False),
+                ("sync_s3_access_key", "Access key id: ", False),
+                ("sync_s3_secret_key", "Secret access key: ", True),
+            )
+        else:
+            fields = (
+                ("sync_webdav_url", "WebDAV URL: ", False),
+                ("sync_webdav_user", "Username: ", False),
+                ("sync_webdav_password", "Password: ", True),
+            )
+        for key, prompt, secret_field in fields:
+            value = (getpass.getpass(prompt) if secret_field
+                     else input(prompt)).strip()
+            updates[key] = value
+            setattr(config, key, value)
+
+        # 2. Encryption pin (spec §5). For network backends the pin is
+        # set EXPLICITLY on/off — downgrade resistance depends on the
+        # local pin, never on the backend's own claim.
+        if backend in ("s3", "webdav"):
+            answer = input(
+                "Client-side encryption is strongly recommended for "
+                "network backends. Keep it ON? [Y/n] "
+            ).strip().lower()
+            encrypt = "on"
+            if answer in ("n", "no"):
+                typed = input(
+                    "Type UNENCRYPTED to confirm storing plaintext on "
+                    "the server: "
+                ).strip()
+                if typed == "UNENCRYPTED":
+                    encrypt = "off"
+                else:
+                    print("Keeping encryption ON.")
+            updates["sync_encrypt"] = _pin(encrypt)
+            config.sync_encrypt = encrypt
+        else:
+            answer = input("Encrypt blobs? [y/N] ").strip().lower()
+            if answer in ("y", "yes"):
+                updates["sync_encrypt"] = _pin("on")
+                config.sync_encrypt = "on"
+            else:
+                # A "no" pins auto (= off for filesystem) EXPLICITLY — a
+                # re-run answering "no" must not silently inherit a stale
+                # "on" from an earlier ceremony.
+                updates["sync_encrypt"] = _pin("auto")
+                config.sync_encrypt = "auto"
+    except KeyboardInterrupt:
+        print("\nAborted. Nothing was changed.")
+        return
+
+    async def _ceremony():
+        # 3. Probe the backend (nothing persisted yet). Building the
+        # adapter mints the device identity row as a side effect
+        # (adapter_for_config -> get_or_create_device): a local-only ULID,
+        # reused on any later retry — so "Nothing was changed" on the
+        # abort paths below refers to config.yaml + the backend, not to
+        # that row.
         try:
-            # 1. Backend + connection fields.
-            while True:
-                backend = input(
-                    "Backend [filesystem/s3/webdav] (filesystem): "
-                ).strip().lower() or "filesystem"
-                if backend in ("filesystem", "s3", "webdav"):
-                    break
-                print("Please answer filesystem, s3 or webdav.")
-            updates["sync_backend"] = backend
-            config.sync_backend = backend
-            if backend == "filesystem":
-                fields = ((
-                    "sync_path",
-                    "Sync folder (e.g. a Dropbox/iCloud/Syncthing dir): ",
-                    False,
-                ),)
-            elif backend == "s3":
-                fields = (
-                    ("sync_s3_endpoint", "S3 endpoint URL: ", False),
-                    ("sync_s3_bucket", "Bucket name: ", False),
-                    ("sync_s3_access_key", "Access key id: ", False),
-                    ("sync_s3_secret_key", "Secret access key: ", True),
-                )
-            else:
-                fields = (
-                    ("sync_webdav_url", "WebDAV URL: ", False),
-                    ("sync_webdav_user", "Username: ", False),
-                    ("sync_webdav_password", "Password: ", True),
-                )
-            for key, prompt, secret_field in fields:
-                value = (getpass.getpass(prompt) if secret_field
-                         else input(prompt)).strip()
-                updates[key] = value
-                setattr(config, key, value)
-
-            # 2. Encryption pin (spec §5). For network backends the pin is
-            # set EXPLICITLY on/off — downgrade resistance depends on the
-            # local pin, never on the backend's own claim.
-            if backend in ("s3", "webdav"):
-                answer = input(
-                    "Client-side encryption is strongly recommended for "
-                    "network backends. Keep it ON? [Y/n] "
-                ).strip().lower()
-                encrypt = "on"
-                if answer in ("n", "no"):
-                    typed = input(
-                        "Type UNENCRYPTED to confirm storing plaintext on "
-                        "the server: "
-                    ).strip()
-                    if typed == "UNENCRYPTED":
-                        encrypt = "off"
-                    else:
-                        print("Keeping encryption ON.")
-                updates["sync_encrypt"] = encrypt
-                config.sync_encrypt = encrypt
-            else:
-                answer = input("Encrypt blobs? [y/N] ").strip().lower()
-                if answer in ("y", "yes"):
-                    updates["sync_encrypt"] = "on"
-                    config.sync_encrypt = "on"
-                # else: leave "auto" (= off for filesystem)
-
-            # 3. Probe the backend (nothing persisted yet).
+            adapter = adapter_for_config(config)
+        except SyncConfigError as e:
+            print(f"Invalid sync configuration: {e}. Nothing was changed.")
+            return
+        try:
+            fmt_exists = False
             try:
-                adapter = adapter_for_config(config)
-            except SyncConfigError as e:
-                print(f"Invalid sync configuration: {e}. Nothing was changed.")
-                return
-            fmt_exists = asyncio.run(
-                _get_or_none(adapter, FORMAT_KEY)) is not None
-
-            # 4./5. Passphrase ceremony / plaintext initialization.
-            secret = ""
-            if resolve_encryption(config) or fmt_exists:
-                pw = getpass.getpass("Sync passphrase: ")
+                raw = await _get_or_none(adapter, FORMAT_KEY)
+                fmt_exists = raw is not None
+                backend_plaintext = False
                 if fmt_exists:
-                    secret = asyncio.run(verify_passphrase(config, adapter, pw))
+                    try:
+                        fmt = parse_format_json(raw.decode("utf-8"))
+                    except (SyncFormatError, UnicodeDecodeError) as e:
+                        # Loud but CLEAN refusal (version/corruption): a
+                        # printed message, never a traceback.
+                        print(f"Cannot join this backend: {e}")
+                        print("Nothing was changed.")
+                        return
+                    backend_plaintext = fmt.encryption == "none"
+
+                # 4./5. Passphrase ceremony / plaintext paths.
+                secret = ""
+                if fmt_exists and backend_plaintext:
+                    # NEVER prompt for a passphrase here — it would
+                    # protect nothing on a plaintext backend.
+                    if resolve_encryption(config):
+                        # Joining a PLAINTEXT backend with a local pin
+                        # that resolves ON: persisting the pin as-is
+                        # would leave every future cycle mode-mismatch
+                        # quarantined. Typed confirm, then pin off.
+                        print("This backend stores data UNENCRYPTED, but "
+                              "this device is set to encrypt.")
+                        typed = input(
+                            "Type UNENCRYPTED to join it anyway: ").strip()
+                        if typed != "UNENCRYPTED":
+                            print("Aborted. Nothing was changed.")
+                            return
+                        updates["sync_encrypt"] = _pin("off")
+                        config.sync_encrypt = "off"
+                elif fmt_exists:
+                    # Backend is ENCRYPTED: verify the passphrase.
+                    pw = getpass.getpass("Sync passphrase: ")
+                    try:
+                        secret = await verify_passphrase(config, adapter, pw)
+                    except SyncFormatError as e:
+                        print(f"Cannot join this backend: {e}")
+                        print("Nothing was changed.")
+                        return
                     if secret is None:
                         print("Wrong passphrase for this backend (or "
                               "unreadable format.json). Nothing was changed.")
                         return
-                    if secret:
-                        print("Passphrase verified against the existing "
-                              "backend.")
-                        if not resolve_encryption(config):
-                            # Joining an encrypted backend with a pin that
-                            # resolves off (filesystem auto): pin ON so the
-                            # cycle's mode check matches reality.
-                            updates["sync_encrypt"] = "on"
-                            config.sync_encrypt = "on"
-                else:
+                    print("Passphrase verified against the existing "
+                          "backend.")
+                    if not resolve_encryption(config):
+                        # Joining an encrypted backend with a pin that
+                        # resolves off (filesystem auto): pin ON so the
+                        # cycle's mode check matches reality.
+                        updates["sync_encrypt"] = _pin("on")
+                        config.sync_encrypt = "on"
+                        print("Backend is encrypted — encryption enabled "
+                              "for this device.")
+                elif resolve_encryption(config):
+                    # Fresh encrypted backend: double-entry + init.
+                    pw = getpass.getpass("Sync passphrase: ")
                     confirm = getpass.getpass("Repeat passphrase: ")
                     if confirm != pw:
                         print("Passphrases do not match. Nothing was changed.")
                         return
-                    secret = asyncio.run(init_backend(config, adapter, pw))
+                    try:
+                        secret = await init_backend(config, adapter, pw)
+                    except SyncConfigError as e:
+                        print(f"Cannot initialize this backend: {e}")
+                        print("Nothing was changed.")
+                        return
                     if secret:
                         print()
                         print("=== RECOVERY CODE — shown ONCE, "
@@ -1118,56 +1209,57 @@ def _sync_setup(config):
                               "Tiro never shows it again.")
                         print("=" * 53)
                         print()
+                else:
+                    # Fresh plaintext backend: write the plaintext
+                    # format.json now so the first cycle finds an
+                    # initialized backend.
+                    try:
+                        await init_backend(config, adapter, "")
+                    except SyncConfigError as e:
+                        print(f"Cannot initialize this backend: {e}")
+                        print("Nothing was changed.")
+                        return
                 if secret:
                     updates["sync_identity"] = secret
                     config.sync_identity = secret
-            elif not fmt_exists:
-                # Plaintext backend: write the plaintext format.json now so
-                # the first cycle finds an initialized backend.
-                asyncio.run(init_backend(config, adapter, ""))
-        except KeyboardInterrupt:
-            print("\nAborted. Nothing was changed.")
-            return
-
-        # 6. Persist — the point of no return for this ceremony.
-        updates["sync_enabled"] = True
-        config.sync_enabled = True
-        persist_config(config, updates)
-        get_or_create_device(config)
-
-        # 7. Empty library + populated backend: offer a bootstrap.
-        conn = get_connection(config.db_path)
-        try:
-            n_articles = conn.execute(
-                "SELECT COUNT(*) FROM articles").fetchone()[0]
-        finally:
-            conn.close()
-        if n_articles == 0 and fmt_exists:
-            answer = input(
-                "Library is empty and the backend has data — bootstrap "
-                "now? [Y/n] "
-            ).strip().lower()
-            if answer not in ("n", "no"):
-                boot_adapter = adapter_for_config(config)
-                try:
-                    report = asyncio.run(bootstrap(config, boot_adapter))
-                finally:
-                    try:
-                        asyncio.run(boot_adapter.aclose())
-                    except Exception:  # noqa: S110 - best-effort close
-                        pass
-                _print_cycle_report("Bootstrap", report)
-                if report.result == "ok":
-                    print("Embeddings rebuild in the background once the "
-                          "server runs.")
+            except KeyboardInterrupt:
+                print("\nAborted. Nothing was changed.")
                 return
-        print("Setup complete. Run `tiro sync --now` or start the server.")
-    finally:
-        if adapter is not None:
+
+            # 6. Persist — the point of no return for this ceremony.
+            updates["sync_enabled"] = True
+            config.sync_enabled = True
+            persist_config(config, updates)
+            get_or_create_device(config)
+
+            # 7. Empty library + populated backend: offer a bootstrap.
+            conn = get_connection(config.db_path)
             try:
-                asyncio.run(adapter.aclose())
+                n_articles = conn.execute(
+                    "SELECT COUNT(*) FROM articles").fetchone()[0]
+            finally:
+                conn.close()
+            if n_articles == 0 and fmt_exists:
+                answer = input(
+                    "Library is empty and the backend has data — bootstrap "
+                    "now? [Y/n] "
+                ).strip().lower()
+                if answer not in ("n", "no"):
+                    report = await bootstrap(config, adapter)
+                    _print_cycle_report("Bootstrap", report)
+                    if report.result == "ok":
+                        print("Embeddings rebuild in the background once "
+                              "the server runs.")
+                    return
+            print("Setup complete. Run `tiro sync --now` or start the "
+                  "server.")
+        finally:
+            try:
+                await adapter.aclose()
             except Exception:  # noqa: S110 - best-effort close
                 pass
+
+    asyncio.run(_ceremony())
 
 
 def cmd_migrate_library(args):

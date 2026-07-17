@@ -189,3 +189,183 @@ def test_sync_setup_wrong_passphrase_changes_nothing(initialized_library,
     text = config_path.read_text()
     assert "sync_enabled: true" not in text
     assert "sync_identity" not in text
+
+
+def _weak_new_kdf_params(**_kw):
+    """Stand-in for crypto.new_kdf_params: honest Argon2id at test speed,
+    fresh random salt (init_backend resolves the name from tiro.sync.crypto
+    at call time, so that is the patch point — not tiro.sync.engine)."""
+    import base64
+    import os
+
+    from tiro.sync.crypto import KdfParams
+
+    return KdfParams(
+        salt_b64=base64.b64encode(os.urandom(16)).decode("ascii"),
+        **WEAK_KDF)
+
+
+def test_sync_setup_encrypted_init_ceremony(initialized_library, tmp_path,
+                                            capsys, monkeypatch):
+    """THE CEREMONY PIN: fresh backend + encrypt=y runs the REAL init —
+    recovery code printed exactly once, identity + pin persisted, and the
+    persisted config LOADS BACK as an encrypted, enabled sync config
+    (a plain `sync_encrypt: on` would round-trip through pyyaml as the
+    boolean True and poison resolve_encryption)."""
+    from tiro.config import load_config
+    from tiro.sync.crypto import parse_format_json
+
+    cfg = initialized_library
+    config_path = _write_config_yaml(cfg, tmp_path)
+    backend = tmp_path / "backend"
+    monkeypatch.setattr("tiro.sync.crypto.new_kdf_params",
+                        _weak_new_kdf_params)
+    answers = iter(["filesystem", str(backend), "y"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda *a: "correct-horse")
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert out.count("RECOVERY CODE") == 1
+    codes = [line.strip() for line in out.splitlines()
+             if line.strip().startswith("AGE-SECRET-KEY-1")]
+    assert len(codes) == 1
+    recovery = codes[0]
+    assert "Setup complete" in out
+
+    persisted = load_config(config_path)
+    assert persisted.sync_enabled is True
+    assert persisted.sync_encrypt == "on"
+    assert persisted.sync_identity == recovery
+    fmt = parse_format_json((backend / "format.json").read_text())
+    assert fmt.encryption == "age"
+    assert fmt.age_recipient.startswith("age1")
+
+
+def test_sync_setup_passphrase_mismatch_changes_nothing(initialized_library,
+                                                        tmp_path, capsys,
+                                                        monkeypatch):
+    cfg = initialized_library
+    config_path = _write_config_yaml(cfg, tmp_path)
+    backend = tmp_path / "backend"
+    answers = iter(["filesystem", str(backend), "y"])
+    passphrases = iter(["pw-one", "pw-two"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda *a: next(passphrases))
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert "do not match" in out
+    assert "Nothing was changed" in out
+    assert "sync_enabled: true" not in config_path.read_text()
+    assert not (backend / "format.json").exists()
+
+
+def _preinit_plaintext_backend(cfg, tmp_path):
+    """Initialize a PLAINTEXT backend, then reset the pin so setup
+    re-collects it (mirrors the wrong-passphrase test's recipe)."""
+    backend = _fs_backend(cfg, tmp_path, sync_encrypt="off")
+    adapter = adapter_for_config(cfg)
+    try:
+        asyncio.run(init_backend(cfg, adapter, ""))
+    finally:
+        asyncio.run(adapter.aclose())
+    cfg.sync_encrypt = "auto"
+    return backend
+
+
+def test_sync_setup_plaintext_join_with_pin_on_requires_confirm(
+    initialized_library, tmp_path, capsys, monkeypatch
+):
+    """THE M1 PIN: joining a PLAINTEXT backend while the local pin resolves
+    ON must never persist a forever-quarantined config — typed UNENCRYPTED
+    confirm flips the pin off, and NO passphrase is ever prompted (it would
+    protect nothing)."""
+    from tiro.config import load_config
+
+    cfg = initialized_library
+    config_path = _write_config_yaml(cfg, tmp_path)
+    backend = _preinit_plaintext_backend(cfg, tmp_path)
+
+    # backend, path, encrypt=y (pin ON), typed confirm, decline bootstrap.
+    answers = iter(["filesystem", str(backend), "y", "UNENCRYPTED", "n"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("plaintext join must never prompt getpass"))
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert "UNENCRYPTED, but this device is set to encrypt" in out
+    assert "Setup complete" in out
+    persisted = load_config(config_path)
+    assert persisted.sync_enabled is True
+    assert persisted.sync_encrypt == "off"
+    assert persisted.sync_identity == ""
+
+
+def test_sync_setup_plaintext_join_refused_changes_nothing(
+    initialized_library, tmp_path, capsys, monkeypatch
+):
+    cfg = initialized_library
+    config_path = _write_config_yaml(cfg, tmp_path)
+    backend = _preinit_plaintext_backend(cfg, tmp_path)
+
+    answers = iter(["filesystem", str(backend), "y", "nah"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("plaintext join must never prompt getpass"))
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert "Aborted. Nothing was changed." in out
+    text = config_path.read_text()
+    assert "sync_enabled: true" not in text
+    assert "sync_encrypt" not in text
+
+
+def test_sync_requires_library(test_config, capsys):
+    """THE M3 PIN: cmd_sync mirrors cmd_reconcile's preamble — no DB, no
+    sync verb runs; exit 1 with the init hint."""
+    with pytest.raises(SystemExit) as exc:
+        cmd_sync(Args(test_config))
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "tiro init" in out
+
+
+def test_sync_setup_version_refusal_is_clean(initialized_library, tmp_path,
+                                             capsys, monkeypatch):
+    """A NEWER sync_format refuses with a printed message — no traceback
+    (cmd_sync returns normally), nothing persisted, no passphrase prompt."""
+    import json
+
+    cfg = initialized_library
+    config_path = _write_config_yaml(cfg, tmp_path)
+    backend = tmp_path / "backend"
+    backend.mkdir(parents=True)
+    (backend / "format.json").write_text(json.dumps({
+        "sync_format": 99,
+        "library_id": "lib-from-the-future",
+        "encryption": "none",
+        "kdf": None,
+        "age_recipient": None,
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    answers = iter(["filesystem", str(backend), "y"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("version refusal must precede any prompt"))
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert "sync_format 99" in out
+    assert "Nothing was changed" in out
+    assert "sync_enabled: true" not in config_path.read_text()
