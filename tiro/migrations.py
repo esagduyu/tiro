@@ -630,6 +630,13 @@ def _m018_sync_state(conn: sqlite3.Connection) -> None:
             last_wall_ms INTEGER
         )
     """)
+    # Exactly ONE self identity row, enforced at the schema level — a
+    # duplicate self row minted by a SELECT-then-INSERT race would poison
+    # remote device docs permanently (S5.1 review Major #2).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_state_self "
+        "ON sync_state(is_self) WHERE is_self = 1"
+    )
 
 
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [

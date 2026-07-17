@@ -356,6 +356,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
     last_wall_ms INTEGER
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_state_self ON sync_state(is_self) WHERE is_self = 1;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_uid ON articles(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uid ON sources(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_uid ON entities(uid);

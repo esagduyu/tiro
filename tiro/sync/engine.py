@@ -13,6 +13,7 @@ read/update functions every later task consumes.
 import json
 import logging
 import platform
+import sqlite3
 from datetime import UTC, datetime
 
 from tiro.config import TiroConfig
@@ -21,7 +22,7 @@ from tiro.migrations import new_ulid
 
 logger = logging.getLogger(__name__)
 
-LOCK_TTL_S = 120
+LOCK_TTL_S = 120  # backend advisory-lock TTL, used by the S5.4 cycle
 
 
 def _now_iso() -> str:
@@ -48,12 +49,22 @@ def get_or_create_device(config: TiroConfig) -> tuple[str, str]:
             return (row["device_id"], row["name"])
         device_id = new_ulid()
         name = platform.node() or "device"
-        conn.execute(
-            "INSERT INTO sync_state (device_id, name, is_self, last_seen) "
-            "VALUES (?, ?, 1, ?)",
-            (device_id, name, _now_iso()),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO sync_state (device_id, name, is_self, last_seen) "
+                "VALUES (?, ?, 1, ?)",
+                (device_id, name, _now_iso()),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # Lost the mint race (idx_sync_state_self partial unique index):
+            # another connection created the identity first — adopt it.
+            row = conn.execute(
+                "SELECT device_id, name FROM sync_state WHERE is_self = 1"
+            ).fetchone()
+            if row is None:  # pragma: no cover - only on non-race corruption
+                raise
+            return (row["device_id"], row["name"])
         logger.info("Minted sync device identity %s (%s)", device_id, name)
         return (device_id, name)
     finally:
@@ -78,10 +89,21 @@ def read_sync_state(config: TiroConfig) -> dict:
     watermarks: dict = {}
     last_cycle = None
     if self_row is not None:
+        # Defensive parse ("never crash the server on bad input"): a garbage
+        # row degrades to empty state — an empty watermark just re-pulls,
+        # and S2 apply is idempotent, so this is semantically safe.
         if self_row.get("watermarks_json"):
-            watermarks = json.loads(self_row["watermarks_json"])
+            try:
+                watermarks = json.loads(self_row["watermarks_json"])
+            except ValueError:
+                logger.warning("sync_state: unreadable watermarks_json — "
+                               "treating as empty (will re-pull)")
         if self_row.get("last_cycle_json"):
-            last_cycle = json.loads(self_row["last_cycle_json"])
+            try:
+                last_cycle = json.loads(self_row["last_cycle_json"])
+            except ValueError:
+                logger.warning("sync_state: unreadable last_cycle_json — "
+                               "treating as no prior cycle")
     return {
         "self": self_row,
         "devices": rows,
@@ -111,11 +133,14 @@ def update_self_state(
         params.append(json.dumps(last_cycle))
     conn = get_connection(config.db_path)
     try:
-        conn.execute(
+        cur = conn.execute(
             f"UPDATE sync_state SET {', '.join(sets)} WHERE is_self = 1",
             params,
         )
         conn.commit()
+        if cur.rowcount == 0:
+            logger.warning("update_self_state: no self device row — "
+                           "call get_or_create_device first")
     finally:
         conn.close()
 
@@ -129,7 +154,14 @@ def upsert_remote_device(
     last_seen: str | None = None,
     last_wall_ms: int | None = None,
 ) -> None:
-    """Upsert a REMOTE device's registry row (is_self stays 0)."""
+    """Upsert a REMOTE device's registry row (is_self stays 0).
+
+    A conflict against the SELF row is a guarded no-op (`WHERE is_self = 0`):
+    the backend's devices/ listing normally includes our own device doc, and
+    blindly upserting it would clobber the self row's last_seq (the journal
+    head) with a possibly-stale remote-read value. An empty incoming name
+    never wipes a previously-known one.
+    """
     conn = get_connection(config.db_path)
     try:
         conn.execute(
@@ -138,11 +170,13 @@ def upsert_remote_device(
                 (device_id, name, is_self, last_seq, last_seen, last_wall_ms)
             VALUES (?, ?, 0, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
-                name = excluded.name,
+                name = CASE WHEN excluded.name != '' THEN excluded.name
+                            ELSE sync_state.name END,
                 last_seq = excluded.last_seq,
                 last_seen = excluded.last_seen,
                 last_wall_ms = COALESCE(excluded.last_wall_ms,
                                         sync_state.last_wall_ms)
+            WHERE sync_state.is_self = 0
             """,
             (device_id, name, last_seq, last_seen, last_wall_ms),
         )
