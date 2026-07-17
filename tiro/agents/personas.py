@@ -208,21 +208,24 @@ class ScopedContext:
     """Reduced read-only view over RunContext (spec §5). Personas execute
     ONLY against this: the scope's read tools plus llm/result/suggest.
     Everything else -- other reads, all direct write tools, internals,
-    config -- raises. There is no network tool on ANY context."""
+    config, even this wrapper's own storage -- raises. Enforcement is
+    __getattribute__ (not __getattr__), so instance attributes cannot
+    shadow the guard; the wrapped context lives in a single tuple slot
+    reachable only via object.__getattribute__. There is no network tool
+    on ANY context."""
 
     _COMMON = frozenset({"llm", "result", "suggest"})
 
     def __init__(self, ctx, scope: str):
-        object.__setattr__(self, "_ctx", ctx)
-        object.__setattr__(self, "_scope", scope)
         object.__setattr__(
-            self, "_allowed", SCOPE_READS[scope] | self._COMMON)
+            self, "_state", (ctx, scope, SCOPE_READS[scope] | ScopedContext._COMMON))
 
-    def __getattr__(self, name):
-        if name in self._allowed:
-            return getattr(self._ctx, name)
+    def __getattribute__(self, name):
+        ctx, scope, allowed = object.__getattribute__(self, "_state")
+        if name in allowed:
+            return getattr(ctx, name)
         raise PersonaScopeError(
-            f"persona scope {self._scope!r} does not allow {name!r}")
+            f"persona scope {scope!r} does not allow {name!r}")
 
     def __setattr__(self, name, value):
         raise PersonaScopeError("ScopedContext is read-only")

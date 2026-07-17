@@ -205,3 +205,25 @@ def test_gather_day_and_query_scopes(initialized_library, tmp_path):
                               {"query": "topic X"})
     assert "topic X" in data2["query"]
     tw2.close()
+
+
+def test_scoped_context_never_leaks_its_own_storage(initialized_library, tmp_path):
+    """The wrapper's internals are not reachable by ANY ordinary attribute
+    access -- __getattribute__ is the guard, so instance storage cannot
+    shadow it (review finding: __getattr__ only fires on lookup miss)."""
+    from tiro.agents.personas import PersonaScopeError, ScopedContext
+
+    ctx, tw = _make_ctx(initialized_library, tmp_path)
+    scoped = ScopedContext(ctx, "article")
+    for name in ("_ctx", "_scope", "_allowed", "_state", "__dict__"):
+        with pytest.raises(PersonaScopeError):
+            getattr(scoped, name)
+    # vars() looks up __dict__ via the same __getattribute__ guard; CPython's
+    # vars() builtin catches the resulting AttributeError (PersonaScopeError
+    # is a subclass) and re-raises it as TypeError -- the dict is still never
+    # returned, which is the property under test.
+    with pytest.raises(TypeError, match="__dict__"):
+        vars(scoped)
+    # allowed names still resolve to the underlying context's bound methods
+    assert callable(scoped.get_article) and callable(scoped.llm)
+    tw.close()
