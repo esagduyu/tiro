@@ -309,15 +309,22 @@ def _seed_source(config, uid, name, domain):
         conn.close()
 
 
-@st.composite
-def st_state_ops(draw):
-    """Random op batch over the closed uid universe: line puts/dels + meta
-    ops, HLC-stamped from per-device clocks (per-device order preserved)."""
+def _draw_state_ops(draw, clocks):
+    """Draw one op batch stamped from the GIVEN per-device clocks.
+
+    Sharing the clocks across every batch drawn for one test case is
+    load-bearing: one real device has ONE strictly-monotone HLCClock, so
+    two distinct ops from the same device can never carry the same stamp
+    (tick() never repeats; per-device journals are totally ordered, spec
+    §3). Independently-clocked batches generated a physically impossible
+    duplicate stamp — a LinePut and LineDel both at (1,0,'deva') — whose
+    put-vs-del "tie" diverged by arrival order. That input violates the
+    system's precondition, so the strategy (not the property) was
+    corrected; adversarial ranges are unchanged and cross-device same-wall
+    ties still occur (the device suffix breaks them deterministically)."""
     from tiro.migrations import new_ulid
 
     ops = []
-    clocks = {d: HLCClock(d, now_ms=lambda: draw(
-        st.integers(1, 10**9))) for d in DEVICES}
     n = draw(st.integers(0, 10))
     for _ in range(n):
         device = draw(st.sampled_from(DEVICES))
@@ -345,6 +352,26 @@ def st_state_ops(draw):
                                 (None, 0, 1, 2, "2026-07-12T00:00:00Z"))),
                             ts=draw(st_ts)))
     return ops
+
+
+def _fresh_clocks(draw):
+    return {d: HLCClock(d, now_ms=lambda: draw(
+        st.integers(1, 10**9))) for d in DEVICES}
+
+
+@st.composite
+def st_state_ops(draw):
+    """Random op batch over the closed uid universe: line puts/dels + meta
+    ops, HLC-stamped from per-device clocks (per-device order preserved)."""
+    return _draw_state_ops(draw, _fresh_clocks(draw))
+
+
+@st.composite
+def st_state_ops_pair(draw):
+    """TWO batches sharing ONE set of per-device clocks — see
+    _draw_state_ops' docstring for why sharing is load-bearing."""
+    clocks = _fresh_clocks(draw)
+    return _draw_state_ops(draw, clocks), _draw_state_ops(draw, clocks)
 
 
 def _observable_state(config):
@@ -398,41 +425,44 @@ def _ex_line(note, updated, color="yellow"):
 
 
 @settings(settings.get_profile("sync_apply"))
-@given(st_state_ops(), st_state_ops())
-@example(
+@given(st_state_ops_pair())
+@example(pair=(
     # Pinned S2.8 counterexample (cross-field meta divergence): articles
     # carry ONE meta_updated_at, and gating every meta field on it coupled
     # the fields — on the device that saw is_read(ts=9) first, rating(ts=5)
     # was skipped as "stale"; on the other it applied. Fixed by per-field
     # LWW clocks (sync_shadow kind='metats').
-    ops_a=[Meta(op_id="01OPMETA00000000000000000A", hlc=HLC(5, 0, "deva"),
-                device="deva", uid=ART_UIDS[0], field="rating", value=2,
-                ts="2026-07-05T00:00:00Z")],
-    ops_b=[Meta(op_id="01OPMETA00000000000000000B", hlc=HLC(9, 0, "devb"),
-                device="devb", uid=ART_UIDS[0], field="is_read", value=1,
-                ts="2026-07-09T00:00:00Z")],
-)
-@example(
+    [Meta(op_id="01OPMETA00000000000000000A", hlc=HLC(5, 0, "deva"),
+          device="deva", uid=ART_UIDS[0], field="rating", value=2,
+          ts="2026-07-05T00:00:00Z")],
+    [Meta(op_id="01OPMETA00000000000000000B", hlc=HLC(9, 0, "devb"),
+          device="devb", uid=ART_UIDS[0], field="is_read", value=1,
+          ts="2026-07-09T00:00:00Z")],
+))
+@example(pair=(
     # Pinned S2.8 counterexample (stale-put content drop): a line_put whose
     # HLC is older than the watermark but whose updated_at is NEWER was
     # skipped outright on the device that saw the hlc-newer put first, and
     # LWW-merged on the device that saw it last — diverging on color and
     # note. A stale put now still FOLDS (content) without advancing the
     # watermark (liveness).
-    ops_a=[LinePut(op_id="01OPLINE00000000000000000A", hlc=HLC(9, 0, "deva"),
-                   device="deva", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
-                   line=_ex_line(None, "2026-07-05T00:00:00Z", color="pink"))],
-    ops_b=[LinePut(op_id="01OPLINE00000000000000000B", hlc=HLC(5, 0, "devb"),
-                   device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
-                   line=_ex_line("precious", "2026-07-09T00:00:00Z"))],
-)
-def test_apply_order_independent_across_devices(ops_a, ops_b):
+    [LinePut(op_id="01OPLINE00000000000000000A", hlc=HLC(9, 0, "deva"),
+             device="deva", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line(None, "2026-07-05T00:00:00Z", color="pink"))],
+    [LinePut(op_id="01OPLINE00000000000000000B", hlc=HLC(5, 0, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("precious", "2026-07-09T00:00:00Z"))],
+))
+def test_apply_order_independent_across_devices(pair):
     """Two devices' batches applied in either order converge (spec §9's
     commutativity across op reorderings per device pair). Libraries start
     clean-shadow (no un-diffed local edits), so resolution is fully
     deterministic — the pseudo-HLC concurrency path has its own example
-    tests in test_sync_apply_files.py."""
+    tests in test_sync_apply_files.py. Batches share per-device clocks —
+    see _draw_state_ops' docstring (strategy correction, S2.9 fix)."""
     from tiro.sync.merge import apply_ops
+
+    ops_a, ops_b = pair
 
     with tempfile.TemporaryDirectory() as td:
         c1 = _mini_lib(Path(td), "lib1")
