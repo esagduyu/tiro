@@ -151,6 +151,15 @@ class TestUrlDedupe:
         aliases = [o for o in report.emitted_ops if isinstance(o, Alias)]
         assert len(aliases) == 1
         assert (aliases[0].uid, aliases[0].new_uid) == (incoming_uid, local_uid)
+        # Locally-authored stamp (S2.7 review Minor 1): the alias op is the
+        # MERGE's own, never attributed to the triggering remote device.
+        assert aliases[0].device != "dev-b"
+        # as_dict renders emitted ops in wire form (S2.7 review Nit 1).
+        wire = report.as_dict()["emitted_ops"]
+        assert len(wire) == 1
+        assert wire[0]["kind"] == "alias"
+        assert wire[0]["uid"] == incoming_uid
+        assert wire[0]["payload"] == {"new_uid": local_uid}
         conn = get_connection(initialized_library.db_path)
         try:
             n = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
@@ -368,6 +377,37 @@ class TestAliasOp:
         apply_ops(initialized_library, [op])
         report2 = apply_ops(initialized_library, [op])
         assert report2.errors == 0  # already-applied alias is a clean no-op
+
+    def test_deferred_alias_self_heals_when_survivor_arrives(
+            self, initialized_library):
+        """S2.7 review Nit 3: a deferred alias (survivor absent) converges
+        later without consuming the mapping — when the survivor's own
+        file_put arrives, URL dedupe fires against the still-present loser
+        and the local article adopts the surviving uid (branch b)."""
+        art = _ingest(initialized_library, url="https://example.com/hello")
+        local_uid = _article_uid(initialized_library, art["id"])
+        survivor_uid = "0" * 26  # lexicographically smaller than any real ULID
+        clock = _clock()
+        alias = Alias(op_id=new_ulid(), hlc=clock.tick(), device="dev-b",
+                      uid=local_uid, new_uid=survivor_uid)
+        r1 = apply_ops(initialized_library, [alias])
+        assert r1.deferred == 1
+
+        # The survivor's article now arrives (same canonical URL).
+        put = _fileput(survivor_uid, "articles/2026-07-01_survivor.md",
+                       _remote_doc("https://example.com/hello?utm_source=x"),
+                       clock=_clock(ms=2000000000000))
+        r2 = apply_ops(initialized_library, [put])
+        assert r2.errors == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            rows = conn.execute("SELECT uid FROM articles").fetchall()
+        finally:
+            conn.close()
+        assert [r["uid"] for r in rows] == [survivor_uid]  # renamed, single row
+        from tiro.sync.manifest import load_shadow
+        assert load_shadow(initialized_library).aliases.get(local_uid) == \
+            survivor_uid
 
     def test_alias_self_reference_is_an_error(self, initialized_library):
         keep, _lose = self._two_articles(initialized_library)
