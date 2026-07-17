@@ -621,3 +621,69 @@ class TestMassDeleteGuard:
                for r in rows[:11]]
         r = apply_ops(initialized_library, ops, guard=False)
         assert r.guard is None and r.tombstones == 11
+
+
+class TestS28MetaClockFix:
+    """S2.8 hard-review Blocker pin: the per-field metats gate must not let
+    an OLDER remote meta op overwrite a NEWER un-pushed LOCAL edit (LWW
+    inversion). Local edits are detected by divergence from the article
+    shadow entry's stored field value (decision #8's file-rule mirror)."""
+
+    def _synced_article(self, config):
+        from tiro.sync.journal import HLCClock
+        from tiro.sync.manifest import build_manifest, save_shadow
+
+        art = _ingest(config)
+        conn = get_connection(config.db_path)
+        try:
+            uid = conn.execute("SELECT uid FROM articles WHERE id = ?",
+                               (art["id"],)).fetchone()["uid"]
+        finally:
+            conn.close()
+        # Remote rating=1 applied at T05, then a full save_shadow so the
+        # article shadow entry stores the synced field values.
+        apply_ops(config, [_meta(uid, "rating", 1, "2026-07-10T00:00:05Z")])
+        save_shadow(config, build_manifest(config),
+                    clock=HLCClock("dev-a", now_ms=lambda: 1))
+        return art, uid
+
+    def _local_edit(self, config, article_id, rating=2,
+                    mu="2026-07-10T00:00:10Z"):
+        conn = get_connection(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE articles SET rating = ?, meta_updated_at = ? "
+                "WHERE id = ?", (rating, mu, article_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_older_remote_op_never_overwrites_newer_local_edit(
+            self, initialized_library):
+        art, uid = self._synced_article(initialized_library)
+        # LOCAL route-style edit at T10 (bumps meta_updated_at only).
+        self._local_edit(initialized_library, art["id"])
+        # Remote op OLDER than the local edit (T09 < T10) must be skipped
+        # even though it is newer than the last-SYNCED metats (T05).
+        r = apply_ops(initialized_library,
+                      [_meta(uid, "rating", 1, "2026-07-10T00:00:09Z")])
+        assert r.skipped_stale == 1 and r.applied == 0
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT rating FROM articles WHERE uid = ?",
+                                (uid,)).fetchone()["rating"] == 2
+        finally:
+            conn.close()
+
+    def test_newer_remote_op_still_beats_local_edit(self, initialized_library):
+        art, uid = self._synced_article(initialized_library)
+        self._local_edit(initialized_library, art["id"])
+        r = apply_ops(initialized_library,
+                      [_meta(uid, "rating", -1, "2026-07-10T00:00:11Z")])
+        assert r.applied == 1
+        conn = get_connection(initialized_library.db_path)
+        try:
+            assert conn.execute("SELECT rating FROM articles WHERE uid = ?",
+                                (uid,)).fetchone()["rating"] == -1
+        finally:
+            conn.close()

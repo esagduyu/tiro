@@ -1051,6 +1051,20 @@ def _metats_set(conn, article_uid: str, field: str, ts: str) -> None:
         (f"{article_uid}:{field}", canonical_json({"ts": ts})))
 
 
+def _current_meta_value(conn, article_id: int, field: str):
+    """Current local value of an allowlisted meta field (callers guard via
+    META_FIELDS before interpolation). source_uid resolves through the
+    sources join — comparisons must be uid-vs-uid (S2.6 review F1)."""
+    if field == "source_uid":
+        return conn.execute(
+            "SELECT s.uid AS v FROM articles a "
+            "LEFT JOIN sources s ON s.id = a.source_id "
+            "WHERE a.id = ?", (article_id,)).fetchone()["v"]
+    return conn.execute(
+        f"SELECT {field} AS v FROM articles WHERE id = ?",
+        (article_id,)).fetchone()["v"]
+
+
 def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
     # META_FIELDS is the single injection barrier: op.field is interpolated
     # into SQL below ONLY after this allowlist check. Raising (not silently
@@ -1086,6 +1100,33 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
         # tombstoned by save_shadow). meta_updated_at itself is bumped
         # monotonically below purely as the diff-side emission stamp.
         local_ts = _metats_get(conn, op.uid, op.field)
+        # UN-PUSHED LOCAL EDIT protection (S2.8 review Blocker): metats only
+        # tracks the last-SYNCED per-field ts, while local route writes
+        # (rate/read/snooze) bump only articles.meta_updated_at — gating on
+        # metats alone let an OLDER remote op overwrite a NEWER un-pushed
+        # local edit (LWW inversion, self-cementing via the next diff).
+        # Mirror of decision #8's file rule (the local side counts as
+        # "unchanged since last sync" only when it matches the shadow):
+        # when the article's shadow entry STORES this field and the current
+        # value differs — a local edit sync hasn't captured yet — the local
+        # clock is max(metats, meta_updated_at). Apply-written shadow rows
+        # carry only path_hint (no meta fields) until the next save_shadow,
+        # so the protection engages only on properly-synced state; the
+        # bootstrap window (un-pushed edit before the first full
+        # save_shadow) remains unprotected — documented, bounded to one
+        # cycle, and the local diff re-emits the local value either way.
+        if op.field != "opened_count":
+            srow = conn.execute(
+                "SELECT fields_json FROM sync_shadow WHERE kind = 'article' "
+                "AND uid = ? AND deleted_at IS NULL", (op.uid,)).fetchone()
+            if srow:
+                sfields = json.loads(srow["fields_json"] or "{}")
+                if op.field in sfields:
+                    cur_v = _current_meta_value(conn, row["id"], op.field)
+                    if sfields.get(op.field) != cur_v:
+                        mu = row["meta_updated_at"]
+                        if mu and (local_ts is None or mu > local_ts):
+                            local_ts = mu
         if not op.ts and (local_ts is not None or row["meta_updated_at"]):
             # S2.6 review F7: a ts-less (None/"") meta op must never
             # overwrite a stamped field — it would bypass both LWW guards
@@ -1106,16 +1147,8 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
             # always sorts below any integer, so every equal-ts repoint
             # (the NORMAL post-sync state, since apply stamps
             # meta_updated_at = op.ts) would be skipped forever.
-            if op.field == "source_uid":
-                cur = conn.execute(
-                    "SELECT s.uid AS v FROM articles a "
-                    "LEFT JOIN sources s ON s.id = a.source_id "
-                    "WHERE a.id = ?", (row["id"],)).fetchone()
-            else:
-                cur = conn.execute(
-                    f"SELECT {op.field} AS v FROM articles WHERE id = ?",
-                    (row["id"],)).fetchone()
-            if canonical_json(op.value) <= canonical_json(cur["v"]):
+            if canonical_json(op.value) <= canonical_json(
+                    _current_meta_value(conn, row["id"], op.field)):
                 report.skipped_stale += 1
                 report._count(op, "skipped_stale_tie")
                 return
