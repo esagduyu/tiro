@@ -65,6 +65,22 @@ def test_accept_applies_then_resolves(api):
     assert notes["note"] and "Apply me." in notes["note"]["body_markdown"]
 
 
+def test_accept_contradiction_over_route(api):
+    """K4 Task 8 Step 1's accept-path verification, made repeatable: the
+    exact HTTP route the /agents Apply button calls, for the contradiction
+    kind (K4.4's applier), asserting the note write through the API."""
+    aid, _ = _seed_article(_cfg(api), title="Contra Route Target")
+    s = _mk_suggestion(_cfg(api), "contradiction",
+                       {"article_id": aid,
+                        "markdown": "**Challenges something you trusted** — x."})
+    r = api.post(f"/api/suggestions/{s['uid']}/accept")
+    assert r.status_code == 200 and r.json()["success"] is True
+    notes = api.get(f"/api/articles/{aid}/annotations").json()["data"]
+    assert notes["note"]
+    assert "Flagged by the contradiction detector" in notes["note"]["body_markdown"]
+    assert "Challenges something you trusted" in notes["note"]["body_markdown"]
+
+
 def test_accept_apply_failure_leaves_pending(api):
     s = _mk_suggestion(_cfg(api), "digest_section",
                        {"title": "t", "markdown": "d"})   # no digest today

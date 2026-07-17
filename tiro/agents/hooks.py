@@ -11,6 +11,10 @@ rollback window has closed and the result dict is built. Contract:
 * ingestion_method == "import" is deliberately SKIPPED: bulk importers
   would fan out hundreds of LLM runs; `tiro agent run
   contradiction-detector --backfill` is the explicit path for imports.
+  Files reconciled from disk by the sync engine (S1's
+  ingest_external_file, ingestion_method == "external") bypass
+  process_article entirely and so never reach this dispatch either —
+  the backfill CLI covers them the same way.
 * Kill-switch: contradiction_detector_enabled=False removes the detector
   from dispatch entirely ("off = no hook registered", spec §6). Manual
   runs and backfill are unaffected — the flag gates the hook, not the agent.

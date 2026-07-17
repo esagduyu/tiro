@@ -441,3 +441,16 @@ def test_backfill_rejects_bad_agent_and_input_combo(
     with pytest.raises(SystemExit) as exc:
         cmd_agent(_backfill_args(cfg, input=["article_id=1"]))
     assert exc.value.code == 2               # --backfill + --input conflict
+
+
+def test_backfill_rejects_nonpositive_limit(
+        initialized_library, tmp_path, monkeypatch):
+    """A negative LIMIT is 'unlimited' to SQLite and 0 prints a misleading
+    nothing-to-do — both exit 2 up front (K4.6 review fix)."""
+    from tiro.cli import cmd_agent
+
+    cfg = _cli_config(initialized_library, tmp_path)
+    for bad in (0, -1):
+        with pytest.raises(SystemExit) as exc:
+            cmd_agent(_backfill_args(cfg, limit=bad))
+        assert exc.value.code == 2

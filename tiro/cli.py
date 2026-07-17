@@ -649,6 +649,11 @@ def cmd_agent(args):
         if args.input:
             print("--backfill and --input are mutually exclusive")
             sys.exit(2)
+        if args.limit < 1:
+            # SQLite treats a negative LIMIT as unlimited, and LIMIT 0 would
+            # print a misleading "nothing to do" — reject both up front.
+            print("--limit must be >= 1")
+            sys.exit(2)
         agent = registry.all_agents().get(args.name)
         if agent is None or agent.inputs != {"article_id": int}:
             print(f"--backfill needs a registered agent whose only input "
