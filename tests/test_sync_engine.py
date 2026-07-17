@@ -1082,3 +1082,187 @@ async def test_cycle_unconfigured_is_clean_error(initialized_library):
 
     assert report.result == "error"
     assert report.reason.startswith("not configured")
+
+
+# --- S5.4-fix review wave: B1/M1 append-only pin, M2/M3, m1 ------------------
+
+
+async def test_push_crash_after_segment_never_overwrites_seq(
+    initialized_library, tmp_path, monkeypatch
+):
+    """B1/M1 executable pin: a crash AFTER the journal segment landed but
+    BEFORE any local record (device-doc put fails) must never lead the next
+    push to overwrite that seq with different bytes — the journal is
+    append-only (spec §6.4). Pre-fix, the purely-local seq counter re-minted
+    the SAME seq for the now-larger diff and the unconditional put
+    overwrote the original segment."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync import engine
+    from tiro.sync.engine import sync_cycle
+    from tiro.sync.snapshot import parse_journal_key
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+
+    orig_put = AuditedAdapter.put
+    armed = {"on": True}
+
+    async def flaky_put(self, key, data):
+        if armed["on"] and key.startswith("devices/"):
+            raise OSError("disk full")
+        return await orig_put(self, key, data)
+
+    monkeypatch.setattr(AuditedAdapter, "put", flaky_put)
+
+    report = await sync_cycle(cfg)
+    assert report.result == "error"
+
+    segs = list(backend.glob("journal/**/*.age"))
+    assert len(segs) == 1
+    orig_seg = segs[0]
+    orig_bytes = orig_seg.read_bytes()
+    _dev, orig_seq = parse_journal_key(
+        orig_seg.relative_to(backend).as_posix())
+
+    # Local state changes between the crash and the retry — the re-derived
+    # diff has DIFFERENT bytes than the stranded segment.
+    _ingest(cfg, title="Second Article", url="https://example.com/second")
+    armed["on"] = False
+
+    # Compaction disabled for the retry cycle: its GC legitimately collects
+    # fully-acked segments — the pin here is push-side overwrite, not GC.
+    async def no_compact(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(engine, "_maybe_compact", no_compact)
+
+    report2 = await sync_cycle(cfg)
+    assert report2.result == "ok"
+    assert report2.pushed_ops > 0
+
+    # The original segment survives BYTE-IDENTICAL; the retry landed higher.
+    assert orig_seg.exists()
+    assert orig_seg.read_bytes() == orig_bytes
+    seqs = sorted(parse_journal_key(p.relative_to(backend).as_posix())[1]
+                  for p in backend.glob("journal/**/*.age"))
+    assert orig_seq in seqs
+    assert max(seqs) > orig_seq
+
+
+async def test_heartbeat_refreshes_device_doc_without_journal_writes(
+    initialized_library, tmp_path, monkeypatch
+):
+    """A no-changes cycle still refreshes the device doc's last_seen (GC
+    ack progression depends on it) while last_seq holds and the journal is
+    untouched."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync import engine
+    from tiro.sync.engine import get_or_create_device, sync_cycle
+    from tiro.sync.snapshot import device_key, parse_device_doc
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+    report = await sync_cycle(cfg)
+    assert report.result == "ok" and report.pushed_ops > 0
+
+    device_id, _name = get_or_create_device(cfg)
+    doc_path = backend / device_key(device_id)
+    bytes1 = doc_path.read_bytes()
+    doc1 = parse_device_doc(device_id, bytes1.decode("utf-8"))
+    journal1 = sorted(p.relative_to(backend).as_posix()
+                      for p in backend.glob("journal/**/*.age"))
+
+    # Deterministic clock advance instead of a >=1s sleep.
+    monkeypatch.setattr(engine, "_now_iso", lambda: "2099-01-01T00:00:00Z")
+
+    report2 = await sync_cycle(cfg)
+    assert report2.result == "ok"
+    assert report2.pushed_ops == 0
+
+    bytes2 = doc_path.read_bytes()
+    doc2 = parse_device_doc(device_id, bytes2.decode("utf-8"))
+    assert bytes2 != bytes1  # heartbeat rewrote the doc...
+    assert doc2.last_seen != doc1.last_seen
+    assert doc2.last_seq == doc1.last_seq == 1  # ...but the head held
+    journal2 = sorted(p.relative_to(backend).as_posix()
+                      for p in backend.glob("journal/**/*.age"))
+    assert journal2 == journal1  # journal untouched
+
+
+async def test_lockless_mode_skips_compaction(initialized_library, tmp_path,
+                                              monkeypatch):
+    """M2: with the backend lock unavailable the cycle still pushes, but
+    compaction/GC is skipped — despite the no-snapshot-yet rule that would
+    otherwise snapshot immediately after the first push."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+
+    async def broken_lock(self, ttl_s):
+        raise OSError("lock backend down")
+
+    monkeypatch.setattr(AuditedAdapter, "lock", broken_lock)
+    report = await sync_cycle(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_ops > 0
+    assert not (backend / "snapshots").exists()
+    # The push itself landed (lockless push/pull stays safe).
+    assert len(list(backend.glob("journal/**/*.age"))) == 1
+
+
+async def test_auto_init_refused_on_nonempty_backend(initialized_library,
+                                                     tmp_path):
+    """m1: a backend holding sync data but NO format.json must never be
+    plaintext-auto-initialized (a deleted age format.json would otherwise
+    downgrade the next push to cleartext)."""
+    from tiro.sync.engine import sync_cycle
+
+    _article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(uid)])
+    assert not (backend / "format.json").exists()
+    cfg = _cycle_cfg(initialized_library, backend)
+
+    report = await sync_cycle(cfg)
+
+    assert report.result == "needs_attention"
+    assert "refusing to initialize" in report.reason
+    assert not (backend / "format.json").exists()
+
+
+async def test_engine_built_adapter_closed_exactly_once(
+    initialized_library, tmp_path, monkeypatch
+):
+    """M3: the cycle closes the adapter it constructed itself (exactly
+    once), and NEVER closes a caller-provided one."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+
+    calls = []
+    orig_aclose = AuditedAdapter.aclose
+
+    async def recording_aclose(self):
+        calls.append(self)
+        await orig_aclose(self)
+
+    monkeypatch.setattr(AuditedAdapter, "aclose", recording_aclose)
+
+    report = await sync_cycle(cfg)  # engine builds its own adapter
+    assert report.result == "ok"
+    assert len(calls) == 1
+
+    calls.clear()
+    provided = adapter_for_config(cfg)
+    report2 = await sync_cycle(cfg, provided)
+    assert report2.result == "ok"
+    assert calls == []  # caller-provided adapter left open

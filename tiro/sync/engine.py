@@ -688,6 +688,17 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
         if resolve_encryption(config):
             raise SyncConfigError(
                 "backend has no format.json — run `tiro sync setup`")
+        # m1: auto-init ONLY an EMPTY backend. A backend that already holds
+        # journal/snapshot data but no format.json is a tamper or partial
+        # copy — in particular, a DELETED age-mode format.json must never
+        # cause a plaintext re-init followed by a cleartext push
+        # (confidentiality). Refuse -> needs_attention via the existing
+        # quarantine taxonomy (SyncFormatError).
+        if (await adapter.list("journal/")) or (
+                await adapter.list("snapshots/")):
+            raise SyncFormatError(
+                "backend has sync data but no format.json — refusing to "
+                "initialize (possible tamper or partial copy)")
         text = build_format_json(new_ulid())
         await adapter.put(FORMAT_KEY, text.encode("utf-8"))
         logger.info("Sync: auto-initialized plaintext backend format.json")
@@ -745,10 +756,10 @@ async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
                 report: CycleReport) -> None:
     """Derive + push local changes (spec §6.4). The upload order is FROZEN
     crash-safety ordering: objects FIRST -> journal segment -> device doc ->
-    LOCAL shadow+state LAST. A crash anywhere leaves either unreferenced
-    objects (harmless, GC'd) or an unacknowledged segment the next cycle's
-    unchanged shadow re-derives — never a shadow that claims state the
-    backend does not hold."""
+    LOCAL state (last_seq then shadow) LAST. A crash anywhere leaves either
+    unreferenced objects (harmless, GC'd) or an unacknowledged segment the
+    next cycle's unchanged shadow re-derives — never a shadow that claims
+    state the backend does not hold."""
     from tiro.sync.manifest import (
         build_manifest,
         diff,
@@ -757,7 +768,13 @@ async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         save_shadow,
     )
     from tiro.sync.reconcile import reconcile_library
-    from tiro.sync.snapshot import encode_segment, journal_key, object_key
+    from tiro.sync.snapshot import (
+        SnapshotError,
+        encode_segment,
+        journal_key,
+        object_key,
+        parse_journal_key,
+    )
 
     device_id, name = get_or_create_device(config)
 
@@ -780,13 +797,38 @@ async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     for h in sorted(obj_blobs):  # 1. objects FIRST
         await adapter.put(object_key(h), obj_blobs[h])
         report.pushed_objects += 1
-    seq = read_sync_state(config)["self"]["last_seq"] + 1
+    # Backend-aware seq allocation (review B1): a crash after the segment
+    # upload but before ANY local record leaves last_seq lagging the backend;
+    # a purely local counter would then re-mint the SAME seq for DIFFERENT
+    # bytes, and the unconditional adapter put would overwrite the
+    # append-only journal (any remote that already pulled the first version
+    # at that watermark diverges silently forever). Listing our own journal
+    # prefix and allocating past max(local, backend) converts that
+    # crash-window seq reuse into idempotent duplication at a fresh seq.
+    backend_max = 0
+    for key in await adapter.list(f"journal/{device_id}/"):
+        try:
+            _dev, key_seq = parse_journal_key(key)
+        except SnapshotError as e:
+            logger.warning(
+                "Sync push: skipping unparseable own journal key %s: %s",
+                key, e)
+            continue
+        backend_max = max(backend_max, key_seq)
+    local_last_seq = read_sync_state(config)["self"]["last_seq"]
+    seq = max(local_last_seq, backend_max) + 1
     await adapter.put(journal_key(device_id, seq), seg_blob)  # 2. segment
     await _put_device_doc(config, adapter, device_id, name,  # 3. device doc
                           last_seq=seq)
-    await asyncio.to_thread(  # 4. local shadow + state LAST
-        save_shadow, config, manifest, clock=clock)
+    # 4. local state LAST — seq counter FIRST, shadow SECOND (review M1):
+    # a crash between the two re-derives the same diff and re-pushes it as
+    # seq+1 — duplicates are idempotently absorbed by S2 apply; losses are
+    # not (append-only invariant, spec §6.4). The reverse order (shadow
+    # first) would leave the shadow claiming pushed state while last_seq
+    # lagged, and the next content change would reuse the SAME seq with
+    # different bytes — an overwrite a remote puller can never detect.
     update_self_state(config, last_seq=seq)
+    await asyncio.to_thread(save_shadow, config, manifest, clock=clock)
     report.pushed_ops += len(all_ops)
 
 
@@ -852,6 +894,12 @@ async def _compact(config: TiroConfig, adapter, codec,
     # 3. Build the snapshot doc from the CURRENT full state. object_hashes
     # comes from POST-hydration FilePuts (blob addresses, full-file space —
     # build_snapshot's docstring contract for article entries).
+    # m4: the snapshot's manifest may be NEWER than its covers — edits made
+    # between this cycle's push and this compaction ride in the snapshot
+    # while covers only records pushed seqs. Benign and understatement-safe:
+    # the follow-up segment re-carries those edits, and the same-content
+    # conflict dedupe absorbs the overlap on devices that bootstrapped from
+    # the snapshot.
     def _derive():
         manifest = build_manifest(config)
         hydrated = hydrate_bodies(config, diff(manifest, Shadow()))
@@ -969,6 +1017,7 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
         report.reason = "another cycle is running in this process"
         report.finished_at = _now_iso()
         return report  # not recorded — we don't own the state
+    engine_built_adapter = adapter is None
     try:
         if adapter is None:
             adapter = adapter_for_config(config)
@@ -997,7 +1046,15 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 if ok:
                     await _push(config, adapter, codec, clock, clock_state,
                                 report)
-                    await _maybe_compact(config, adapter, codec, report)
+                    # M2: NEVER compact/GC in lockless mode. Per-device
+                    # journals make push/pull lock-free-safe, but object GC
+                    # computes liveness from a LIST snapshot — a concurrent
+                    # pusher's objects-before-segment window would be
+                    # misread as garbage and deleted. Compaction is
+                    # best-effort anyway; skipping it under lock uncertainty
+                    # (got_lock is None) costs nothing.
+                    if got_lock is True:
+                        await _maybe_compact(config, adapter, codec, report)
             finally:
                 if got_lock:
                     try:
@@ -1020,7 +1077,23 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
         report.result = "error"
         report.reason = str(e)[:300]
     finally:
-        _CYCLE_LOCK.release()
-    report.finished_at = _now_iso()
-    _record_cycle(config, report)
+        try:
+            # m5: finalize + record BEFORE releasing the in-process lock —
+            # two OS threads driving cycles via separate asyncio.run() calls
+            # must never interleave their last_cycle_json writes (the lock
+            # is a threading.Lock precisely because of that pattern). The
+            # in-process-lock skip branch above stays unrecorded — it does
+            # not own the state.
+            report.finished_at = _now_iso()
+            _record_cycle(config, report)
+            # M3: close the adapter ONLY when this cycle constructed it —
+            # a caller-provided adapter's lifecycle belongs to the caller.
+            # Best-effort: a failing close never changes the report.
+            if engine_built_adapter and adapter is not None:
+                try:
+                    await adapter.aclose()
+                except Exception as e:
+                    logger.warning("Sync adapter close failed: %s", e)
+        finally:
+            _CYCLE_LOCK.release()
     return report
