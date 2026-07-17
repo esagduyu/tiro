@@ -31,6 +31,19 @@ def unregister_prefix(prefix: str) -> None:
         _REGISTRY.pop(name, None)
 
 
+def replace_prefix(prefix: str, agents: dict[str, TiroAgent]) -> None:
+    """Swap all prefix-named registrations for the given set. Existing
+    names are overwritten IN PLACE (dict item assignment -- a concurrent
+    reader's get() on a still-valid name never sees it vanish, unlike an
+    unregister-then-re-register window); only genuinely stale names are
+    popped. Writer-writer interleaving is serialized by the caller
+    (personas._SYNC_LOCK)."""
+    for name in [n for n in _REGISTRY
+                 if n.startswith(prefix) and n not in agents]:
+        _REGISTRY.pop(name, None)
+    _REGISTRY.update(agents)
+
+
 def get(name: str) -> TiroAgent:
     return _REGISTRY[name]  # KeyError is the contract for unknown names
 

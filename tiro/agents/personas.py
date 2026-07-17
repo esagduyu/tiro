@@ -387,12 +387,14 @@ class PersonaAgent:
 
 # run_agent calls sync_registry concurrently from multiple threads (parallel
 # ingests via asyncio.to_thread, manual persona runs overlapping scheduled
-# digests) BEFORE it takes _RUN_LOCK. The unregister/re-register window below
-# must therefore be atomic under this module lock: without it, two
-# interleaved syncs could either TOCTOU-raise an un-typed ValueError out of
-# registry.register (an untyped exception escaping run_agent's "never raises
-# anything but AgentRunError" contract) or transiently deregister a still-
-# valid persona between one thread's unregister_prefix and its re-register.
+# digests) BEFORE it takes _RUN_LOCK. The swap below must therefore be
+# atomic under this module lock: without it, two interleaved syncs could
+# TOCTOU-raise an un-typed ValueError out of registry.register (an untyped
+# exception escaping run_agent's "never raises anything but AgentRunError"
+# contract). Reader safety (a concurrent registry.get() never transiently
+# missing a still-valid persona) now comes from replace_prefix's
+# overwrite-in-place, not from this lock -- this lock only serializes
+# writer-writer interleaving.
 _SYNC_LOCK = threading.Lock()
 
 
@@ -404,10 +406,9 @@ def sync_registry(config: TiroConfig) -> None:
 
     with _SYNC_LOCK:
         ensure_personas(config)
-        registry.unregister_prefix("persona:")
         personas, _errors = load_personas(config)
         disabled = set(config.personas_disabled or [])
-        for persona in personas:
-            if persona.slug in disabled:
-                continue
-            registry.register(PersonaAgent(persona))
+        registry.replace_prefix("persona:", {
+            f"persona:{p.slug}": PersonaAgent(p)
+            for p in personas if p.slug not in disabled
+        })

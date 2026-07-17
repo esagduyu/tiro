@@ -259,6 +259,44 @@ def test_parse_persona_output_tier_strict_and_allowlisted(test_config):
         parse_persona_output(p, {"article_id": 9}, "not json at all")
 
 
+def test_replace_prefix_overwrites_in_place_and_drops_stale(test_config):
+    """Direct unit test for registry.replace_prefix (K3.5b): a name present
+    in the new mapping is overwritten in place (dict item assignment), a
+    name absent from the new mapping is popped as stale, and a non-prefix
+    name is untouched throughout."""
+    from tiro.agents import registry
+
+    class _Stub:
+        def __init__(self, tag):
+            self.name = tag
+            self.version = "1"
+
+    other = _Stub("other:unrelated")
+    a1 = _Stub("persona:a")
+    b1 = _Stub("persona:b")
+    try:
+        registry.register(other)
+        registry.replace_prefix("persona:", {"persona:a": a1, "persona:b": b1})
+        # Membership assertions only -- the module-global registry may
+        # already hold the K1 builtins in a full-suite run (the plan's own
+        # warning: never assert FULL registry contents).
+        names = set(registry.all_agents())
+        assert {"other:unrelated", "persona:a", "persona:b"} <= names
+
+        b2 = _Stub("persona:b")
+        c1 = _Stub("persona:c")
+        registry.replace_prefix("persona:", {"persona:b": b2, "persona:c": c1})
+        names = set(registry.all_agents())
+        assert {"other:unrelated", "persona:b", "persona:c"} <= names
+        assert "persona:a" not in names                 # stale name popped
+        assert registry.get("persona:b") is b2      # overwritten in place
+        assert registry.get("persona:c") is c1
+        assert registry.get("other:unrelated") is other  # untouched
+    finally:
+        registry.unregister_prefix("persona:")
+        registry.unregister("other:unrelated")
+
+
 def test_sync_registry_registers_enabled_skips_disabled_and_broken(
         initialized_library):
     from tiro.agents import registry
@@ -283,14 +321,20 @@ def test_sync_registry_registers_enabled_skips_disabled_and_broken(
 
 def test_sync_registry_concurrent_calls_never_raise(initialized_library):
     """Regression canary for the sync_registry TOCTOU race (K3.5a review
-    finding): concurrent sync_registry calls interleave an
-    unregister_prefix + re-register loop, which -- without _SYNC_LOCK --
-    could TOCTOU-raise an un-typed ValueError from registry.register or
-    make registry.get transiently miss a still-valid persona. This test is
-    a race: it reliably reproduces the failure against the pre-fix code on
-    this machine, but a race is inherently non-deterministic, so a clean
-    pass here is not proof the bug is fixed on every machine/load -- only a
-    failure is proof it's back."""
+    finding, closed by K3.5b): concurrent sync_registry calls used to
+    interleave an unregister_prefix + re-register loop, which -- without
+    _SYNC_LOCK -- could TOCTOU-raise an un-typed ValueError from
+    registry.register, and even WITH _SYNC_LOCK a concurrent registry.get()
+    reader could still land inside one thread's unregister->re-register
+    window and transiently miss a still-valid persona (K3.5a residual
+    finding). sync_registry now swaps via registry.replace_prefix, which
+    overwrites valid names in place instead of removing-then-adding, so a
+    reader's get() on a still-valid name can no longer see it vanish. The
+    writer side (this lock) still only serializes writer-writer
+    interleaving, so this test remains a genuine concurrency exercise, but
+    for the reader path it is no longer merely probabilistic -- a valid
+    persona can never vanish mid-sync, so a clean pass here is deterministic
+    proof for that path, not just a lucky race."""
     import threading
 
     from tiro.agents import registry
