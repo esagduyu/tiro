@@ -105,6 +105,100 @@ async def test_verify_passphrase_plaintext_backend_returns_empty(
     assert await verify_passphrase(cfg, adapter, "anything") == ""
 
 
+async def test_verify_passphrase_loud_on_newer_format(initialized_library,
+                                                      tmp_path):
+    """Version refusal is LOUD (SyncFormatError), never disguised as a
+    wrong passphrase (None)."""
+    import json
+
+    from tiro.sync.crypto import SyncFormatError
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="on")
+    adapter = adapter_for_config(cfg)
+    await init_backend(cfg, adapter, "pw", kdf_params=WEAK_KDF)
+    doc = json.loads((backend / "format.json").read_text())
+    doc["sync_format"] = 99
+    (backend / "format.json").write_text(json.dumps(doc))
+
+    with pytest.raises(SyncFormatError):
+        await verify_passphrase(cfg, adapter, "pw")
+
+
+async def test_verify_passphrase_loud_on_corrupt_kdf(initialized_library,
+                                                     tmp_path):
+    """S5.5-fix minor #3: unusable KDF params (garbage salt) are CORRUPTION
+    — SyncFormatError, never a quiet None that reads as 'wrong passphrase'
+    and sends the user retyping a passphrase forever."""
+    import json
+
+    from tiro.sync.crypto import SyncFormatError
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="on")
+    adapter = adapter_for_config(cfg)
+    await init_backend(cfg, adapter, "pw", kdf_params=WEAK_KDF)
+    doc = json.loads((backend / "format.json").read_text())
+    doc["kdf"]["salt"] = "!!!notb64!!!"
+    (backend / "format.json").write_text(json.dumps(doc))
+
+    with pytest.raises(SyncFormatError, match="kdf params unusable"):
+        await verify_passphrase(cfg, adapter, "pw")
+
+
+async def test_init_backend_refuses_orphan_sync_data(initialized_library,
+                                                     tmp_path):
+    """S5.5-fix minor #4: journal/snapshot data without a format.json is a
+    tamper or partial copy — init refuses (mirrors _open_backend's guard)."""
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter = adapter_for_config(cfg)
+    (backend / "journal" / "somedevice").mkdir(parents=True)
+    (backend / "journal" / "somedevice" / "000000000001.age").write_bytes(b"x")
+
+    with pytest.raises(SyncConfigError, match="refusing to initialize"):
+        await init_backend(cfg, adapter, "")
+
+    assert not (backend / "format.json").exists()
+
+
+def test_clear_shadow_preserves_alias_and_metats(initialized_library):
+    """The epoch-reset surgical scope: alias rows (permanent uid mappings)
+    and metats rows (per-field meta LWW clocks) survive; everything else —
+    live entries AND tombstones — is wiped."""
+    from tiro.database import get_connection
+    from tiro.sync.manifest import clear_shadow
+
+    cfg = initialized_library
+    conn = get_connection(cfg.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('alias', 'dead-uid', NULL, "
+            "'{\"new_uid\": \"live-uid\"}', NULL, NULL)")
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('metats', 'art-uid:rating', NULL, '{}', "
+            "'0000000000000001-0000-dev', NULL)")
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('article', 'art-uid', 'abc123', '{}', "
+            "NULL, NULL)")
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('note', 'gone-uid', NULL, '{}', NULL, "
+            "'2026-01-01T00:00:00Z')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    clear_shadow(cfg)
+
+    rows = _rows(cfg, "SELECT kind, uid FROM sync_shadow ORDER BY kind")
+    assert [(r["kind"], r["uid"]) for r in rows] == [
+        ("alias", "dead-uid"), ("metats", "art-uid:rating")]
+
+
 async def test_bootstrap_restores_articles(initialized_library, tmp_path):
     from pathlib import Path
 
@@ -160,6 +254,83 @@ async def test_bootstrap_refuses_non_empty_library(initialized_library,
     assert _count(cfg) == 1  # nothing touched
 
 
+async def test_bootstrap_all_or_nothing_on_missing_object(
+    initialized_library, tmp_path
+):
+    """Backend lost an object the snapshot references: honest quarantine
+    (needs_attention, S5.5-fix minor #1) and NO partial library — zero
+    articles materialized."""
+    from tests.test_reconcile import _ingest
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter = adapter_for_config(cfg)
+    assert await init_backend(cfg, adapter, "") == ""
+    _ingest(cfg, title="One", url="https://example.com/1")
+    _ingest(cfg, title="Two", url="https://example.com/2")
+    assert (await sync_cycle(cfg, adapter)).result == "ok"
+    objs = list(backend.glob("objects/*/*.age"))
+    assert objs
+    objs[0].unlink()  # backend "loses" one object
+
+    cfg_b = _second_library(tmp_path, "lib-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+
+    report = await bootstrap(cfg_b, adapter_for_config(cfg_b))
+
+    assert report.result == "needs_attention"
+    assert "missing object" in report.reason
+    assert _count(cfg_b) == 0  # all-or-nothing: no partial library
+
+
+async def test_bootstrap_skipped_when_backend_lock_held(initialized_library,
+                                                        tmp_path):
+    """S5.5-fix M1: bootstrap is conservative, never lockless — a held
+    backend advisory lock refuses (skipped_lock), nothing materialized."""
+    from tests.test_reconcile import _ingest
+
+    backend = tmp_path / "backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter_a = adapter_for_config(cfg_a)
+    assert await init_backend(cfg_a, adapter_a, "") == ""
+    _ingest(cfg_a, title="From A", url="https://example.com/a")
+    assert (await sync_cycle(cfg_a, adapter_a)).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+    holder = adapter_for_config(cfg_a)
+    assert await holder.lock(120) is True
+    try:
+        report = await bootstrap(cfg_b, adapter_for_config(cfg_b))
+    finally:
+        await holder.unlock()
+
+    assert report.result == "skipped_lock"
+    assert "backend lock held" in report.reason
+    assert _count(cfg_b) == 0
+
+
+async def test_bootstrap_skipped_when_cycle_running(initialized_library,
+                                                    tmp_path):
+    """S5.5-fix M1, in-process half: bootstrap and a running cycle never
+    interleave in one process."""
+    from tiro.sync.engine import _CYCLE_LOCK
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter = adapter_for_config(cfg)
+    assert await init_backend(cfg, adapter, "") == ""
+
+    assert _CYCLE_LOCK.acquire(blocking=False)
+    try:
+        report = await bootstrap(cfg, adapter)
+    finally:
+        _CYCLE_LOCK.release()
+
+    assert report.result == "skipped_lock"
+    assert "another cycle" in report.reason
+
+
 async def test_cycle_auto_bootstraps_empty_library(initialized_library,
                                                    tmp_path):
     """THE D-S5-3 pin: a plain sync_cycle on an empty never-synced library
@@ -195,6 +366,40 @@ async def test_cycle_auto_bootstraps_empty_library(initialized_library,
     report_a2 = await sync_cycle(cfg_a, adapter_a)
     assert report_a2.result == "ok"
     assert _titles(cfg_a) == {"From A", "From B"}
+
+
+async def test_zero_article_synced_device_not_resurrected(initialized_library,
+                                                          tmp_path):
+    """S5.5-fix minor #2: a single device (watermarks always {}) that has
+    PUSHED before (last_seq > 0) and then deletes every article is a
+    legitimate zero-article steady state — auto-bootstrap must NOT
+    re-materialize the snapshot on every subsequent cycle."""
+    from tests.test_reconcile import _ingest
+    from tiro.lifecycle import delete_article
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter = adapter_for_config(cfg)
+    assert await init_backend(cfg, adapter, "") == ""
+    a1 = _ingest(cfg, title="One", url="https://example.com/1")
+    a2 = _ingest(cfg, title="Two", url="https://example.com/2")
+    assert (await sync_cycle(cfg, adapter)).result == "ok"
+    # Premise: first-cycle compaction left a snapshot on the backend.
+    assert list(backend.glob("snapshots/*/manifest.age"))
+
+    delete_article(cfg, a1["id"])
+    delete_article(cfg, a2["id"])
+    assert _count(cfg) == 0
+
+    report2 = await sync_cycle(cfg, adapter)
+    assert report2.result == "ok"
+    assert report2.applied == 0  # nothing re-downloaded, nothing applied
+    assert _count(cfg) == 0
+
+    report3 = await sync_cycle(cfg, adapter)
+    assert report3.result == "ok"
+    assert report3.applied == 0
+    assert _count(cfg) == 0
 
 
 async def test_repair_wipes_cloud_keeps_format(initialized_library,
@@ -303,3 +508,46 @@ async def test_repair_skipped_when_lock_held(initialized_library, tmp_path):
     assert sorted(p.as_posix()
                   for p in backend.glob("journal/**/*.age")) == segs_before
     assert len(list(backend.glob("snapshots/*/manifest.age"))) == 1
+
+
+async def test_repair_aborts_before_wipe_on_underivable_state(
+    initialized_library, tmp_path, monkeypatch
+):
+    """THE M2 pin (S5.5-fix): repair derives BEFORE it destroys — an
+    underivable local state (hashless/unreadable entry -> SnapshotError)
+    aborts with the backend fully intact: journal, snapshots, objects and
+    device docs all still present."""
+    import tiro.sync.snapshot as snapshot_mod
+    from tests.test_reconcile import _ingest
+
+    backend = tmp_path / "backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    adapter = adapter_for_config(cfg)
+    assert await init_backend(cfg, adapter, "") == ""
+    _ingest(cfg)
+    assert (await sync_cycle(cfg, adapter)).result == "ok"
+    _ingest(cfg, title="Second", url="https://example.com/second")
+    assert (await sync_cycle(cfg, adapter)).result == "ok"
+
+    def _backend_files():
+        return sorted(p.as_posix() for p in backend.rglob("*")
+                      if p.is_file() and "lock" not in p.name)
+
+    files_before = _backend_files()
+    assert any("journal/" in f for f in files_before)
+    assert any("snapshots/" in f for f in files_before)
+    assert any("objects/" in f for f in files_before)
+    assert any("devices/" in f for f in files_before)
+
+    def _boom(*args, **kwargs):
+        raise snapshot_mod.SnapshotError(
+            "no hash for entry ('article', 'broken')")
+
+    monkeypatch.setattr(snapshot_mod, "build_snapshot", _boom)
+
+    report = await repair(cfg, adapter)
+
+    assert report.result == "needs_attention"
+    assert "no hash" in report.reason
+    # The backend was never touched: every pre-repair file still present.
+    assert _backend_files() == files_before

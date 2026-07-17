@@ -871,27 +871,19 @@ async def _maybe_compact(config: TiroConfig, adapter, codec,
         report.warnings.append(f"compaction skipped: {e}")
 
 
-async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
-                                 device_id: str, covers: dict):
-    """Build a snapshot of the CURRENT full local state and upload it —
-    objects FIRST, then the doc (the frozen crash-safety ordering). Returns
-    (snapshot_id, objects_uploaded, manifest). Raises SnapshotError when a
-    snapshot object's body is unavailable or drifts: _compact defers via
-    _maybe_compact's catch-all (warning message shape preserved), repair()
-    surfaces it through the cycle taxonomy. Extracted from _compact in
-    S5.5 — behavior-identical for compaction.
+async def _derive_local_snapshot(config: TiroConfig, device_id: str,
+                                 covers: dict):
+    """Derive a snapshot of the CURRENT full local state WITHOUT touching
+    the backend: build_manifest + hydrate + build_snapshot + the
+    body-availability check — everything that can raise SnapshotError on a
+    hashless/unreadable local entry happens HERE, so repair() can derive
+    BEFORE it destroys (S5.5 review M2). Returns the upload plan
+    (snapshot_id, doc_text, addresses, bodies_by_address, manifest).
 
     object_hashes comes from POST-hydration FilePuts (blob addresses,
     full-file space — build_snapshot's docstring contract for articles)."""
     from tiro.sync.manifest import Shadow, build_manifest, diff, hydrate_bodies
-    from tiro.sync.snapshot import (
-        SnapshotError,
-        build_snapshot,
-        encode_object,
-        encode_snapshot,
-        object_key,
-        snapshot_key,
-    )
+    from tiro.sync.snapshot import SnapshotError, build_snapshot
 
     def _derive():
         manifest = build_manifest(config)
@@ -906,19 +898,51 @@ async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
     doc_text, addresses = build_snapshot(
         manifest, snapshot_id=snapshot_id, created_by=device_id,
         covers=covers, object_hashes=object_hashes)
-    uploaded = 0
     for address in sorted(addresses):
-        body = bodies_by_address.get(address)
-        if body is None:
+        if bodies_by_address.get(address) is None:
             raise SnapshotError(
                 f"no body for snapshot object {address!r}")
-        h, blob = encode_object(body, codec)
+    return snapshot_id, doc_text, addresses, bodies_by_address, manifest
+
+
+async def _upload_snapshot(adapter, codec, snapshot_id: str, doc_text: str,
+                           addresses, bodies_by_address: dict) -> int:
+    """Upload a derived snapshot plan — objects FIRST, then the doc (the
+    frozen crash-safety ordering). Returns the objects-uploaded count."""
+    from tiro.sync.snapshot import (
+        SnapshotError,
+        encode_object,
+        encode_snapshot,
+        object_key,
+        snapshot_key,
+    )
+
+    uploaded = 0
+    for address in sorted(addresses):
+        h, blob = encode_object(bodies_by_address[address], codec)
         if h != address:  # pragma: no cover - encode_object is deterministic
             raise SnapshotError(f"object hash drift for {address!r}")
         await adapter.put(object_key(h), blob)
         uploaded += 1
     await adapter.put(snapshot_key(snapshot_id),
                       encode_snapshot(doc_text, codec))
+    return uploaded
+
+
+async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
+                                 device_id: str, covers: dict):
+    """Build a snapshot of the CURRENT full local state and upload it —
+    derive then upload (see the two halves above). Returns
+    (snapshot_id, objects_uploaded, manifest). Raises SnapshotError when a
+    snapshot object's body is unavailable or drifts: _compact defers via
+    _maybe_compact's catch-all (warning message shape preserved). Extracted
+    from _compact in S5.5, split in S5.5-fix (M2) — behavior-identical for
+    compaction; repair() calls the halves directly so derivation failures
+    abort BEFORE the wipe."""
+    snapshot_id, doc_text, addresses, bodies_by_address, manifest = (
+        await _derive_local_snapshot(config, device_id, covers))
+    uploaded = await _upload_snapshot(adapter, codec, snapshot_id, doc_text,
+                                      addresses, bodies_by_address)
     return snapshot_id, uploaded, manifest
 
 
@@ -1087,13 +1111,20 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 # snapshot BEFORE the pull — the covers-derived watermarks
                 # then prevent the journal-gap refusal on GC'd history, and
                 # the normal pull folds the journal tails in. Restricted to
-                # the ZERO-article case deliberately: folding a snapshot
-                # into a non-empty never-synced library would mint a
-                # conflict file per differing article — that merge-two-
-                # libraries flow stays behind the explicit setup ceremony
-                # (bootstrap(), D-S5-3).
+                # the ZERO-article, NEVER-SYNCED case deliberately: empty
+                # watermarks AND last_seq == 0 (never pushed — S5.5 review
+                # minor #2: a single-device library whose user deleted
+                # every article is a legitimate zero-article steady state,
+                # and re-materializing the snapshot each cycle would
+                # re-download — and fight — the user's own deletes).
+                # Folding a snapshot into a non-empty never-synced library
+                # would mint a conflict file per differing article — that
+                # merge-two-libraries flow stays behind the explicit setup
+                # ceremony (bootstrap(), D-S5-3).
+                state = read_sync_state(config)
                 if (_count_articles(config) == 0
-                        and not read_sync_state(config)["watermarks"]
+                        and not state["watermarks"]
+                        and ((state["self"] or {}).get("last_seq") or 0) == 0
                         and await adapter.list("snapshots/")):
                     logger.info(
                         "Sync: empty library with no sync history and a "
@@ -1196,6 +1227,15 @@ async def init_backend(config: TiroConfig, adapter, passphrase: str, *,
         raise SyncConfigError(
             "backend already initialized — join with the passphrase "
             "instead, or run repair")
+    # Mirrors _open_backend's m1 guard (S5.5 review minor #4): journal or
+    # snapshot data without a format.json is a tamper or partial copy —
+    # initializing over it (possibly with a DIFFERENT recipient) would
+    # orphan every existing blob. Refuse; repair is the explicit ceremony.
+    if (await adapter.list("journal/")) or (
+            await adapter.list("snapshots/")):
+        raise SyncConfigError(
+            "backend has sync data but no format.json — refusing to "
+            "initialize (possible tamper or partial copy)")
     if not resolve_encryption(config):
         await adapter.put(FORMAT_KEY,
                           build_format_json(new_ulid()).encode("utf-8"))
@@ -1245,8 +1285,14 @@ async def verify_passphrase(config: TiroConfig, adapter,
         return ""
     try:
         rc = derive_recovery_code(passphrase, fmt.kdf)
-    except CryptoError:
-        return None
+    except CryptoError as e:
+        # Unusable KDF params (garbage salt b64, argon2 failure) are
+        # CORRUPTION, not a wrong passphrase — loud, like the version
+        # check (S5.5 review minor #3). A wrong passphrase never raises
+        # here: derivation succeeds and the recipient simply mismatches
+        # (the None below stays the refusal path).
+        raise SyncFormatError(
+            f"format.json kdf params unusable: {e}") from e
     if AgeCodec(rc).recipient == fmt.age_recipient:
         return rc
     return None
@@ -1267,8 +1313,10 @@ async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
     QUARANTINE_ERRORS propagate to the caller's taxonomy. Vector work:
     none — materialized articles ride vector_status='pending' and the
     existing vector-retry task."""
+    from tiro.sync.adapters.base import KeyMissing
     from tiro.sync.merge import apply_ops
     from tiro.sync.snapshot import (
+        SnapshotError,
         decode_object,
         decode_snapshot,
         materialize_ops,
@@ -1285,8 +1333,18 @@ async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
     doc = decode_snapshot(await adapter.get(snapshot_key(newest)), codec)
     objects_plain: dict[str, str] = {}
     for addr in sorted(set(doc.objects.values())):
-        objects_plain[addr] = decode_object(
-            await adapter.get(object_key(addr)), codec, expected_hash=addr)
+        try:
+            blob = await adapter.get(object_key(addr))
+        except KeyMissing as e:
+            # Honest quarantine (S5.5 review minor #1): a snapshot whose
+            # object is GONE is backend corruption/partial copy, and it is
+            # detected HERE, before any op is applied — bootstrap stays
+            # all-or-nothing. Raising SnapshotError routes it through the
+            # QUARANTINE_ERRORS taxonomy (needs_attention), never a
+            # bare-KeyMissing "error".
+            raise SnapshotError(
+                f"snapshot references missing object {addr!r}") from e
+        objects_plain[addr] = decode_object(blob, codec, expected_hash=addr)
     ops = materialize_ops(doc, objects_plain)  # DEFAULT epoch-pinned clock
     device_id, _name = get_or_create_device(config)
     apply_report = await asyncio.to_thread(
@@ -1310,6 +1368,12 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
     an error report, no exception) — folding a snapshot into existing data
     would mint a conflict file per differing article; that merge-two-
     libraries flow stays behind the explicit setup ceremony (D-S5-3).
+    Takes BOTH locks (S5.5-fix M1) — the in-process cycle lock and the
+    backend advisory lock, with repair's conservative posture (a lock
+    fault is an error, NEVER lockless): bootstrap's own push plus a
+    concurrent pusher could otherwise mint the SAME seq for DIFFERENT
+    bytes, the append-only violation the S5.4-fix backend-aware seq
+    allocation exists to prevent.
     The CALLER owns the adapter's lifecycle (no aclose here)."""
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
@@ -1320,20 +1384,41 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
             report.result = "error"
             report.reason = ("bootstrap requires an empty library "
                              f"(this library has {n} articles)")
+        elif not _CYCLE_LOCK.acquire(blocking=False):
+            report.result = "skipped_lock"
+            report.reason = "another cycle is running in this process"
         else:
-            _fmt, codec = await _open_backend(config, adapter)
-            await _materialize_latest_snapshot(config, adapter, codec,
-                                               report)
-            device_id, _name = get_or_create_device(config)
-            clock = HLCClock(device_id)
-            clock_state: dict = {}
-            # Bootstrap trusts the backend's state wholesale: the journal
-            # tail may legitimately mass-delete relative to the snapshot.
-            ok = await _pull(config, adapter, codec, clock, clock_state,
-                             report, accept_mass_delete=True)
-            if ok:
-                await _push(config, adapter, codec, clock, clock_state,
-                            report)
+            try:
+                _fmt, codec = await _open_backend(config, adapter)
+                # A lock fault -> error via the generic taxonomy below.
+                got = await adapter.lock(LOCK_TTL_S)
+                if not got:
+                    report.result = "skipped_lock"
+                    report.reason = "backend lock held — try again"
+                else:
+                    try:
+                        await _materialize_latest_snapshot(
+                            config, adapter, codec, report)
+                        device_id, _name = get_or_create_device(config)
+                        clock = HLCClock(device_id)
+                        clock_state: dict = {}
+                        # Bootstrap trusts the backend's state wholesale:
+                        # the journal tail may legitimately mass-delete
+                        # relative to the snapshot.
+                        ok = await _pull(config, adapter, codec, clock,
+                                         clock_state, report,
+                                         accept_mass_delete=True)
+                        if ok:
+                            await _push(config, adapter, codec, clock,
+                                        clock_state, report)
+                    finally:
+                        try:
+                            await adapter.unlock()
+                        except Exception as e:
+                            logger.warning(
+                                "Sync bootstrap unlock failed: %s", e)
+            finally:
+                _CYCLE_LOCK.release()
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
@@ -1360,8 +1445,12 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
     device keeps decrypting; they detect the repair epoch on their next
     pull (own device doc gone + format.json present) and re-push. Repair
     is conservative: it NEVER proceeds without the backend lock (held ->
-    skipped_lock; a lock fault -> error via the generic taxonomy)."""
+    skipped_lock; a lock fault -> error via the generic taxonomy), and it
+    DERIVES BEFORE IT DESTROYS (S5.5-fix M2): the full local snapshot plan
+    is built first, so a hashless/unreadable local entry aborts with the
+    backend fully intact."""
     from tiro.sync.manifest import save_shadow
+    from tiro.sync.reconcile import reconcile_library
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
     report = CycleReport()
@@ -1373,17 +1462,24 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
             report.reason = "backend lock held by another device"
         else:
             try:
+                device_id, name = get_or_create_device(config)
+                # Derivation FIRST (M2), reconcile before it (spec §6.3
+                # parity with _push) so the epoch seed captures external
+                # edits. covers={} deliberately: the journal will be empty
+                # (nothing subsumed), and a bootstrapping device starts at
+                # watermarks {} and pulls future segments from seq 1.
+                await asyncio.to_thread(reconcile_library, config)
+                (snapshot_id, doc_text, addresses, bodies_by_address,
+                 manifest) = await _derive_local_snapshot(
+                    config, device_id, {})
+                # Only NOW is the backend touched.
                 for prefix in ("journal/", "objects/", "snapshots/",
                                "devices/"):
                     for key in await adapter.list(prefix):
                         await adapter.delete(key)
-                device_id, name = get_or_create_device(config)
-                # covers={} deliberately: the journal is empty (nothing
-                # subsumed), and a bootstrapping device starts at
-                # watermarks {} and pulls future segments from seq 1.
-                _snapshot_id, uploaded, manifest = (
-                    await _upload_local_snapshot(
-                        config, adapter, codec, device_id, {}))
+                uploaded = await _upload_snapshot(
+                    adapter, codec, snapshot_id, doc_text, addresses,
+                    bodies_by_address)
                 report.pushed_objects += uploaded
                 update_self_state(config, last_seq=0, watermarks={})
                 await _put_device_doc(config, adapter, device_id, name,
