@@ -50,6 +50,7 @@ from tiro.sync.journal import (
     Meta,
     RowDel,
     RowPut,
+    canonical_json,
 )
 from tiro.sync.manifest import shadow_tombstone, shadow_upsert
 from tiro.sync.reconcile import refresh_article_from_file, write_conflict_file
@@ -474,15 +475,217 @@ def _source_for(conn, meta: dict) -> int:
     return cur.lastrowid
 
 
-# Task 5/6/7 handlers land next; stubs keep _ordered dispatch importable.
-def _apply_line_put(config, op, report):  # pragma: no cover - Task 5
-    raise NotImplementedError
+# --- JSONL per-uid merge (spec §4 row 4) ---------------------------------------
 
 
-def _apply_line_del(config, op, report):  # pragma: no cover - Task 5
-    raise NotImplementedError
+def _line_sort_key(line: dict) -> tuple:
+    return (line.get("created_at") or "", line.get("uid") or "")
 
 
+def _lww_pick(a: dict, b: dict) -> tuple[dict, dict]:
+    """(winner, loser) — LWW on updated_at (missing loses), ties broken by
+    canonical JSON of the whole line (arbitrary but symmetric)."""
+    ka = (a.get("updated_at") or "", canonical_json(a))
+    kb = (b.get("updated_at") or "", canonical_json(b))
+    return (a, b) if ka >= kb else (b, a)
+
+
+def _conflict_blockquote(text: str, when: str | None, label: str) -> str:
+    day = (when or "")[:10] or "unknown-date"
+    quoted = "\n".join("> " + ln for ln in text.splitlines() or [""])
+    return f"> [conflict {day} {label}]\n{quoted}"
+
+
+def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
+                label_a: str = "local", label_b: str = "remote") -> list[dict]:
+    """FROZEN core signature. Per-uid set union; same-uid clash resolves
+    LWW-whole-line on updated_at, and a losing note_markdown that differs is
+    APPENDED to the winning note as a [conflict {date} {device}] blockquote —
+    never silently dropped (spec §4). Pure, deterministic, commutative
+    (labels swap with their sides)."""
+    by_uid: dict[str, tuple[dict, str]] = {}
+    for line, label in [(ln, label_a) for ln in lines_a] + \
+                       [(ln, label_b) for ln in lines_b]:
+        uid = line.get("uid")
+        if not uid:
+            continue
+        if uid not in by_uid:
+            by_uid[uid] = (dict(line), label)
+            continue
+        cur, cur_label = by_uid[uid]
+        if canonical_json(cur) == canonical_json(line):
+            continue  # identical twins — nothing to merge
+        winner, loser = _lww_pick(cur, line)
+        l_label = label if winner is cur else cur_label
+        merged = dict(winner)
+        w_note = winner.get("note_markdown")
+        l_note = loser.get("note_markdown")
+        if l_note and l_note != w_note and l_note not in (w_note or ""):
+            block = _conflict_blockquote(l_note, loser.get("updated_at"), l_label)
+            merged["note_markdown"] = (w_note + "\n\n" + block) if w_note else block
+        by_uid[uid] = (merged, cur_label if winner is cur else label)
+    return sorted((line for line, _label in by_uid.values()), key=_line_sort_key)
+
+
+# --- line ops -------------------------------------------------------------------
+
+
+def _highlight_row_from_line(conn, article_id: int, line: dict) -> None:
+    """Upsert the derived highlights row (+ anchored note row) from a
+    sidecar line — the index half of the sidecar-first write."""
+    existing = conn.execute("SELECT id FROM highlights WHERE uid = ?",
+                            (line["uid"],)).fetchone()
+    params = (
+        article_id, line.get("quote"), line.get("prefix"), line.get("suffix"),
+        line.get("position_start"), line.get("position_end"),
+        line.get("content_hash"), line.get("color") or "yellow",
+        line.get("created_at"), line.get("updated_at"),
+    )
+    if existing:
+        conn.execute(
+            "UPDATE highlights SET article_id = ?, quote_text = ?, "
+            "prefix_context = ?, suffix_context = ?, text_position_start = ?, "
+            "text_position_end = ?, content_hash = ?, color = ?, "
+            "created_at = ?, updated_at = ? WHERE uid = ?",
+            (*params, line["uid"]))
+        hl_id = existing["id"]
+    else:
+        cur = conn.execute(
+            "INSERT INTO highlights (uid, article_id, quote_text, "
+            "prefix_context, suffix_context, text_position_start, "
+            "text_position_end, content_hash, color, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (line["uid"], *params))
+        hl_id = cur.lastrowid
+    note = line.get("note_markdown")
+    nrow = conn.execute("SELECT id FROM notes WHERE highlight_id = ?",
+                        (hl_id,)).fetchone()
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if note and note.strip():
+        if nrow:
+            conn.execute("UPDATE notes SET body_markdown = ?, updated_at = ? "
+                         "WHERE id = ?", (note, now, nrow["id"]))
+        else:
+            conn.execute(
+                "INSERT INTO notes (uid, article_id, highlight_id, "
+                "body_markdown, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (new_ulid(), article_id, hl_id, note, now, now))
+    elif nrow:
+        conn.execute("DELETE FROM notes WHERE id = ?", (nrow["id"],))
+
+
+def _apply_line_put(config: TiroConfig, op: LinePut, report: ApplyReport) -> None:
+    from tiro.annotations import read_annotations, sidecar_stem, write_annotations
+
+    conn = get_connection(config.db_path)
+    try:
+        shadow = _shadow_get(conn, "highlight", op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        arow = conn.execute(
+            "SELECT id, uid, markdown_path FROM articles WHERE uid = ?",
+            (op.article_uid,)).fetchone()
+        if arow is None:
+            report.deferred += 1
+            report._count(op, "deferred_unknown_article")
+            return
+        stem = sidecar_stem(arow)
+        # FILE FIRST (sidecar-first invariant): merge the incoming line into
+        # the sidecar via the same per-uid rules a two-file merge uses.
+        local_lines = read_annotations(config, stem)
+        merged = merge_jsonl(local_lines, [op.line],
+                             label_a="local", label_b=op.device)
+        write_annotations(config, stem, merged)
+        # ROW SECOND — from the RE-READ line, not the in-memory merge result:
+        # write_annotations projects onto _FIELD_ORDER (unknown wire keys
+        # dropped, missing keys -> None), so hashing/storing the in-memory
+        # dict could diverge from what build_manifest's _add_highlights will
+        # compute from disk next cycle (phantom LinePut echo). The shadow row
+        # must byte-match the manifest entry: same hash space
+        # (content_hash(canonical_json(disk line))), same fields shape
+        # (article_uid/line/path_hint — path_hint keeps the unreadable-
+        # protection guards in diff/save_shadow structurally sound).
+        merged_line = next(ln for ln in read_annotations(config, stem)
+                           if ln["uid"] == op.uid)
+        _highlight_row_from_line(conn, arow["id"], merged_line)
+        shadow_upsert(conn, "highlight", op.uid,
+                      hash=content_hash(canonical_json(merged_line)),
+                      fields={"article_uid": merged_line.get("article_uid"),
+                              "line": merged_line,
+                              "path_hint": f"annotations/{stem}.jsonl"},
+                      hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
+
+
+def _apply_line_del(config: TiroConfig, op: LineDel, report: ApplyReport) -> None:
+    from tiro.annotations import (
+        notes_dir,
+        read_annotations,
+        sidecar_stem,
+        write_annotations,
+    )
+
+    conn = get_connection(config.db_path)
+    try:
+        shadow = _shadow_get(conn, "highlight", op.uid)
+        if shadow and shadow["hlc"] and op.hlc.to_str() <= shadow["hlc"]:
+            report.skipped_stale += 1
+            report._count(op, "skipped_stale")
+            return
+        arow = conn.execute(
+            "SELECT id, uid, markdown_path FROM articles WHERE uid = ?",
+            (op.article_uid,)).fetchone()
+        if arow is None:
+            # Nothing local to delete — tombstone so a late line_put stays dead.
+            shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str())
+            conn.commit()
+            report.tombstones += 1
+            report._count(op, "tombstone_no_local")
+            return
+        stem = sidecar_stem(arow)
+        lines = read_annotations(config, stem)
+        target = next((ln for ln in lines if ln.get("uid") == op.uid), None)
+        if target is not None:
+            # Spec §4: delete wins over concurrent edit EXCEPT note_markdown —
+            # a note edited after the remover's observation is preserved as an
+            # article-level conflict note (never destroyed by a race).
+            note = target.get("note_markdown")
+            edited_after = (
+                note and note.strip()
+                and (op.observed_updated_at is None
+                     or (target.get("updated_at") or "") > op.observed_updated_at)
+            )
+            if edited_after:
+                dest = write_conflict_file(notes_dir(config), stem, note,
+                                           device=op.device)
+                report.resurrected += 1
+                report._count(op, "note_resurrected", conflict_file=dest.name)
+            # FILE FIRST: drop the line. An emptied sidecar stays as an EMPTY
+            # file (write_annotations never unlinks; reconcile parses it as
+            # zero lines and the mass-delete guard counts its stem present).
+            write_annotations(config, stem,
+                              [ln for ln in lines if ln.get("uid") != op.uid])
+        hrow = conn.execute("SELECT id FROM highlights WHERE uid = ?",
+                            (op.uid,)).fetchone()
+        if hrow:
+            conn.execute("DELETE FROM notes WHERE highlight_id = ?", (hrow["id"],))
+            conn.execute("DELETE FROM highlights WHERE id = ?", (hrow["id"],))
+        shadow_tombstone(conn, "highlight", op.uid, hlc=op.hlc.to_str())
+        conn.commit()
+        report.applied += 1
+        report.tombstones += 1
+        report._count(op, "applied")
+    finally:
+        conn.close()
+
+
+# Task 6/7 handlers land next; stubs keep _ordered dispatch importable.
 def _apply_meta(config, op, report):  # pragma: no cover - Task 6
     raise NotImplementedError
 
