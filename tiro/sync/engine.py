@@ -193,11 +193,19 @@ def resolve_encryption(config: TiroConfig) -> bool:
     """Local encryption pin (spec §5): explicit on/off wins; auto = ON for
     network backends, OFF for filesystem. The cycle refuses to run when the
     backend's format.json disagrees with this pin (downgrade resistance —
-    see open_format's docstring)."""
+    see open_format's docstring).
+
+    Unknown sync_encrypt values REFUSE rather than fall through to auto:
+    TIRO_SYNC_ENCRYPT=true (a natural bool intuition, passed verbatim by
+    the env overlay) must never silently mean plaintext on a filesystem
+    backend (S5.2 review Major #2)."""
     if config.sync_encrypt == "on":
         return True
     if config.sync_encrypt == "off":
         return False
+    if config.sync_encrypt != "auto":
+        raise SyncConfigError(
+            f"sync_encrypt must be auto/on/off, got {config.sync_encrypt!r}")
     return config.sync_backend in ("s3", "webdav")
 
 
@@ -278,26 +286,49 @@ def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
     Inner adapters are deliberately constructed WITHOUT a config (their
     built-in audit no-ops) — AuditedAdapter is the one audit surface; see
     its docstring.
+
+    Validation runs BEFORE get_or_create_device so a failing call is
+    side-effect-free — a status probe against a misconfigured library must
+    never mint a device identity (S5.2 review Major #1). Heavy adapter
+    imports (boto3/httpx) also happen only after validation passes.
     """
-    device_id, _name = get_or_create_device(config)
+
+    def _field(value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
     backend = config.sync_backend
+    resolve_encryption(config)  # refuse unknown sync_encrypt values early
+    if backend == "filesystem":
+        if not _field(config.sync_path):
+            raise SyncConfigError("sync_path is not configured")
+    elif backend == "s3":
+        if not (_field(config.sync_s3_endpoint) and _field(config.sync_s3_bucket)
+                and _field(config.sync_s3_access_key)
+                and _field(config.sync_s3_secret_key)):
+            raise SyncConfigError(
+                "s3 backend requires sync_s3_endpoint, sync_s3_bucket, "
+                "sync_s3_access_key and sync_s3_secret_key"
+            )
+    elif backend == "webdav":
+        if not (_field(config.sync_webdav_url) and _field(config.sync_webdav_user)
+                and _field(config.sync_webdav_password)):
+            raise SyncConfigError(
+                "webdav backend requires sync_webdav_url, sync_webdav_user "
+                "and sync_webdav_password"
+            )
+    else:
+        raise SyncConfigError(f"unknown sync_backend: {backend!r}")
+
+    device_id, _name = get_or_create_device(config)
     if backend == "filesystem":
         from pathlib import Path
 
         from tiro.sync.adapters.filesystem import FilesystemAdapter
 
-        if not config.sync_path:
-            raise SyncConfigError("sync_path is not configured")
         inner = FilesystemAdapter(Path(config.sync_path), device_id=device_id)
     elif backend == "s3":
         from tiro.sync.adapters.s3 import S3Adapter
 
-        if not (config.sync_s3_endpoint and config.sync_s3_bucket
-                and config.sync_s3_access_key and config.sync_s3_secret_key):
-            raise SyncConfigError(
-                "s3 backend requires sync_s3_endpoint, sync_s3_bucket, "
-                "sync_s3_access_key and sync_s3_secret_key"
-            )
         inner = S3Adapter(
             endpoint_url=config.sync_s3_endpoint,
             bucket=config.sync_s3_bucket,
@@ -305,21 +336,13 @@ def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
             secret_key=config.sync_s3_secret_key,
             device_id=device_id,
         )
-    elif backend == "webdav":
+    else:
         from tiro.sync.adapters.webdav import WebDAVAdapter
 
-        if not (config.sync_webdav_url and config.sync_webdav_user
-                and config.sync_webdav_password):
-            raise SyncConfigError(
-                "webdav backend requires sync_webdav_url, sync_webdav_user "
-                "and sync_webdav_password"
-            )
         inner = WebDAVAdapter(
             config.sync_webdav_url,
             username=config.sync_webdav_user,
             password=config.sync_webdav_password,
             device_id=device_id,
         )
-    else:
-        raise SyncConfigError(f"unknown sync_backend: {backend!r}")
     return AuditedAdapter(inner, config)

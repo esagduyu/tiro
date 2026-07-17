@@ -123,3 +123,51 @@ async def test_audited_adapter_lock_contention_is_not_an_error(
     assert all(e["success"] for e in lock_entries)
 
     await adapter_a.unlock()
+
+
+def test_resolve_encryption_refuses_unknown_value(test_config):
+    """TIRO_SYNC_ENCRYPT=true must never silently mean plaintext (S5.2
+    review Major #2): unknown values refuse instead of falling to auto."""
+    test_config.sync_backend = "filesystem"
+    test_config.sync_encrypt = "true"
+    with pytest.raises(SyncConfigError):
+        resolve_encryption(test_config)
+
+
+def test_adapter_factory_failure_is_side_effect_free(initialized_library):
+    """A failing factory call must not mint a device identity (S5.2 review
+    Major #1) — a status probe against a misconfigured library stays pure."""
+    from tiro.sync.engine import read_sync_state
+
+    initialized_library.sync_backend = "carrier-pigeon"
+    with pytest.raises(SyncConfigError):
+        adapter_for_config(initialized_library)
+    initialized_library.sync_backend = "filesystem"
+    initialized_library.sync_path = "   "
+    with pytest.raises(SyncConfigError):
+        adapter_for_config(initialized_library)
+    assert read_sync_state(initialized_library)["self"] is None
+
+
+def test_adapter_factory_s3_and_webdav_require_fields(initialized_library):
+    initialized_library.sync_backend = "s3"
+    initialized_library.sync_s3_endpoint = "https://s3.example"
+    initialized_library.sync_s3_bucket = "b"
+    # access/secret keys missing
+    with pytest.raises(SyncConfigError, match="s3 backend requires"):
+        adapter_for_config(initialized_library)
+    initialized_library.sync_backend = "webdav"
+    initialized_library.sync_webdav_url = "https://dav.example"
+    with pytest.raises(SyncConfigError, match="webdav backend requires"):
+        adapter_for_config(initialized_library)
+
+
+async def test_audited_adapter_delete_logs_line(initialized_library, tmp_path):
+    initialized_library.sync_backend = "filesystem"
+    initialized_library.sync_path = str(tmp_path / "backend")
+    adapter = adapter_for_config(initialized_library)
+    await adapter.put("objects/ab/x.age", b"x")
+    await adapter.delete("objects/ab/x.age")
+    entries = [e for e in _sync_audit_entries(initialized_library)
+               if e["endpoint"] == "delete"]
+    assert len(entries) == 1 and entries[0]["success"] is True
