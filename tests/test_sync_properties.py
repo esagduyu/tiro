@@ -309,7 +309,7 @@ def _seed_source(config, uid, name, domain):
         conn.close()
 
 
-def _draw_state_ops(draw, clocks):
+def _draw_state_ops(draw, clocks, devices=DEVICES):
     """Draw one op batch stamped from the GIVEN per-device clocks.
 
     Sharing the clocks across every batch drawn for one test case is
@@ -321,13 +321,17 @@ def _draw_state_ops(draw, clocks):
     put-vs-del "tie" diverged by arrival order. That input violates the
     system's precondition, so the strategy (not the property) was
     corrected; adversarial ranges are unchanged and cross-device same-wall
-    ties still occur (the device suffix breaks them deterministically)."""
+    ties still occur (the device suffix breaks them deterministically).
+
+    `devices` narrows which devices this batch may draw ops for — the pair
+    strategy partitions the device set across its two batches (see
+    st_state_ops_pair, the second precondition correction)."""
     from tiro.migrations import new_ulid
 
     ops = []
     n = draw(st.integers(0, 10))
     for _ in range(n):
-        device = draw(st.sampled_from(DEVICES))
+        device = draw(st.sampled_from(devices))
         hlc = clocks[device].tick()
         which = draw(st.integers(0, 2))
         if which == 0:
@@ -368,10 +372,26 @@ def st_state_ops(draw):
 
 @st.composite
 def st_state_ops_pair(draw):
-    """TWO batches sharing ONE set of per-device clocks — see
-    _draw_state_ops' docstring for why sharing is load-bearing."""
+    """TWO batches over DISJOINT device sets (A: deva; B: devb+devc),
+    sharing ONE set of per-device clocks — see _draw_state_ops' docstring
+    for why sharing is load-bearing.
+
+    Disjointness is equally load-bearing (second strategy precondition
+    correction, found from S3 on 2026-07-17): the pair test applies the two
+    batches in BOTH orders, and that is only an in-contract input while
+    every device's own ops keep their journal order (per-device journals
+    are totally ordered, spec §3 — a segment stream can never deliver a
+    device's ops out of sequence). The old strategy let one device's ops
+    land in both batches, so the swapped order replayed that device's
+    sequence reversed — hypothesis found an all-deva pair whose reversed
+    replay diverged on a note conflict-block (physically impossible input:
+    no real pull reorders one device's journal). Cross-device races,
+    including the same-highlight-uid-under-two-articles shape from that
+    counterexample, remain generated across the partition and converge —
+    the property's assertion is untouched."""
     clocks = _fresh_clocks(draw)
-    return _draw_state_ops(draw, clocks), _draw_state_ops(draw, clocks)
+    return (_draw_state_ops(draw, clocks, devices=DEVICES[:1]),
+            _draw_state_ops(draw, clocks, devices=DEVICES[1:]))
 
 
 def _observable_state(config):
