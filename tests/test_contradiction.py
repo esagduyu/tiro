@@ -87,3 +87,31 @@ def test_contradiction_check_prompt_shape():
     # topic overlap alone must be explicitly excluded (fixture pair 3 relies
     # on the instruction existing)
     assert "not a contradiction" in p.lower()
+
+
+# --- Task 2: similar_articles carries trusted-set fields --------------------
+
+
+def test_similar_articles_includes_rating_and_ai_tier(
+        initialized_library, tmp_path, monkeypatch):
+    from tiro.agents.context import RunContext
+    from tiro.agents.runtime import TraceWriter
+
+    _aid1, uid1 = _seed_article(initialized_library, title="Anchor K4")
+    aid2, _uid2 = _seed_article(initialized_library, title="Loved K4",
+                                rating=2)
+    aid3, _uid3 = _seed_article(initialized_library, title="Tiered K4",
+                                ai_tier="must-read")
+    _fake_similars(monkeypatch, [(aid2, 0.9), (aid3, 0.8)], expect_limit=8)
+
+    tw = TraceWriter(tmp_path / "k4-ctx.jsonl")
+    tw.header(agent="t", version="1", inputs={}, provider="fake", model="m",
+              replay_of=None)
+    ctx = RunContext(initialized_library, trace=tw, run_uid="01K4CTX")
+    out = ctx.similar_articles(uid1, k=8)
+    tw.close()
+
+    by_id = {o["id"]: o for o in out}
+    assert by_id[aid2]["rating"] == 2 and by_id[aid2]["ai_tier"] is None
+    assert by_id[aid3]["rating"] is None
+    assert by_id[aid3]["ai_tier"] == "must-read"

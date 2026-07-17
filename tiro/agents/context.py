@@ -207,8 +207,8 @@ class RunContext:
                 ph = ",".join("?" * len(ids))
                 rows = {
                     row["id"]: row for row in conn.execute(
-                        f"SELECT id, uid, title, summary FROM articles "
-                        f"WHERE id IN ({ph})", ids
+                        f"SELECT id, uid, title, summary, rating, ai_tier "
+                        f"FROM articles WHERE id IN ({ph})", ids
                     )
                 }
             finally:
@@ -218,6 +218,7 @@ class RunContext:
                 if row:
                     out.append({"id": row["id"], "uid": row["uid"],
                                 "title": row["title"], "summary": row["summary"],
+                                "rating": row["rating"], "ai_tier": row["ai_tier"],
                                 "similarity": rel.get("similarity_score")})
         self._cite(o["uid"] for o in out)
         self._tool("similar_articles", {"article_uid": article_uid, "k": k}, out)
