@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import platform
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from dataclasses import field as dc_field
@@ -32,6 +33,14 @@ LOCK_TTL_S = 120  # backend advisory-lock TTL, used by the S5.4 cycle
 #: Cap on alias-chain hops in _remap_alias_uids — a chain deeper than this
 #: (or any cycle) leaves the op untouched rather than looping.
 _ALIAS_CHAIN_CAP = 20
+
+#: Content-address shape (S5.3 review B1): the ONLY object refs the pull
+#: loop ever fetches. Anything else (e.g. a traversal like "../../secrets")
+#: is left unfetched so decode_segment raises its honest JournalError and
+#: the quarantine branch fires — a malformed ref must never reach
+#: adapter.get, where it would escape as an AdapterError (not a
+#: QUARANTINE_ERRORS member).
+_OBJECT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _now_iso() -> str:
@@ -125,9 +134,22 @@ def read_sync_state(config: TiroConfig) -> dict:
         # row degrades to empty state — an empty watermark just re-pulls,
         # and S2 apply is idempotent, so this is semantically safe.
         if self_row.get("watermarks_json"):
+            parsed: object = None
             try:
-                watermarks = json.loads(self_row["watermarks_json"])
+                parsed = json.loads(self_row["watermarks_json"])
             except ValueError:
+                pass
+            # Type-validate, not just parse (S5.3 review m1): watermarks
+            # feed integer seq comparisons in the pull loop — only
+            # str-key/int-value entries survive; anything else degrades
+            # (an empty/short watermark just re-pulls, apply is idempotent).
+            if isinstance(parsed, dict):
+                watermarks = {
+                    k: v for k, v in parsed.items()
+                    if isinstance(k, str)
+                    and isinstance(v, int) and not isinstance(v, bool)
+                }
+            if not isinstance(parsed, dict) or len(watermarks) != len(parsed):
                 logger.warning("sync_state: unreadable watermarks_json — "
                                "treating as empty (will re-pull)")
         if self_row.get("last_cycle_json"):
@@ -191,8 +213,10 @@ def upsert_remote_device(
     A conflict against the SELF row is a guarded no-op (`WHERE is_self = 0`):
     the backend's devices/ listing normally includes our own device doc, and
     blindly upserting it would clobber the self row's last_seq (the journal
-    head) with a possibly-stale remote-read value. An empty incoming name
-    never wipes a previously-known one.
+    head) with a possibly-stale remote-read value. An empty incoming name or
+    last_seen never wipes a previously-known one (S5.3 review m3). last_seq
+    stays doc-authoritative on purpose — a repair legitimately REGRESSES a
+    remote device's journal head, so no monotone guard there.
     """
     conn = get_connection(config.db_path)
     try:
@@ -205,7 +229,9 @@ def upsert_remote_device(
                 name = CASE WHEN excluded.name != '' THEN excluded.name
                             ELSE sync_state.name END,
                 last_seq = excluded.last_seq,
-                last_seen = excluded.last_seen,
+                last_seen = CASE WHEN excluded.last_seen != ''
+                                 THEN excluded.last_seen
+                                 ELSE sync_state.last_seen END,
                 last_wall_ms = COALESCE(excluded.last_wall_ms,
                                         sync_state.last_wall_ms)
             WHERE sync_state.is_self = 0
@@ -483,8 +509,10 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     device_id, _name = get_or_create_device(config)
     watermarks = dict(read_sync_state(config)["watermarks"])
 
-    # 1. Device-registry refresh from devices/*.json (skip self; a garbage
-    # doc is a warning, never a stopped cycle — the registry is advisory).
+    # 1. Device-registry refresh from devices/*.json (skip self). The
+    # registry is ADVISORY (S5.3 review n4): a garbage doc OR a transient
+    # adapter fault on any single doc is a warning, never a stopped cycle —
+    # unlike the journal loop below, which keeps strict propagation.
     for key in await adapter.list("devices/"):
         tail = key[len("devices/"):]
         if not tail.endswith(".json") or "/" in tail:
@@ -492,21 +520,18 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         remote_id = tail[: -len(".json")]
         if remote_id == device_id:
             continue
-        raw = await _get_or_none(adapter, key)
-        if raw is None:
-            continue
         try:
+            raw = await _get_or_none(adapter, key)
+            if raw is None:
+                continue
             info = parse_device_doc(remote_id, raw.decode("utf-8"))
-        except (SnapshotError, UnicodeDecodeError) as e:
+        except Exception as e:
             report.warnings.append(f"unreadable device doc {key}: {e}")
             continue
         upsert_remote_device(config, remote_id, name=info.name,
                              last_seq=info.last_seq, last_seen=info.last_seen)
 
-    # 2. Alias map for D25(a) remapping (loaded once per pull).
-    aliases = (await asyncio.to_thread(load_shadow, config)).aliases
-
-    # 3. Enumerate unseen foreign segments.
+    # 2. Enumerate unseen foreign segments.
     pending: list[tuple[str, int, str]] = []
     for key in await adapter.list("journal/"):
         try:
@@ -521,7 +546,7 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         pending.append((dev, seq, key))
     pending.sort()
 
-    # 4. Gap detection BEFORE applying anything: per device, the run of new
+    # 3. Gap detection BEFORE applying anything: per device, the run of new
     # seqs must start at watermark+1 and be contiguous throughout.
     expected: dict[str, int] = {}
     for dev, seq, _key in pending:
@@ -529,14 +554,19 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         if seq != want:
             report.result = "needs_attention"
             report.reason = (
-                f"journal gap for device {dev}: have watermark {want - 1}, "
-                f"next segment is {seq} — segments were GC'd past this "
-                "device's ack; re-bootstrap or repair")
+                f"journal gap for device {dev}: expected segment {want}, "
+                f"found {seq} — NOTHING from this run was applied; segments "
+                "were GC'd past this device's ack; re-bootstrap or repair")
             logger.error("Sync pull: %s", report.reason)
             return False
         expected[dev] = seq + 1
 
-    # 5. Fetch + decode + apply, in (device, seq) order.
+    # One-shot mass-delete consent (S5.3 review M3): --accept-mass-delete
+    # covers exactly ONE guard trip per run, never every segment of the
+    # re-run — a second guarded segment must stop the pull again.
+    acceptance_available = accept_mass_delete
+
+    # 4. Fetch + decode + apply, in (device, seq) order.
     for dev, seq, key in pending:
         raw = await _get_or_none(adapter, key)
         if raw is None:
@@ -548,6 +578,13 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
             refs = segment_object_refs(raw, codec)
             objects: dict[str, bytes] = {}
             for h in sorted(refs):
+                # Content-address boundary (S5.3 review B1): only refs
+                # shaped like sha256 hex are ever fetched — see
+                # _OBJECT_HASH_RE. A malformed ref stays unfetched so
+                # decode_segment quarantines instead of an AdapterError
+                # escaping the pull.
+                if not _OBJECT_HASH_RE.fullmatch(h):
+                    continue
                 blob = await _get_or_none(adapter, object_key(h))
                 if blob is not None:
                     objects[h] = blob
@@ -560,21 +597,43 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
                 f"quarantined segment {key} from device {dev}: {e}")
             logger.error("Sync pull: %s", report.reason)
             return False
+        # Alias map reloaded PER SEGMENT (S5.3 review M1): aliases are
+        # created DURING apply (a remote Alias op, or a URL-dedupe inside
+        # _materialize_article), so a map loaded once per pull would drop a
+        # later segment's ops on freshly-deduped uids (deferred_unknown +
+        # watermark advance = permanent meta loss). One cheap read/segment.
+        aliases = (await asyncio.to_thread(load_shadow, config)).aliases
         ops = _remap_alias_uids(ops, aliases)
+        # Passing the engine's device-labeled clock stamps emitted Alias
+        # ops with the real device id (D25(b)). The guard is ALWAYS armed
+        # on the first apply; a sqlite3.OperationalError out of apply_ops
+        # (transient infra, review M2) deliberately propagates — the cycle
+        # wrapper classifies it as a retryable cycle error and the
+        # watermark stays put for an idempotent whole-segment re-apply.
+        apply_report = await asyncio.to_thread(
+            apply_ops, config, ops, guard=True, clock=clock)
+        if apply_report.guard:
+            if acceptance_available:
+                acceptance_available = False  # consumed by THIS guard trip
+                logger.warning(
+                    "Sync pull: mass-delete guard on segment %s accepted "
+                    "(one-shot): %s", key, apply_report.guard)
+                apply_report = await asyncio.to_thread(
+                    apply_ops, config, ops, guard=False, clock=clock)
+            else:
+                report.result = "needs_attention"
+                report.guard = apply_report.guard
+                report.reason = "mass_delete_guard"
+                logger.warning(
+                    "Sync pull: mass-delete guard on segment %s: %s "
+                    "— watermark NOT advanced", key, apply_report.guard)
+                return False
+        # Wall-clock tracker only AFTER the successful (post-guard) apply
+        # (S5.3 review n1); `if mx:` deliberately skips wall_ms == 0
+        # (epoch-pinned snapshot stamps carry no real wall time).
         mx = max((op.hlc.wall_ms for op in ops), default=None)
         if mx:
             update_remote_wall(config, dev, mx)
-        # Passing the engine's device-labeled clock stamps emitted Alias
-        # ops with the real device id (D25(b)).
-        apply_report = await asyncio.to_thread(
-            apply_ops, config, ops, guard=not accept_mass_delete, clock=clock)
-        if apply_report.guard:
-            report.result = "needs_attention"
-            report.guard = apply_report.guard
-            report.reason = "mass_delete_guard"
-            logger.warning("Sync pull: mass-delete guard on segment %s: %s "
-                           "— watermark NOT advanced", key, apply_report.guard)
-            return False
         report.pulled_segments += 1
         report.applied += apply_report.applied
         report.conflicts += apply_report.conflicts

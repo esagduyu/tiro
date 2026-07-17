@@ -625,9 +625,10 @@ def write_conflict_file(dir_path: Path, stem: str, body: str, *,
             if not existing.name.startswith(prefix) or not existing.is_file():
                 continue
             try:
-                if existing.read_text() == body:
+                if existing.read_text(encoding="utf-8") == body:
                     return existing
-            except OSError:  # unreadable candidate never blocks preservation
+            # Unreadable/undecodable candidate never blocks preservation.
+            except (OSError, UnicodeDecodeError):
                 continue
     dir_path.mkdir(parents=True, exist_ok=True)
     day = datetime.now(UTC).strftime("%Y%m%d")
@@ -636,7 +637,7 @@ def write_conflict_file(dir_path: Path, stem: str, body: str, *,
     while dest.exists():
         dest = dir_path / f"{stem}.conflict-{device}-{day}-{n}.md"
         n += 1
-    dest.write_text(body)
+    dest.write_text(body, encoding="utf-8")
     return dest
 
 

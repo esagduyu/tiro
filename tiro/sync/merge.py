@@ -188,6 +188,16 @@ def apply_ops(config: TiroConfig, ops: list, *, guard: bool = True,
                 _apply_row_del(config, op, report)       # Task 6
             elif isinstance(op, Alias):
                 _apply_alias(config, op, report)         # Task 7
+        except sqlite3.OperationalError:
+            # Transient infra (e.g. "database is locked" from the concurrent
+            # S1 reconcile loop) — RE-RAISE instead of folding into
+            # report.errors (S5.3 review M2): the engine's cycle wrapper
+            # classifies it as a retryable cycle error, the pull watermark
+            # stays put, and the idempotent whole-segment re-apply retries
+            # next cycle (LWW skip-stale + conflict-file dedupe make a
+            # mid-batch abort safe). Deterministic bad ops still fold into
+            # report.errors below and skip forever.
+            raise
         except Exception as e:
             report.errors += 1
             report._count(op, "errors", error=str(e))

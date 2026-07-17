@@ -488,6 +488,273 @@ async def test_pull_per_op_errors_do_not_quarantine(
         REMOTE_DEV: 1}
 
 
+# --- S5.3-fix review wave: B1 / M1 / M2 / M3 / m1 + named gap tests ----------
+
+
+async def test_pull_quarantines_malformed_object_hash(
+    initialized_library, tmp_path
+):
+    """B1: a traversal-shaped object_hash must never reach adapter.get —
+    left unfetched, decode_segment's JournalError quarantines the segment
+    instead of an AdapterError escaping _pull."""
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.snapshot import journal_key
+
+    _synced_article(initialized_library)
+    # Hand-built JSONL (honest with PlainCodec: blob bytes == text bytes) —
+    # the pre-scan only needs kind + payload.object_hash.
+    line = json.dumps({
+        "op": "OP00000000000000000000000001", "hlc": "0000000000001-000000-x",
+        "device": REMOTE_DEV, "kind": "file_put", "uid": "u1",
+        "base_hash": None,
+        "payload": {"path_hint": "articles/x.md",
+                    "object_hash": "../../secrets"},
+    })
+    backend = tmp_path / "backend"
+    seg = backend / journal_key(REMOTE_DEV, 1)
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes((line + "\n").encode("utf-8"))
+
+    # Must not raise (no AdapterError escapes) — quarantine instead.
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert "missing object" in report.reason
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+
+
+async def test_pull_alias_in_segment_reaches_later_segment_ops(
+    initialized_library, tmp_path
+):
+    """M1: an Alias applied in segment 1 must remap segment 2's ops in the
+    SAME pull — the alias map is reloaded per segment, not once per run."""
+    from tiro.migrations import new_ulid
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.journal import Alias, HLCClock
+
+    article_id, survivor_uid = _synced_article(initialized_library)
+    old_uid = new_ulid()
+    clock = HLCClock(REMOTE_DEV)
+    alias_op = Alias(op_id=new_ulid(), hlc=clock.tick(), device=REMOTE_DEV,
+                     uid=old_uid, new_uid=survivor_uid)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [alias_op])
+    _seed_segment(backend, REMOTE_DEV, 2,
+                  [_remote_meta(old_uid, seq_clock=clock)])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is True
+    assert report.pulled_segments == 2
+    # Pre-fix this was deferred_unknown_article + watermark advance —
+    # permanent meta loss on the surviving article.
+    assert _article_val(initialized_library, article_id, "rating") == 2
+    assert read_sync_state(initialized_library)["watermarks"] == {
+        REMOTE_DEV: 2}
+
+
+async def test_pull_operational_error_propagates_and_holds_watermark(
+    initialized_library, tmp_path, monkeypatch
+):
+    """M2 (engine level): a transient sqlite3.OperationalError out of apply
+    must propagate out of _pull with the watermark NOT advanced — never be
+    folded into report.errors and paved over by a watermark advance."""
+    import sqlite3
+
+    from tiro.sync.engine import read_sync_state
+
+    _article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(uid)])
+
+    def boom(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("tiro.sync.merge.apply_ops", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        await _run_pull(initialized_library, backend)
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+
+
+async def test_pull_mass_delete_acceptance_is_one_shot(
+    initialized_library, tmp_path
+):
+    """M3: accept_mass_delete covers exactly ONE guard trip per run — a
+    second mass-delete segment in the same run trips the guard again and
+    holds its watermark."""
+    from tests.test_reconcile import _ingest
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.journal import HLCClock, RowDel
+    from tiro.sync.manifest import build_manifest, save_shadow
+
+    for i in range(24):
+        _ingest(initialized_library, title=f"Article {i}",
+                url=f"https://example.com/a{i}")
+    save_shadow(initialized_library, build_manifest(initialized_library))
+    conn = get_connection(initialized_library.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT uid, body_hash FROM articles ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 24
+
+    clock = HLCClock(REMOTE_DEV)
+
+    def _dels(chunk):
+        return [RowDel(op_id=new_ulid(), hlc=clock.tick(), device=REMOTE_DEV,
+                       uid=r["uid"], table="articles", observed=r["body_hash"])
+                for r in chunk]
+
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, _dels(rows[:12]))
+    _seed_segment(backend, REMOTE_DEV, 2, _dels(rows[12:]))
+
+    ok, report, _state = await _run_pull(
+        initialized_library, backend, accept_mass_delete=True)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert report.guard
+    assert report.reason == "mass_delete_guard"
+    # Segment 1 consumed the acceptance and applied; segment 2 held.
+    assert report.pulled_segments == 1
+    assert _article_count(initialized_library) == 12
+    assert read_sync_state(initialized_library)["watermarks"] == {
+        REMOTE_DEV: 1}
+
+
+def test_read_sync_state_type_validates_watermarks(initialized_library):
+    """m1: watermarks_json must be a dict of str->int — anything else
+    degrades to empty (re-pull) without raising."""
+    from tiro.database import get_connection
+    from tiro.sync.engine import get_or_create_device, read_sync_state
+
+    get_or_create_device(initialized_library)
+
+    def _set(raw):
+        conn = get_connection(initialized_library.db_path)
+        try:
+            conn.execute("UPDATE sync_state SET watermarks_json = ? "
+                         "WHERE is_self = 1", (raw,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _set("[1,2]")
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+    _set('{"dev":"abc"}')
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+    # Mixed dict keeps only the valid str->int entries.
+    _set('{"dev": 3, "bad": "x", "flag": true}')
+    assert read_sync_state(initialized_library)["watermarks"] == {"dev": 3}
+
+
+async def test_pull_persists_watermark_of_applied_segment_before_quarantine(
+    initialized_library, tmp_path
+):
+    """Named gap test 1: segment 1 applies, segment 2 quarantines — the
+    PERSISTED watermark must record segment 1 (per-segment advance)."""
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.snapshot import journal_key
+
+    article_id, uid = _synced_article(initialized_library)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [_remote_meta(uid)])
+    seg2 = backend / journal_key(REMOTE_DEV, 2)
+    seg2.write_bytes(b"\xff\xfe not a segment at all")
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert report.pulled_segments == 1
+    assert _article_val(initialized_library, article_id, "rating") == 2
+    assert read_sync_state(initialized_library)["watermarks"] == {
+        REMOTE_DEV: 1}
+
+
+def _remote_file_put(body, *, uid=None, path_hint="articles/synced-post.md",
+                     clock=None):
+    from tiro.anchors import content_hash
+    from tiro.migrations import new_ulid
+    from tiro.sync.journal import FilePut, HLCClock
+
+    clock = clock or HLCClock(REMOTE_DEV)
+    return FilePut(op_id=new_ulid(), hlc=clock.tick(), device=REMOTE_DEV,
+                   uid=uid or new_ulid(), path_hint=path_hint,
+                   object_hash=content_hash(body), body=body)
+
+
+FILE_PUT_BODY = ("---\ntitle: Synced Post\n"
+                 "url: https://example.com/synced-post\n---\n\n"
+                 "Hello from the remote device.\n")
+
+
+async def test_pull_file_put_end_to_end_materializes_article(
+    initialized_library, tmp_path
+):
+    """Named gap test 2a: a FilePut driven through _pull with its object
+    blob on the backend materializes a local article."""
+    from tiro.database import get_connection
+    from tiro.sync.engine import read_sync_state
+
+    op = _remote_file_put(FILE_PUT_BODY)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [op])
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is True
+    assert report.applied >= 1
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute(
+            "SELECT title, ingestion_method, markdown_path FROM articles "
+            "WHERE uid = ?", (op.uid,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["title"] == "Synced Post"
+    assert row["ingestion_method"] == "sync"
+    assert (initialized_library.library / op.path_hint).exists()
+    assert read_sync_state(initialized_library)["watermarks"] == {
+        REMOTE_DEV: 1}
+
+
+async def test_pull_file_put_missing_object_blob_quarantines(
+    initialized_library, tmp_path
+):
+    """Named gap test 2b: the object blob deleted from the backend →
+    quarantine, watermark held, no article materialized."""
+    from tiro.anchors import content_hash
+    from tiro.database import get_connection
+    from tiro.sync.engine import read_sync_state
+    from tiro.sync.snapshot import object_key
+
+    op = _remote_file_put(FILE_PUT_BODY)
+    backend = tmp_path / "backend"
+    _seed_segment(backend, REMOTE_DEV, 1, [op])
+    (backend / object_key(content_hash(FILE_PUT_BODY))).unlink()
+
+    ok, report, _state = await _run_pull(initialized_library, backend)
+
+    assert ok is False
+    assert report.result == "needs_attention"
+    assert "missing object" in report.reason
+    assert read_sync_state(initialized_library)["watermarks"] == {}
+    conn = get_connection(initialized_library.db_path)
+    try:
+        row = conn.execute("SELECT 1 FROM articles WHERE uid = ?",
+                           (op.uid,)).fetchone()
+    finally:
+        conn.close()
+    assert row is None
+
+
 # --- segment_object_refs (S3 pre-scan single-sourcing) -----------------------
 
 
