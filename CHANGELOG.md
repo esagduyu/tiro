@@ -36,7 +36,7 @@ day the release was tagged.
 - THE 1.0 HARD GATE: hypothesis property suite (commutativity, idempotence,
   no-note-loss, diff∘apply round-trip, HLC monotonicity) + test-enforced
   zero-network check on the pure modules. Gate command:
-  `for i in 1 2 3; do uv run pytest tests/test_sync_properties.py -q --hypothesis-seed=random; done`
+  `for i in 1 2 3; do uv run pytest tests/test_sync_properties.py -q --hypothesis-seed=random || exit 1; done`
 - New test-only dependency: hypothesis (MPL-2.0, license verified at add).
 - No product surface yet: no routes, no scheduler, no UI, no transport —
   S3 (crypto/blobs) and S5 (engine loop) build on these interfaces.

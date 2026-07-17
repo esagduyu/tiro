@@ -274,7 +274,10 @@ def _apply_file_put(config: TiroConfig, op: FilePut, report: ApplyReport,
             if is_article:
                 current = frontmatter.load(str(path)).content  # BODY hash space
             else:
-                current = path.read_text()
+                # Explicit utf-8 (whole-branch review #1): this feeds
+                # cur_hash — a locale-dependent decode on a non-UTF-8
+                # device would manufacture phantom concurrency.
+                current = path.read_text(encoding="utf-8")
         # For articles op.object_hash is the FULL-file blob address (hash
         # spaces, module docstring): re-derive the BODY-space hash from the
         # hydrated body — this is the only hash ever compared to the current
@@ -397,7 +400,7 @@ def _apply_file_del(config: TiroConfig, op: FileDel, report: ApplyReport) -> boo
             report.tombstones += 1
             report._count(op, "already_gone")
             return False
-        current = path.read_text()
+        current = path.read_text(encoding="utf-8")  # byte-stable hashes
         if op.base_hash is None or content_hash(current) != op.base_hash:
             # Edit-wins retention (plan decision #17). base_hash=None on an
             # EXISTING file is treated as concurrent-by-construction, same
@@ -1115,18 +1118,18 @@ def _apply_meta(config: TiroConfig, op: Meta, report: ApplyReport) -> None:
         # bootstrap window (un-pushed edit before the first full
         # save_shadow) remains unprotected — documented, bounded to one
         # cycle, and the local diff re-emits the local value either way.
-        if op.field != "opened_count":
-            srow = conn.execute(
-                "SELECT fields_json FROM sync_shadow WHERE kind = 'article' "
-                "AND uid = ? AND deleted_at IS NULL", (op.uid,)).fetchone()
-            if srow:
-                sfields = json.loads(srow["fields_json"] or "{}")
-                if op.field in sfields:
-                    cur_v = _current_meta_value(conn, row["id"], op.field)
-                    if sfields.get(op.field) != cur_v:
-                        mu = row["meta_updated_at"]
-                        if mu and (local_ts is None or mu > local_ts):
-                            local_ts = mu
+        # (opened_count returned above — every field here is LWW-gated.)
+        srow = conn.execute(
+            "SELECT fields_json FROM sync_shadow WHERE kind = 'article' "
+            "AND uid = ? AND deleted_at IS NULL", (op.uid,)).fetchone()
+        if srow:
+            sfields = json.loads(srow["fields_json"] or "{}")
+            if op.field in sfields:
+                cur_v = _current_meta_value(conn, row["id"], op.field)
+                if sfields.get(op.field) != cur_v:
+                    mu = row["meta_updated_at"]
+                    if mu and (local_ts is None or mu > local_ts):
+                        local_ts = mu
         if not op.ts and (local_ts is not None or row["meta_updated_at"]):
             # S2.6 review F7: a ts-less (None/"") meta op must never
             # overwrite a stamped field — it would bypass both LWW guards
@@ -1528,8 +1531,7 @@ def _apply_alias(config: TiroConfig, op: Alias, report: ApplyReport) -> None:
         if old_lines:
             for ln in old_lines:
                 ln["article_uid"] = op.new_uid
-            merged = merge_jsonl(read_annotations(config, new_stem), old_lines,
-                                 label_a="local", label_b=op.device)
+            merged = merge_jsonl(read_annotations(config, new_stem), old_lines)
             write_annotations(config, new_stem, merged)
             # Emptied, not unlinked (write primitive is not a policy) — the
             # file itself is removed by delete_article below.
