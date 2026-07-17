@@ -81,3 +81,10 @@ def test_dismiss(api):
                        {"article_id": aid, "markdown": "no thanks"})
     assert api.post(f"/api/suggestions/{s['uid']}/dismiss").status_code == 200
     assert api.post(f"/api/suggestions/{s['uid']}/dismiss").status_code == 409
+
+
+def test_agents_page_has_suggestions_and_personas_sections(api):
+    r = api.get("/agents")
+    assert r.status_code == 200
+    for anchor in ("suggestions-queue", "personas-list"):
+        assert anchor in r.text

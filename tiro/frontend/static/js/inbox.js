@@ -38,6 +38,7 @@ import { createUndoManager, pushUndoable, takeUndo, clearUndo } from "./undo.js"
 
 let currentSort = "unread"; // "unread" | "newest" | "oldest" | "importance"
 let cachedArticles = []; // store articles for re-sorting without re-fetching
+let suggestionCounts = {}; // article_id -> pending suggestion count (K3)
 let selectedIndex = -1; // keyboard-selected article index
 let showArchived = false; // whether to include decayed articles
 let showSnoozed = false; // whether to include snoozed articles (M3.2)
@@ -190,6 +191,7 @@ async function loadInbox() {
         cachedArticles = json.data;
         libraryEverHadArticles = true;
         emptyEl.style.display = "none";
+        await loadSuggestionCounts();
         renderArticleList(cachedArticles);
         updateToolbar(cachedArticles);
         renderPagination(json.pagination || null);
@@ -198,6 +200,23 @@ async function loadInbox() {
     } catch (err) {
         console.error("Failed to load articles:", err);
         emptyEl.style.display = "block";
+    }
+}
+
+/** Pending-suggestion counts per article (K3) — one extra request per
+ * inbox load, no polling. Best-effort: a fetch failure just means no
+ * chips render, never blocks the inbox load itself. */
+async function loadSuggestionCounts() {
+    try {
+        const res = await fetch("/api/suggestions?status=pending");
+        const rows = (await res.json()).data.suggestions || [];
+        suggestionCounts = {};
+        for (const s of rows) {
+            const aid = s.payload && s.payload.article_id;
+            if (aid) suggestionCounts[aid] = (suggestionCounts[aid] || 0) + 1;
+        }
+    } catch {
+        suggestionCounts = {};
     }
 }
 
@@ -355,6 +374,11 @@ function renderArticle(a, showScore) {
     const sourceTypeLabel = sourceType === "email" ? "email" : sourceType === "rss" ? "rss" : "saved";
     const sourceTypePill = `<span class="pill source-type-pill source-type-${sourceType} clickable-tag" data-tag="${esc(sourceTypeLabel)}">${sourceTypeLabel}</span>`;
 
+    const suggestionPill = suggestionCounts[a.id] ? `<a class="pill suggestion-pill"
+        href="/articles/${num(a.id)}#suggestions"
+        title="${num(suggestionCounts[a.id])} pending suggestions">
+        ${icon("message", { size: 12 })} ${num(suggestionCounts[a.id])}</a>` : "";
+
     const tierBadge = a.ai_tier === "must-read"
         ? '<span class="pill pill-tier tier-badge tier-badge-must-read">Must Read</span>'
         : a.ai_tier === "summary-enough"
@@ -386,6 +410,7 @@ function renderArticle(a, showScore) {
             <div class="article-meta">
                 ${tierBadge}
                 ${sourceTypePill}
+                ${suggestionPill}
                 <span class="source-name">${esc(a.source_name || a.domain || "unknown")}</span>
                 <span class="vip-star ${a.is_vip ? "active" : ""}"
                       data-source-id="${a.source_id}"
