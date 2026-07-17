@@ -183,3 +183,143 @@ def upsert_remote_device(
         conn.commit()
     finally:
         conn.close()
+
+
+class SyncConfigError(Exception):
+    """Sync is not (fully) configured, or configured inconsistently."""
+
+
+def resolve_encryption(config: TiroConfig) -> bool:
+    """Local encryption pin (spec §5): explicit on/off wins; auto = ON for
+    network backends, OFF for filesystem. The cycle refuses to run when the
+    backend's format.json disagrees with this pin (downgrade resistance —
+    see open_format's docstring)."""
+    if config.sync_encrypt == "on":
+        return True
+    if config.sync_encrypt == "off":
+        return False
+    return config.sync_backend in ("s3", "webdav")
+
+
+class AuditedAdapter:
+    """Uniform audit wrapper around any StorageAdapter (composition).
+
+    Emits exactly ONE service="sync" audit line per verb call
+    (endpoint=<verb>, duration_ms, success; put logs bytes_out, get logs
+    bytes_in, list logs count). WHY composition + config=None inners:
+    S4's s3/webdav adapters have their own built-in audit when constructed
+    with a config — with divergent 4xx semantics between the two — so
+    adapter_for_config constructs them with config=None (their audit
+    no-ops) and this wrapper is the single audit surface for every
+    backend, filesystem included. That uniformity also moots S4's 4xx
+    audit-semantics divergence (recorded in sync-s4-progress.md).
+
+    log_api_call swallows its own failures, so audit can never raise into
+    the sync cycle; adapter exceptions are logged (success=False) and
+    re-raised unchanged.
+    """
+
+    def __init__(self, inner, config: TiroConfig):
+        self.inner = inner
+        self._config = config
+
+    async def _call(self, verb: str, coro_fn, *args, **fields):
+        from time import monotonic
+
+        from tiro.audit import log_api_call
+
+        started = monotonic()
+        try:
+            result = await coro_fn(*args)
+        except Exception as e:
+            log_api_call(
+                self._config, "sync", endpoint=verb,
+                duration_ms=int((monotonic() - started) * 1000),
+                success=False, error=str(e)[:200],
+            )
+            raise
+        if verb == "get":
+            fields["bytes_in"] = len(result)
+        elif verb == "list":
+            fields["count"] = len(result)
+        log_api_call(
+            self._config, "sync", endpoint=verb,
+            duration_ms=int((monotonic() - started) * 1000),
+            success=True, **fields,
+        )
+        return result
+
+    async def put(self, key: str, data: bytes) -> None:
+        return await self._call("put", self.inner.put, key, data,
+                                bytes_out=len(data))
+
+    async def get(self, key: str) -> bytes:
+        return await self._call("get", self.inner.get, key)
+
+    async def list(self, prefix: str) -> list[str]:
+        return await self._call("list", self.inner.list, prefix)
+
+    async def delete(self, key: str) -> None:
+        return await self._call("delete", self.inner.delete, key)
+
+    async def lock(self, ttl_s: int) -> bool:
+        return await self._call("lock", self.inner.lock, ttl_s)
+
+    async def unlock(self) -> None:
+        return await self._call("unlock", self.inner.unlock)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
+    """Build the configured storage adapter, audit-wrapped.
+
+    Inner adapters are deliberately constructed WITHOUT a config (their
+    built-in audit no-ops) — AuditedAdapter is the one audit surface; see
+    its docstring.
+    """
+    device_id, _name = get_or_create_device(config)
+    backend = config.sync_backend
+    if backend == "filesystem":
+        from pathlib import Path
+
+        from tiro.sync.adapters.filesystem import FilesystemAdapter
+
+        if not config.sync_path:
+            raise SyncConfigError("sync_path is not configured")
+        inner = FilesystemAdapter(Path(config.sync_path), device_id=device_id)
+    elif backend == "s3":
+        from tiro.sync.adapters.s3 import S3Adapter
+
+        if not (config.sync_s3_endpoint and config.sync_s3_bucket
+                and config.sync_s3_access_key and config.sync_s3_secret_key):
+            raise SyncConfigError(
+                "s3 backend requires sync_s3_endpoint, sync_s3_bucket, "
+                "sync_s3_access_key and sync_s3_secret_key"
+            )
+        inner = S3Adapter(
+            endpoint_url=config.sync_s3_endpoint,
+            bucket=config.sync_s3_bucket,
+            access_key=config.sync_s3_access_key,
+            secret_key=config.sync_s3_secret_key,
+            device_id=device_id,
+        )
+    elif backend == "webdav":
+        from tiro.sync.adapters.webdav import WebDAVAdapter
+
+        if not (config.sync_webdav_url and config.sync_webdav_user
+                and config.sync_webdav_password):
+            raise SyncConfigError(
+                "webdav backend requires sync_webdav_url, sync_webdav_user "
+                "and sync_webdav_password"
+            )
+        inner = WebDAVAdapter(
+            config.sync_webdav_url,
+            username=config.sync_webdav_user,
+            password=config.sync_webdav_password,
+            device_id=device_id,
+        )
+    else:
+        raise SyncConfigError(f"unknown sync_backend: {backend!r}")
+    return AuditedAdapter(inner, config)

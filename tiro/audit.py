@@ -68,6 +68,7 @@ def log_api_call(
     tokens_out: int | None = None,
     chars: int | None = None,
     bytes_out: int | None = None,
+    bytes_in: int | None = None,
     count: int | None = None,
     duration_ms: int | None = None,
     success: bool = True,
@@ -85,6 +86,7 @@ def log_api_call(
             "tokens_out": tokens_out,
             "chars": chars,
             "bytes_out": bytes_out,
+            "bytes_in": bytes_in,
             "count": count,
             "duration_ms": duration_ms,
             "cost_estimate": cost_usd if cost_usd is not None

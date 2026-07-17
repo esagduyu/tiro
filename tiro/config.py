@@ -73,6 +73,24 @@ class TiroConfig:
     # Chroma/anchors. Seconds between passes; 0 = off (manual `tiro
     # reconcile` only). Env override: TIRO_RECONCILE_INTERVAL_S.
     reconcile_interval_s: int = 30
+    # --- BYO sync engine (S5, spec §8; FROZEN key names). sync_identity is
+    # the device-local age recovery code (Bech32 secret) — a SECRET, always
+    # masked in GET /api/settings/sync; background cycles decrypt with it
+    # without prompting. sync_encrypt: auto = OFF for filesystem, ON for
+    # s3/webdav (spec §5). sync_interval_s 0 = manual only.
+    sync_enabled: bool = False
+    sync_backend: str = "filesystem"   # filesystem | s3 | webdav
+    sync_path: str = ""                # filesystem adapter root
+    sync_s3_endpoint: str = ""
+    sync_s3_bucket: str = ""
+    sync_s3_access_key: str = ""
+    sync_s3_secret_key: str = ""
+    sync_webdav_url: str = ""
+    sync_webdav_user: str = ""
+    sync_webdav_password: str = ""
+    sync_encrypt: str = "auto"         # auto | on | off
+    sync_interval_s: int = 300         # seconds; 0 = manual only
+    sync_identity: str = ""            # age recovery code (SECRET, masked)
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"
