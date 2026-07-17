@@ -17,7 +17,12 @@ import random
 
 import pytest
 
-from tiro.sync.adapters.base import LOCK_KEY, KeyMissing, make_lock_payload
+from tiro.sync.adapters.base import (
+    LOCK_KEY,
+    AdapterError,
+    KeyMissing,
+    make_lock_payload,
+)
 
 # Keys shaped exactly like the spec §5 backend layout.
 SPEC_KEYS = [
@@ -71,9 +76,27 @@ class AdapterConformance:
         await adapter.delete("devices/dev-a.json")
         with pytest.raises(KeyMissing):
             await adapter.get("devices/dev-a.json")
+        # delete -> list consistency: S5's compaction deletes journal
+        # segments then lists to recompute watermarks.
+        assert "devices/dev-a.json" not in await adapter.list("devices/")
 
     async def test_delete_missing_is_idempotent(self, adapter):
         await adapter.delete("devices/never-existed.json")  # must not raise
+
+    async def test_rejects_traversal_keys_and_prefixes(self, adapter):
+        """validate_key/validate_prefix enforcement is part of the contract
+        for EVERY adapter (decision #5) — validation raises before any I/O,
+        so this is backend-free and pins that no adapter can drop it."""
+        for key in ("", "/abs/path", "../evil", "a/../b", "a\\b", "C:/evil"):
+            with pytest.raises(AdapterError):
+                await adapter.put(key, b"x")
+            with pytest.raises(AdapterError):
+                await adapter.get(key)
+            with pytest.raises(AdapterError):
+                await adapter.delete(key)
+        for prefix in ("/abs", "../x", "a/../b", "a\\b"):
+            with pytest.raises(AdapterError):
+                await adapter.list(prefix)
 
     # -- list ----------------------------------------------------------
 

@@ -280,6 +280,37 @@ class TestS3FailureInjection:
         assert len(no_sleep) == 1  # one backoff between the two attempts
         stub.assert_no_pending_responses()
 
+    async def test_unlock_deletes_own_lock(self):
+        """Held lock + our own payload on read-back -> delete_object issued
+        (assert_no_pending_responses proves the delete was consumed)."""
+        adapter, stub = _stubbed_adapter()
+        stub.add_response("put_object", {}, None)  # conditional PUT acquires
+        stub.add_response(
+            "get_object", {"Body": _body(make_lock_payload("dev-a", 300))},
+            {"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        stub.add_response("delete_object", {}, {"Bucket": "bkt", "Key": LOCK_KEY})
+        with stub:
+            assert await adapter.lock(ttl_s=300) is True
+            await adapter.unlock()
+        stub.assert_no_pending_responses()
+
+    async def test_unlock_never_deletes_foreign_lock(self):
+        """Our lock was stolen mid-hold; unlock reads the thief's payload and
+        must NOT delete_object — no delete is stubbed, so an attempted delete
+        would fail the test (always-on twin of the docker-gated conformance
+        case test_unlock_after_lock_stolen_never_deletes_thief_lock)."""
+        adapter, stub = _stubbed_adapter()
+        stub.add_response("put_object", {}, None)  # conditional PUT acquires
+        stub.add_response(
+            "get_object", {"Body": _body(make_lock_payload("dev-thief", 300))},
+            {"Bucket": "bkt", "Key": LOCK_KEY},
+        )
+        with stub:
+            assert await adapter.lock(ttl_s=300) is True
+            await adapter.unlock()  # foreign owner -> leaves the lock
+        stub.assert_no_pending_responses()
+
     def test_encrypt_default_on(self):
         assert S3Adapter.encrypt_default is True  # spec §5
         assert S3Adapter.name == "s3"
