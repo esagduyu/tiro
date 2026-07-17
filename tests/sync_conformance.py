@@ -143,6 +143,22 @@ class AdapterConformance:
         finally:
             await other.aclose()
 
+    async def test_unlock_after_lock_stolen_never_deletes_thief_lock(
+        self, adapter, make_adapter
+    ):
+        """A device whose lock expired mid-hold must not delete the live lock
+        of the device that stole it — unlock()'s owner check is the only
+        guard (decision #4: never removes a foreign lock)."""
+        assert await adapter.lock(ttl_s=300) is True
+        # Simulate expiry-mid-hold: a thief's fresh lock replaces ours.
+        await adapter.put(LOCK_KEY, make_lock_payload("dev-thief", 300))
+        await adapter.unlock()  # owner mismatch -> must leave the thief's lock
+        other = make_adapter("dev-other")
+        try:
+            assert await other.lock(ttl_s=300) is False  # thief's lock live
+        finally:
+            await other.aclose()
+
     # -- metadata --------------------------------------------------------
 
     async def test_encrypt_default_declared(self, adapter):
