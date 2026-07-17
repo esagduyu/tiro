@@ -812,3 +812,273 @@ def test_codec_for_config_plain_and_identity_required(test_config):
     test_config.sync_identity = ""
     with pytest.raises(SyncConfigError, match="sync_identity"):
         codec_for_config(test_config)
+
+
+# --- Task 4: full sync_cycle — push ordering, format pin, compaction/GC ------
+
+
+def _cycle_cfg(config, backend_root):
+    config.sync_backend = "filesystem"
+    config.sync_path = str(backend_root)
+    return config
+
+
+async def test_full_cycle_pushes_local_state(initialized_library, tmp_path):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.crypto import parse_format_json
+    from tiro.sync.engine import (
+        get_or_create_device,
+        read_sync_state,
+        sync_cycle,
+    )
+    from tiro.sync.snapshot import device_key, parse_device_doc
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+
+    report = await sync_cycle(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_ops > 0
+    assert report.pushed_objects > 0
+    # Plaintext auto-init wrote format.json.
+    fmt = parse_format_json((backend / "format.json").read_text())
+    assert fmt.encryption == "none"
+    device_id, _name = get_or_create_device(cfg)
+    doc = parse_device_doc(
+        device_id, (backend / device_key(device_id)).read_text())
+    assert doc.last_seq == 1
+    assert doc.acked == {}
+    state = read_sync_state(cfg)
+    assert state["self"]["last_seq"] == 1
+    assert state["last_cycle"]["result"] == "ok"
+    # HONEST first-cycle contract: the no-snapshot-yet rule takes a snapshot
+    # immediately, and its GC deletes the just-pushed, fully-acked segment —
+    # so journal/ is EMPTY and one snapshot manifest exists.
+    assert len(list(backend.glob("snapshots/*/manifest.age"))) == 1
+    assert list(backend.glob("journal/**/*.age")) == []
+
+    # Second cycle: idempotent — nothing pushed, no new segment or snapshot.
+    report2 = await sync_cycle(cfg)
+    assert report2.result == "ok"
+    assert report2.pushed_ops == 0
+    assert report2.pushed_objects == 0
+    assert list(backend.glob("journal/**/*.age")) == []
+    assert len(list(backend.glob("snapshots/*/manifest.age"))) == 1
+    assert read_sync_state(cfg)["self"]["last_seq"] == 1
+
+
+async def test_cycle_skips_when_backend_lock_held(initialized_library,
+                                                  tmp_path):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+    holder = adapter_for_config(cfg)
+    assert await holder.lock(120) is True
+    try:
+        report = await sync_cycle(cfg)
+    finally:
+        await holder.unlock()
+
+    assert report.result == "skipped_lock"
+    assert "backend" in report.reason
+    assert report.pushed_ops == 0
+    assert list(backend.glob("journal/**/*.age")) == []
+
+
+async def test_cycle_in_process_lock(initialized_library, tmp_path):
+    from tiro.sync import engine
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+
+    assert engine._CYCLE_LOCK.acquire(blocking=False)
+    try:
+        assert engine.sync_cycle_running() is True
+        report = await engine.sync_cycle(cfg)
+    finally:
+        engine._CYCLE_LOCK.release()
+
+    assert engine.sync_cycle_running() is False
+    assert report.result == "skipped_lock"
+    assert "in this process" in report.reason
+    # The backend was never touched (no adapter was even constructed).
+    assert not backend.exists()
+
+
+def _fail_journal_puts(monkeypatch):
+    """Patch AuditedAdapter.put to fail on journal/ keys until disarmed."""
+    orig_put = AuditedAdapter.put
+    armed = {"on": True}
+
+    async def flaky_put(self, key, data):
+        if armed["on"] and key.startswith("journal/"):
+            raise OSError("disk full")
+        return await orig_put(self, key, data)
+
+    monkeypatch.setattr(AuditedAdapter, "put", flaky_put)
+    return armed
+
+
+async def test_push_failure_leaves_shadow_unsaved(initialized_library,
+                                                  tmp_path, monkeypatch):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+    armed = _fail_journal_puts(monkeypatch)
+
+    report = await sync_cycle(cfg)
+    assert report.result == "error"
+
+    # The shadow was NOT saved on the failed cycle: the next cycle
+    # re-derives the same diff and pushes it.
+    armed["on"] = False
+    report2 = await sync_cycle(cfg)
+    assert report2.result == "ok"
+    assert report2.pushed_ops > 0
+
+
+async def test_cycle_survives_lock_absence(initialized_library, tmp_path,
+                                           monkeypatch):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+
+    async def broken_lock(self, ttl_s):
+        raise OSError("lock backend down")
+
+    monkeypatch.setattr(AuditedAdapter, "lock", broken_lock)
+    report = await sync_cycle(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_ops > 0
+
+
+def _age_format_json():
+    """A syntactically-valid AGE-mode format.json (weak kdf, cheap)."""
+    import base64
+
+    from tiro.migrations import new_ulid
+    from tiro.sync.crypto import (
+        AgeCodec,
+        KdfParams,
+        build_format_json,
+        derive_recovery_code,
+    )
+
+    kdf = KdfParams(salt_b64=base64.b64encode(b"0123456789abcdef").decode(),
+                    m=8, t=1, p=1)
+    recipient = AgeCodec(derive_recovery_code("x", kdf)).recipient
+    return build_format_json(new_ulid(), kdf=kdf, age_recipient=recipient)
+
+
+async def test_cycle_encryption_pin_mismatch(initialized_library, tmp_path):
+    from tests.test_reconcile import _ingest
+    from tiro.migrations import new_ulid
+    from tiro.sync.crypto import build_format_json
+    from tiro.sync.engine import sync_cycle
+
+    # (a) Backend says AGE, local pin resolves OFF (filesystem + auto).
+    backend_a = tmp_path / "backend-a"
+    backend_a.mkdir(parents=True)
+    (backend_a / "format.json").write_text(_age_format_json())
+    cfg = _cycle_cfg(initialized_library, backend_a)
+    _ingest(cfg)
+
+    report = await sync_cycle(cfg)
+    assert report.result == "needs_attention"
+    assert "encryption mode mismatch" in report.reason
+    assert report.pushed_ops == 0
+    assert list(backend_a.glob("journal/**/*.age")) == []
+    assert list(backend_a.glob("devices/*.json")) == []
+
+    # (b) Backend says plaintext, local pin is ON.
+    backend_b = tmp_path / "backend-b"
+    backend_b.mkdir(parents=True)
+    (backend_b / "format.json").write_text(build_format_json(new_ulid()))
+    cfg.sync_path = str(backend_b)
+    cfg.sync_encrypt = "on"
+
+    report_b = await sync_cycle(cfg)
+    assert report_b.result == "needs_attention"
+    assert "encryption mode mismatch" in report_b.reason
+    assert report_b.pushed_ops == 0
+    assert list(backend_b.glob("journal/**/*.age")) == []
+    assert list(backend_b.glob("devices/*.json")) == []
+
+
+async def test_cycle_records_last_cycle_always(initialized_library, tmp_path,
+                                               monkeypatch):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import read_sync_state, sync_cycle
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+    _fail_journal_puts(monkeypatch)
+
+    report = await sync_cycle(cfg)
+
+    assert report.result == "error"
+    last = read_sync_state(cfg)["last_cycle"]
+    assert last["result"] == "error"
+    assert last["finished_at"]
+
+
+async def test_compaction_snapshot_and_gc(initialized_library, tmp_path):
+    from tests.test_reconcile import _ingest
+    from tiro.sync.crypto import PlainCodec
+    from tiro.sync.engine import get_or_create_device, sync_cycle
+    from tiro.sync.snapshot import decode_snapshot, journal_key
+
+    backend = tmp_path / "backend"
+    cfg = _cycle_cfg(initialized_library, backend)
+    _ingest(cfg)
+    device_id, _name = get_or_create_device(cfg)
+
+    report = await sync_cycle(cfg)
+    assert report.result == "ok"
+
+    # Exactly one snapshot; it covers our seq-1 segment.
+    snaps = list(backend.glob("snapshots/*/manifest.age"))
+    assert len(snaps) == 1
+    doc = decode_snapshot(snaps[0].read_bytes(), PlainCodec())
+    assert doc.covers == {device_id: 1}
+    # objects/ holds EXACTLY the snapshot's referenced addresses (the pushed
+    # segment referenced the same blobs; object GC removed nothing live and
+    # left nothing extra).
+    on_disk = {p.name[: -len(".age")]
+               for p in backend.glob("objects/*/*.age")}
+    assert on_disk == set(doc.objects.values())
+    # The seq-1 segment was snapshot-covered and self-acked -> GC'd.
+    assert list(backend.glob("journal/**/*.age")) == []
+
+    # A second article: pushed as segment seq 2, and the cadence rule
+    # (1 op-segment since a fresh snapshot) takes NO second snapshot, so
+    # the segment survives.
+    _ingest(cfg, title="Second Article", url="https://example.com/second")
+    report2 = await sync_cycle(cfg)
+    assert report2.result == "ok"
+    assert report2.pushed_ops > 0
+    assert (backend / journal_key(device_id, 2)).exists()
+    assert len(list(backend.glob("snapshots/*/manifest.age"))) == 1
+
+
+async def test_cycle_unconfigured_is_clean_error(initialized_library):
+    from tiro.sync.engine import sync_cycle
+
+    # sync_path defaults to "" — filesystem backend unconfigured.
+    report = await sync_cycle(initialized_library)
+
+    assert report.result == "error"
+    assert report.reason.startswith("not configured")

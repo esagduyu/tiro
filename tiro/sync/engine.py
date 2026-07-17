@@ -16,6 +16,7 @@ import logging
 import platform
 import re
 import sqlite3
+import threading
 from dataclasses import asdict, dataclass
 from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
@@ -24,7 +25,7 @@ from datetime import UTC, datetime
 from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import new_ulid
-from tiro.sync.journal import FileDel, FilePut, Meta, RowDel
+from tiro.sync.journal import FileDel, FilePut, HLCClock, Meta, RowDel
 
 logger = logging.getLogger(__name__)
 
@@ -645,3 +646,381 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         watermarks[dev] = seq
         update_self_state(config, watermarks=watermarks)
     return True
+
+
+# --- The cycle itself (S5.4): in-process lock, format pin, push, compaction --
+
+#: One cycle at a time per process. A threading.Lock, NOT asyncio.Lock,
+#: deliberately (recorded decision D-S5-1(b)): an asyncio.Lock binds its
+#: event loop on first use and breaks under repeated asyncio.run() from
+#: CLI/tests; threading.Lock is loop-agnostic and the cycle never awaits
+#: while acquiring (non-blocking acquire only).
+_CYCLE_LOCK = threading.Lock()
+
+
+def sync_cycle_running() -> bool:
+    """True while a cycle runs in this process (routes use this for 409)."""
+    return _CYCLE_LOCK.locked()
+
+
+async def _open_backend(config: TiroConfig, adapter) -> tuple:
+    """Per-cycle format.json check -> (fmt_or_None, codec).
+
+    This discharges the S3 downgrade-resistance obligation (open_format's
+    docstring): format.json is plaintext and unauthenticated, so the LOCAL
+    encryption pin (resolve_encryption) is the authority — a backend doc
+    that disagrees is refused BEFORE any codec is constructed, so no
+    identity/passphrase is ever needed just to detect the mismatch.
+
+    A missing format.json on a plaintext-pinned backend is auto-initialized
+    (plaintext form only — an encrypted backend is only ever initialized by
+    the explicit setup ceremony, Task 5's init_backend)."""
+    from tiro.sync.crypto import (
+        PlainCodec,
+        SyncFormatError,
+        build_format_json,
+        parse_format_json,
+    )
+    from tiro.sync.snapshot import FORMAT_KEY
+
+    raw = await _get_or_none(adapter, FORMAT_KEY)
+    if raw is None:
+        if resolve_encryption(config):
+            raise SyncConfigError(
+                "backend has no format.json — run `tiro sync setup`")
+        text = build_format_json(new_ulid())
+        await adapter.put(FORMAT_KEY, text.encode("utf-8"))
+        logger.info("Sync: auto-initialized plaintext backend format.json")
+        return parse_format_json(text), PlainCodec()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SyncFormatError(f"format.json is not valid UTF-8: {e}") from e
+    fmt = parse_format_json(text)
+    # ENCRYPTION PIN — checked before any codec construction (order matters:
+    # detecting a tampered/downgraded format.json must not require a local
+    # identity to exist).
+    pin = "age" if resolve_encryption(config) else "none"
+    if fmt.encryption != pin:
+        raise SyncFormatError(
+            f"encryption mode mismatch: backend format.json says "
+            f"{fmt.encryption!r} but this device is pinned {pin!r} — "
+            "possible tamper/downgrade or wrong local sync_encrypt; "
+            "refusing to sync")
+    codec = codec_for_config(config)
+    if fmt.encryption == "age" and codec.recipient != fmt.age_recipient:
+        raise SyncFormatError(
+            "sync identity does not match this backend's recipient")
+    return fmt, codec
+
+
+async def _put_device_doc(config: TiroConfig, adapter, device_id: str,
+                          name: str, *, last_seq: int | None = None) -> None:
+    """Write THIS device's registry doc — ALWAYS plaintext (spec §5).
+
+    Refreshed every cycle even when nothing was pushed: last_seen keeps the
+    device out of plan_gc's 90-day dead-device drop, and acked (= our
+    watermarks, remote ids only — self is excluded by construction, since
+    watermarks only ever hold remote device ids) is what lets OTHER devices'
+    GC delete segments we have applied."""
+    import tiro
+    from tiro.sync.snapshot import DeviceInfo, device_key, encode_device_doc
+
+    state = read_sync_state(config)
+    if last_seq is None:
+        last_seq = (state["self"] or {}).get("last_seq") or 0
+    info = DeviceInfo(
+        device_id=device_id,
+        name=name,
+        last_seen=_now_iso(),
+        last_seq=last_seq,
+        app_version=tiro.__version__,
+        acked=state["watermarks"],
+    )
+    await adapter.put(device_key(device_id),
+                      encode_device_doc(info).encode("utf-8"))
+
+
+async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
+                report: CycleReport) -> None:
+    """Derive + push local changes (spec §6.4). The upload order is FROZEN
+    crash-safety ordering: objects FIRST -> journal segment -> device doc ->
+    LOCAL shadow+state LAST. A crash anywhere leaves either unreferenced
+    objects (harmless, GC'd) or an unacknowledged segment the next cycle's
+    unchanged shadow re-derives — never a shadow that claims state the
+    backend does not hold."""
+    from tiro.sync.manifest import (
+        build_manifest,
+        diff,
+        hydrate_bodies,
+        load_shadow,
+        save_shadow,
+    )
+    from tiro.sync.reconcile import reconcile_library
+    from tiro.sync.snapshot import encode_segment, journal_key, object_key
+
+    device_id, name = get_or_create_device(config)
+
+    def _derive():
+        reconcile_library(config)  # spec §6.3: the S1 pass runs first
+        manifest = build_manifest(config)
+        shadow = load_shadow(config)
+        ops = hydrate_bodies(config, diff(manifest, shadow, clock=clock))
+        return manifest, ops
+
+    manifest, local_ops = await asyncio.to_thread(_derive)
+    all_ops = list(local_ops) + list(clock_state.get("emitted_ops", []))
+    if not all_ops:
+        # Heartbeat: last_seen + acked STILL refresh (GC ack progression
+        # depends on it), and the shadow is re-saved (cheap, idempotent).
+        await _put_device_doc(config, adapter, device_id, name)
+        await asyncio.to_thread(save_shadow, config, manifest, clock=clock)
+        return
+    seg_blob, obj_blobs = encode_segment(all_ops, codec)
+    for h in sorted(obj_blobs):  # 1. objects FIRST
+        await adapter.put(object_key(h), obj_blobs[h])
+        report.pushed_objects += 1
+    seq = read_sync_state(config)["self"]["last_seq"] + 1
+    await adapter.put(journal_key(device_id, seq), seg_blob)  # 2. segment
+    await _put_device_doc(config, adapter, device_id, name,  # 3. device doc
+                          last_seq=seq)
+    await asyncio.to_thread(  # 4. local shadow + state LAST
+        save_shadow, config, manifest, clock=clock)
+    update_self_state(config, last_seq=seq)
+    report.pushed_ops += len(all_ops)
+
+
+async def _maybe_compact(config: TiroConfig, adapter, codec,
+                         report: CycleReport) -> None:
+    """Best-effort snapshot + GC (spec §6.5): ANY failure defers the whole
+    compaction to a later cycle with a warning — including build_snapshot's
+    SnapshotError on an unreadable entry (the S3 obligation 'defer the cycle
+    or exclude consciously': we DEFER). Never fails the cycle."""
+    try:
+        await _compact(config, adapter, codec, report)
+    except Exception as e:
+        logger.warning("Sync compaction skipped: %s", e)
+        report.warnings.append(f"compaction skipped: {e}")
+
+
+async def _compact(config: TiroConfig, adapter, codec,
+                   report: CycleReport) -> None:
+    from tiro.sync.manifest import Shadow, build_manifest, diff, hydrate_bodies
+    from tiro.sync.snapshot import (
+        build_snapshot,
+        decode_snapshot,
+        encode_object,
+        encode_snapshot,
+        object_key,
+        parse_device_doc,
+        parse_journal_key,
+        plan_gc,
+        plan_object_gc,
+        segment_object_refs,
+        should_snapshot,
+        snapshot_key,
+    )
+
+    device_id, _name = get_or_create_device(config)
+
+    # 1. Latest snapshot doc (ULID ids sort by creation time).
+    snap_ids = sorted({key.split("/")[1]
+                       for key in await adapter.list("snapshots/")
+                       if key.count("/") >= 2})
+    covers: dict[str, int] = {}
+    created_at: str | None = None
+    if snap_ids:
+        latest = decode_snapshot(
+            await adapter.get(snapshot_key(snap_ids[-1])), codec)
+        covers = latest.covers
+        created_at = latest.created_at
+
+    # 2. Cadence — ops-since proxy: journal segments past the latest covers.
+    segment_keys = await adapter.list("journal/")
+    ops_since = 0
+    for key in segment_keys:
+        try:
+            dev, seq = parse_journal_key(key)
+        except Exception as e:
+            report.warnings.append(f"unrecognized journal key {key}: {e}")
+            continue
+        if seq > covers.get(dev, -1):
+            ops_since += 1
+    if not should_snapshot(ops_since, created_at):
+        return
+
+    # 3. Build the snapshot doc from the CURRENT full state. object_hashes
+    # comes from POST-hydration FilePuts (blob addresses, full-file space —
+    # build_snapshot's docstring contract for article entries).
+    def _derive():
+        manifest = build_manifest(config)
+        hydrated = hydrate_bodies(config, diff(manifest, Shadow()))
+        return manifest, hydrated
+
+    manifest, hydrated = await asyncio.to_thread(_derive)
+    file_puts = [op for op in hydrated if isinstance(op, FilePut)]
+    object_hashes = {op.path_hint: op.object_hash for op in file_puts}
+    bodies_by_address = {op.object_hash: op.body for op in file_puts}
+    state = read_sync_state(config)
+    covers_new = {device_id: (state["self"] or {}).get("last_seq") or 0,
+                  **state["watermarks"]}
+    snapshot_id = new_ulid()
+    doc_text, addresses = build_snapshot(
+        manifest, snapshot_id=snapshot_id, created_by=device_id,
+        covers=covers_new, object_hashes=object_hashes)
+
+    # 4. Upload: objects FIRST, then the snapshot doc (same crash-safety
+    # ordering as segments).
+    for address in sorted(addresses):
+        body = bodies_by_address.get(address)
+        if body is None:
+            report.warnings.append(
+                "compaction skipped: no body for snapshot object "
+                f"{address!r}")
+            return
+        h, blob = encode_object(body, codec)
+        if h != address:  # pragma: no cover - encode_object is deterministic
+            report.warnings.append(
+                f"compaction skipped: object hash drift for {address!r}")
+            return
+        await adapter.put(object_key(h), blob)
+    await adapter.put(snapshot_key(snapshot_id),
+                      encode_snapshot(doc_text, codec))
+
+    # 5. Journal/snapshot GC — plan_gc is pure, the engine executes it and
+    # SURFACES its warnings to status (S3 obligation #6).
+    devices: dict = {}
+    for key in await adapter.list("devices/"):
+        tail = key[len("devices/"):]
+        if not tail.endswith(".json") or "/" in tail:
+            continue
+        dev_id = tail[: -len(".json")]
+        try:
+            raw = await adapter.get(key)
+            devices[dev_id] = parse_device_doc(dev_id, raw.decode("utf-8"))
+        except Exception as e:
+            report.warnings.append(f"unreadable device doc {key}: {e}")
+    segment_keys = await adapter.list("journal/")
+    snap_docs = {snapshot_id: None}  # id -> SnapshotDoc (new one included)
+    for sid in snap_ids:
+        snap_docs[sid] = None
+    for sid in list(snap_docs):
+        snap_docs[sid] = decode_snapshot(
+            await adapter.get(snapshot_key(sid)), codec)
+    plan = plan_gc(
+        devices=devices,
+        segment_keys=segment_keys,
+        snapshot_covers={sid: d.covers for sid, d in snap_docs.items()},
+    )
+    for key in plan.delete_segments:
+        await adapter.delete(key)
+    for key in plan.delete_snapshots:
+        await adapter.delete(key)
+    report.warnings.extend(plan.warnings)
+    if plan.dropped_devices:
+        logger.info("Sync GC: dead devices no longer block journal GC: %s",
+                    ", ".join(plan.dropped_devices))
+
+    # 6. Object GC in ADDRESS space (S3 obligation #4): live = every
+    # REMAINING snapshot doc's addresses ∪ every REMAINING segment's refs
+    # (via the shared NEL-safe pre-scan). A fetch/decode failure aborts
+    # object GC — never delete on partial knowledge.
+    deleted_snapshots = set(plan.delete_snapshots)
+    live: set[str] = set()
+    for sid, doc in snap_docs.items():
+        if snapshot_key(sid) in deleted_snapshots:
+            continue
+        live.update(doc.objects.values())
+    deleted_segments = set(plan.delete_segments)
+    for key in segment_keys:
+        if key in deleted_segments:
+            continue
+        try:
+            blob = await adapter.get(key)
+            live.update(segment_object_refs(blob, codec))
+        except Exception as e:
+            report.warnings.append(
+                f"object GC skipped: cannot read segment {key}: {e}")
+            return
+    for key in plan_object_gc(live, await adapter.list("objects/")):
+        await adapter.delete(key)
+
+
+def _record_cycle(config: TiroConfig, report: CycleReport) -> None:
+    """Persist the report as last_cycle_json — best-effort, never raises."""
+    try:
+        get_or_create_device(config)
+        update_self_state(config, last_cycle=report.as_dict())
+    except Exception as e:
+        logger.warning("Could not record sync cycle outcome: %s", e)
+
+
+async def sync_cycle(config: TiroConfig, adapter=None, *,
+                     accept_mass_delete: bool = False) -> CycleReport:
+    """One full sync cycle (spec §6): open backend -> pull -> push ->
+    compact. NEVER raises — every outcome is a CycleReport, persisted as
+    last_cycle (except the in-process-lock skip, which does not own the
+    state and returns unrecorded)."""
+    from tiro.sync.snapshot import QUARANTINE_ERRORS
+
+    report = CycleReport()
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        report.result = "skipped_lock"
+        report.reason = "another cycle is running in this process"
+        report.finished_at = _now_iso()
+        return report  # not recorded — we don't own the state
+    try:
+        if adapter is None:
+            adapter = adapter_for_config(config)
+        _fmt, codec = await _open_backend(config, adapter)
+        got_lock: bool | None = False
+        try:
+            got_lock = await adapter.lock(LOCK_TTL_S)
+        except Exception as e:
+            logger.warning(
+                "Sync lock unavailable (%s) — proceeding lockless "
+                "(safe: per-device journals, spec §6.1)", e)
+            got_lock = None
+        if got_lock is False:
+            report.result = "skipped_lock"
+            report.reason = "backend lock held by another device"
+        else:
+            try:
+                device_id, _ = get_or_create_device(config)
+                clock = HLCClock(device_id)
+                clock_state: dict = {}
+                # S5.5 adds: repair-epoch detection + empty-library
+                # auto-bootstrap here (D-S5-3)
+                ok = await _pull(config, adapter, codec, clock, clock_state,
+                                 report,
+                                 accept_mass_delete=accept_mass_delete)
+                if ok:
+                    await _push(config, adapter, codec, clock, clock_state,
+                                report)
+                    await _maybe_compact(config, adapter, codec, report)
+            finally:
+                if got_lock:
+                    try:
+                        await adapter.unlock()
+                    except Exception as e:
+                        logger.warning("Sync unlock failed: %s", e)
+    except SyncConfigError as e:
+        report.result = "error"
+        report.reason = f"not configured: {e}"
+    except QUARANTINE_ERRORS as e:
+        report.result = "needs_attention"
+        report.reason = str(e)[:300]
+        logger.error("Sync quarantine: %s", e)
+    except Exception as e:
+        # _pull may legitimately raise sqlite3.OperationalError (M2
+        # semantics, Task 3-fix): this branch correctly classifies it as a
+        # retryable "error" — the watermark was deliberately NOT advanced,
+        # so the next cycle re-applies the whole segment idempotently.
+        logger.error("Sync cycle failed: %s", e, exc_info=True)
+        report.result = "error"
+        report.reason = str(e)[:300]
+    finally:
+        _CYCLE_LOCK.release()
+    report.finished_at = _now_iso()
+    _record_cycle(config, report)
+    return report
