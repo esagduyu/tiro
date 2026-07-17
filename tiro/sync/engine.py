@@ -495,12 +495,14 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     segment, mass-delete guard) — report.result/reason say why. Watermarks
     persist PER SEGMENT (D19#2: minimizes the crash-replay window; the
     conflict-file same-content dedupe covers the residual window)."""
-    from tiro.sync.manifest import load_shadow
+    from tiro.sync.manifest import clear_shadow, load_shadow
     from tiro.sync.merge import apply_ops
     from tiro.sync.snapshot import (
+        FORMAT_KEY,
         QUARANTINE_ERRORS,
         SnapshotError,
         decode_segment,
+        device_key,
         object_key,
         parse_device_doc,
         parse_journal_key,
@@ -508,7 +510,31 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     )
 
     device_id, _name = get_or_create_device(config)
-    watermarks = dict(read_sync_state(config)["watermarks"])
+    state = read_sync_state(config)
+    watermarks = dict(state["watermarks"])
+
+    # 0. Repair-epoch detection (spec §6.6 / S5 plan decision #5): we have
+    # pushed before (last_seq > 0) yet our own device doc is GONE while
+    # format.json still exists — a repair wiped the backend elsewhere.
+    # Reset the SYNC BOOKKEEPING only — shadow entries/tombstones
+    # (clear_shadow preserves alias + metats rows), last_seq, watermarks —
+    # so this cycle re-diffs and re-pushes the full local state. LOCAL DATA
+    # UNTOUCHED. last_seq=0 is safe against seq collision: the repair wiped
+    # journal/, and _push's backend-max allocation covers any stragglers.
+    if ((state["self"] or {}).get("last_seq") or 0) > 0:
+        own_doc = await _get_or_none(adapter, device_key(device_id))
+        if own_doc is None and (
+                await _get_or_none(adapter, FORMAT_KEY)) is not None:
+            logger.warning(
+                "Sync: repair epoch detected (own device doc gone, "
+                "format.json present) — resetting shadow/last_seq/"
+                "watermarks for a full re-diff/re-push; local data "
+                "untouched")
+            await asyncio.to_thread(clear_shadow, config)
+            update_self_state(config, last_seq=0, watermarks={})
+            watermarks = {}
+            report.warnings.append(
+                "repair epoch detected — full re-diff/re-push")
 
     # 1. Device-registry refresh from devices/*.json (skip self). The
     # registry is ADVISORY (S5.3 review n4): a garbage doc OR a transient
@@ -845,15 +871,61 @@ async def _maybe_compact(config: TiroConfig, adapter, codec,
         report.warnings.append(f"compaction skipped: {e}")
 
 
-async def _compact(config: TiroConfig, adapter, codec,
-                   report: CycleReport) -> None:
+async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
+                                 device_id: str, covers: dict):
+    """Build a snapshot of the CURRENT full local state and upload it —
+    objects FIRST, then the doc (the frozen crash-safety ordering). Returns
+    (snapshot_id, objects_uploaded, manifest). Raises SnapshotError when a
+    snapshot object's body is unavailable or drifts: _compact defers via
+    _maybe_compact's catch-all (warning message shape preserved), repair()
+    surfaces it through the cycle taxonomy. Extracted from _compact in
+    S5.5 — behavior-identical for compaction.
+
+    object_hashes comes from POST-hydration FilePuts (blob addresses,
+    full-file space — build_snapshot's docstring contract for articles)."""
     from tiro.sync.manifest import Shadow, build_manifest, diff, hydrate_bodies
     from tiro.sync.snapshot import (
+        SnapshotError,
         build_snapshot,
-        decode_snapshot,
         encode_object,
         encode_snapshot,
         object_key,
+        snapshot_key,
+    )
+
+    def _derive():
+        manifest = build_manifest(config)
+        hydrated = hydrate_bodies(config, diff(manifest, Shadow()))
+        return manifest, hydrated
+
+    manifest, hydrated = await asyncio.to_thread(_derive)
+    file_puts = [op for op in hydrated if isinstance(op, FilePut)]
+    object_hashes = {op.path_hint: op.object_hash for op in file_puts}
+    bodies_by_address = {op.object_hash: op.body for op in file_puts}
+    snapshot_id = new_ulid()
+    doc_text, addresses = build_snapshot(
+        manifest, snapshot_id=snapshot_id, created_by=device_id,
+        covers=covers, object_hashes=object_hashes)
+    uploaded = 0
+    for address in sorted(addresses):
+        body = bodies_by_address.get(address)
+        if body is None:
+            raise SnapshotError(
+                f"no body for snapshot object {address!r}")
+        h, blob = encode_object(body, codec)
+        if h != address:  # pragma: no cover - encode_object is deterministic
+            raise SnapshotError(f"object hash drift for {address!r}")
+        await adapter.put(object_key(h), blob)
+        uploaded += 1
+    await adapter.put(snapshot_key(snapshot_id),
+                      encode_snapshot(doc_text, codec))
+    return snapshot_id, uploaded, manifest
+
+
+async def _compact(config: TiroConfig, adapter, codec,
+                   report: CycleReport) -> None:
+    from tiro.sync.snapshot import (
+        decode_snapshot,
         parse_device_doc,
         parse_journal_key,
         plan_gc,
@@ -891,49 +963,21 @@ async def _compact(config: TiroConfig, adapter, codec,
     if not should_snapshot(ops_since, created_at):
         return
 
-    # 3. Build the snapshot doc from the CURRENT full state. object_hashes
-    # comes from POST-hydration FilePuts (blob addresses, full-file space —
-    # build_snapshot's docstring contract for article entries).
+    # 3+4. Build + upload the snapshot from the CURRENT full state
+    # (_upload_local_snapshot — objects first, then the doc; its
+    # SnapshotError on an unreadable/drifting body defers the whole
+    # compaction via _maybe_compact's catch).
     # m4: the snapshot's manifest may be NEWER than its covers — edits made
     # between this cycle's push and this compaction ride in the snapshot
     # while covers only records pushed seqs. Benign and understatement-safe:
     # the follow-up segment re-carries those edits, and the same-content
     # conflict dedupe absorbs the overlap on devices that bootstrapped from
     # the snapshot.
-    def _derive():
-        manifest = build_manifest(config)
-        hydrated = hydrate_bodies(config, diff(manifest, Shadow()))
-        return manifest, hydrated
-
-    manifest, hydrated = await asyncio.to_thread(_derive)
-    file_puts = [op for op in hydrated if isinstance(op, FilePut)]
-    object_hashes = {op.path_hint: op.object_hash for op in file_puts}
-    bodies_by_address = {op.object_hash: op.body for op in file_puts}
     state = read_sync_state(config)
     covers_new = {device_id: (state["self"] or {}).get("last_seq") or 0,
                   **state["watermarks"]}
-    snapshot_id = new_ulid()
-    doc_text, addresses = build_snapshot(
-        manifest, snapshot_id=snapshot_id, created_by=device_id,
-        covers=covers_new, object_hashes=object_hashes)
-
-    # 4. Upload: objects FIRST, then the snapshot doc (same crash-safety
-    # ordering as segments).
-    for address in sorted(addresses):
-        body = bodies_by_address.get(address)
-        if body is None:
-            report.warnings.append(
-                "compaction skipped: no body for snapshot object "
-                f"{address!r}")
-            return
-        h, blob = encode_object(body, codec)
-        if h != address:  # pragma: no cover - encode_object is deterministic
-            report.warnings.append(
-                f"compaction skipped: object hash drift for {address!r}")
-            return
-        await adapter.put(object_key(h), blob)
-    await adapter.put(snapshot_key(snapshot_id),
-                      encode_snapshot(doc_text, codec))
+    snapshot_id, _uploaded, _manifest = await _upload_local_snapshot(
+        config, adapter, codec, device_id, covers_new)
 
     # 5. Journal/snapshot GC — plan_gc is pure, the engine executes it and
     # SURFACES its warnings to status (S3 obligation #6).
@@ -1038,8 +1082,25 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 device_id, _ = get_or_create_device(config)
                 clock = HLCClock(device_id)
                 clock_state: dict = {}
-                # S5.5 adds: repair-epoch detection + empty-library
-                # auto-bootstrap here (D-S5-3)
+                # Empty-library auto-bootstrap (D-S5-3): a fresh device
+                # pointed at a populated backend materializes the latest
+                # snapshot BEFORE the pull — the covers-derived watermarks
+                # then prevent the journal-gap refusal on GC'd history, and
+                # the normal pull folds the journal tails in. Restricted to
+                # the ZERO-article case deliberately: folding a snapshot
+                # into a non-empty never-synced library would mint a
+                # conflict file per differing article — that merge-two-
+                # libraries flow stays behind the explicit setup ceremony
+                # (bootstrap(), D-S5-3).
+                if (_count_articles(config) == 0
+                        and not read_sync_state(config)["watermarks"]
+                        and await adapter.list("snapshots/")):
+                    logger.info(
+                        "Sync: empty library with no sync history and a "
+                        "populated backend — auto-bootstrapping from the "
+                        "latest snapshot (D-S5-3)")
+                    await _materialize_latest_snapshot(
+                        config, adapter, codec, report)
                 ok = await _pull(config, adapter, codec, clock, clock_state,
                                  report,
                                  accept_mass_delete=accept_mass_delete)
@@ -1096,4 +1157,257 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                     logger.warning("Sync adapter close failed: %s", e)
         finally:
             _CYCLE_LOCK.release()
+    return report
+
+
+# --- Setup flows (S5.5): init/verify, bootstrap, repair ----------------------
+
+
+def _count_articles(config: TiroConfig) -> int:
+    conn = get_connection(config.db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    finally:
+        conn.close()
+
+
+async def init_backend(config: TiroConfig, adapter, passphrase: str, *,
+                       kdf_params: dict | None = None) -> str:
+    """First-device backend initialization (setup ceremony, spec §9).
+
+    Writes format.json and returns the recovery code ("" for a plaintext
+    backend). The CALLER (setup CLI/route) persists sync_identity — this
+    function never writes config. `kdf_params` is a TEST SEAM (weak Argon2id
+    params for test speed; a fresh random salt is minted either way) —
+    production callers never pass it."""
+    import base64
+    import os
+
+    from tiro.sync.crypto import (
+        AgeCodec,
+        KdfParams,
+        build_format_json,
+        derive_recovery_code,
+        new_kdf_params,
+    )
+    from tiro.sync.snapshot import FORMAT_KEY
+
+    if await _get_or_none(adapter, FORMAT_KEY) is not None:
+        raise SyncConfigError(
+            "backend already initialized — join with the passphrase "
+            "instead, or run repair")
+    if not resolve_encryption(config):
+        await adapter.put(FORMAT_KEY,
+                          build_format_json(new_ulid()).encode("utf-8"))
+        return ""
+    if kdf_params is None:
+        kdf = new_kdf_params()
+    else:
+        kdf = KdfParams(
+            salt_b64=base64.b64encode(os.urandom(16)).decode("ascii"),
+            **kdf_params)
+    recovery = derive_recovery_code(passphrase, kdf)
+    recipient = AgeCodec(recovery).recipient
+    text = build_format_json(new_ulid(), kdf=kdf, age_recipient=recipient)
+    await adapter.put(FORMAT_KEY, text.encode("utf-8"))
+    return recovery
+
+
+async def verify_passphrase(config: TiroConfig, adapter,
+                            passphrase: str) -> str | None:
+    """Joining-device passphrase check -> the recovery code (the caller
+    persists it as sync_identity) on success, "" when the backend is
+    plaintext (no identity needed), or None on a wrong passphrase or an
+    uninitialized backend — callers distinguish None (refusal) from ""
+    (no identity needed). Clean refusal (spec §9 scenario 6): no exception
+    on a wrong passphrase, no partial state. SyncFormatError (e.g. a NEWER
+    sync_format) deliberately PROPAGATES — version refusal must be LOUD,
+    never disguised as "wrong passphrase"."""
+    from tiro.sync.crypto import (
+        AgeCodec,
+        CryptoError,
+        SyncFormatError,
+        derive_recovery_code,
+        parse_format_json,
+    )
+    from tiro.sync.snapshot import FORMAT_KEY
+
+    raw = await _get_or_none(adapter, FORMAT_KEY)
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        # Corruption, not a wrong passphrase — loud, like the version check.
+        raise SyncFormatError(f"format.json is not valid UTF-8: {e}") from e
+    fmt = parse_format_json(text)  # SyncFormatError propagates (loud)
+    if fmt.encryption == "none":
+        return ""
+    try:
+        rc = derive_recovery_code(passphrase, fmt.kdf)
+    except CryptoError:
+        return None
+    if AgeCodec(rc).recipient == fmt.age_recipient:
+        return rc
+    return None
+
+
+async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
+                                       report: CycleReport) -> bool:
+    """Materialize the backend's newest snapshot into the LOCAL library —
+    shared by bootstrap() and sync_cycle's empty-library auto-bootstrap
+    (D-S5-3). Returns False when the backend holds no snapshot.
+
+    Ops are stamped with materialize_ops' DEFAULT epoch-pinned clock
+    (HLC(0,n,'snapshot')) — NEVER a wall-time clock, which would outrank
+    and silently skip-as-stale every journal-tail op written before the
+    bootstrap moment (snapshot.py's docstring — the S3 obligation).
+    Watermarks come from the snapshot's covers with SELF filtered out: a
+    re-bootstrapping device must not watermark its own journal.
+    QUARANTINE_ERRORS propagate to the caller's taxonomy. Vector work:
+    none — materialized articles ride vector_status='pending' and the
+    existing vector-retry task."""
+    from tiro.sync.merge import apply_ops
+    from tiro.sync.snapshot import (
+        decode_object,
+        decode_snapshot,
+        materialize_ops,
+        object_key,
+        snapshot_key,
+    )
+
+    snap_ids = sorted({key.split("/")[1]
+                       for key in await adapter.list("snapshots/")
+                       if key.count("/") >= 2})
+    if not snap_ids:
+        return False
+    newest = snap_ids[-1]  # ULIDs sort by creation time
+    doc = decode_snapshot(await adapter.get(snapshot_key(newest)), codec)
+    objects_plain: dict[str, str] = {}
+    for addr in sorted(set(doc.objects.values())):
+        objects_plain[addr] = decode_object(
+            await adapter.get(object_key(addr)), codec, expected_hash=addr)
+    ops = materialize_ops(doc, objects_plain)  # DEFAULT epoch-pinned clock
+    device_id, _name = get_or_create_device(config)
+    apply_report = await asyncio.to_thread(
+        apply_ops, config, ops, guard=False, clock=HLCClock(device_id))
+    report.applied += apply_report.applied
+    report.conflicts += apply_report.conflicts
+    report.errors += apply_report.errors
+    watermarks = {d: s for d, s in doc.covers.items() if d != device_id}
+    update_self_state(config, watermarks=watermarks)
+    logger.info(
+        "Sync bootstrap: materialized snapshot %s (%d applied, "
+        "%d conflicts, %d errors)", newest, apply_report.applied,
+        apply_report.conflicts, apply_report.errors)
+    return True
+
+
+async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
+    """Explicit joining-device bootstrap (setup/CLI verb, spec §9):
+    materialize the backend's latest snapshot into an EMPTY library, fold in
+    the journal tails, then push. Refuses a NON-empty library (recorded as
+    an error report, no exception) — folding a snapshot into existing data
+    would mint a conflict file per differing article; that merge-two-
+    libraries flow stays behind the explicit setup ceremony (D-S5-3).
+    The CALLER owns the adapter's lifecycle (no aclose here)."""
+    from tiro.sync.snapshot import QUARANTINE_ERRORS
+
+    report = CycleReport()
+    try:
+        n = _count_articles(config)
+        if n > 0:
+            report.result = "error"
+            report.reason = ("bootstrap requires an empty library "
+                             f"(this library has {n} articles)")
+        else:
+            _fmt, codec = await _open_backend(config, adapter)
+            await _materialize_latest_snapshot(config, adapter, codec,
+                                               report)
+            device_id, _name = get_or_create_device(config)
+            clock = HLCClock(device_id)
+            clock_state: dict = {}
+            # Bootstrap trusts the backend's state wholesale: the journal
+            # tail may legitimately mass-delete relative to the snapshot.
+            ok = await _pull(config, adapter, codec, clock, clock_state,
+                             report, accept_mass_delete=True)
+            if ok:
+                await _push(config, adapter, codec, clock, clock_state,
+                            report)
+    except SyncConfigError as e:
+        report.result = "error"
+        report.reason = f"not configured: {e}"
+    except QUARANTINE_ERRORS as e:
+        report.result = "needs_attention"
+        report.reason = str(e)[:300]
+        logger.error("Sync bootstrap quarantine: %s", e)
+    except Exception as e:
+        logger.error("Sync bootstrap failed: %s", e, exc_info=True)
+        report.result = "error"
+        report.reason = str(e)[:300]
+    finally:
+        report.finished_at = _now_iso()
+        _record_cycle(config, report)
+    return report
+
+
+async def repair(config: TiroConfig, adapter) -> CycleReport:
+    """Wipe the backend's sync state and re-seed it from THIS device's
+    local library (spec §6.6). The typed-confirm ceremony lives in the
+    callers (CLI/route) — this is the engine act.
+
+    format.json is KEPT — never rewritten, byte-identical — so every other
+    device keeps decrypting; they detect the repair epoch on their next
+    pull (own device doc gone + format.json present) and re-push. Repair
+    is conservative: it NEVER proceeds without the backend lock (held ->
+    skipped_lock; a lock fault -> error via the generic taxonomy)."""
+    from tiro.sync.manifest import save_shadow
+    from tiro.sync.snapshot import QUARANTINE_ERRORS
+
+    report = CycleReport()
+    try:
+        _fmt, codec = await _open_backend(config, adapter)
+        got = await adapter.lock(LOCK_TTL_S)  # a fault -> error, never lockless
+        if not got:
+            report.result = "skipped_lock"
+            report.reason = "backend lock held by another device"
+        else:
+            try:
+                for prefix in ("journal/", "objects/", "snapshots/",
+                               "devices/"):
+                    for key in await adapter.list(prefix):
+                        await adapter.delete(key)
+                device_id, name = get_or_create_device(config)
+                # covers={} deliberately: the journal is empty (nothing
+                # subsumed), and a bootstrapping device starts at
+                # watermarks {} and pulls future segments from seq 1.
+                _snapshot_id, uploaded, manifest = (
+                    await _upload_local_snapshot(
+                        config, adapter, codec, device_id, {}))
+                report.pushed_objects += uploaded
+                update_self_state(config, last_seq=0, watermarks={})
+                await _put_device_doc(config, adapter, device_id, name,
+                                      last_seq=0)
+                # Shadow = the exact manifest the snapshot was built from:
+                # nothing is pending to push after a repair.
+                await asyncio.to_thread(save_shadow, config, manifest)
+            finally:
+                try:
+                    await adapter.unlock()
+                except Exception as e:
+                    logger.warning("Sync repair unlock failed: %s", e)
+    except SyncConfigError as e:
+        report.result = "error"
+        report.reason = f"not configured: {e}"
+    except QUARANTINE_ERRORS as e:
+        report.result = "needs_attention"
+        report.reason = str(e)[:300]
+        logger.error("Sync repair quarantine: %s", e)
+    except Exception as e:
+        logger.error("Sync repair failed: %s", e, exc_info=True)
+        report.result = "error"
+        report.reason = str(e)[:300]
+    finally:
+        report.finished_at = _now_iso()
+        _record_cycle(config, report)
     return report

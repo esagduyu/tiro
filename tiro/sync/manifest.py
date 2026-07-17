@@ -630,6 +630,22 @@ def hydrate_bodies(config: TiroConfig, ops: list[Op]) -> list[Op]:
     return out
 
 
+def clear_shadow(config: TiroConfig) -> None:
+    """Repair-epoch reset (S5.5): wipe sync_shadow entries AND tombstones so
+    the next diff re-emits the full local state as a fresh push. Two kinds
+    survive by design: `alias` rows are permanent uid mappings (deleting
+    them would let late ops resurrect deduped losers), and `metats` rows are
+    per-field meta LWW clocks (deleting them would let older remote meta
+    values overwrite newer local ones after the epoch reset)."""
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "DELETE FROM sync_shadow WHERE kind NOT IN ('alias', 'metats')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def expire_tombstones(config: TiroConfig, now: datetime | None = None) -> int:
     """Purge sync_shadow tombstones older than TOMBSTONE_TTL_DAYS (FROZEN
     90). Local half of spec §4's GC; the all-device-ack half is S5's.
