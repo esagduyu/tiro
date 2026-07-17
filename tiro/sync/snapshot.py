@@ -23,8 +23,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
-from datetime import UTC, datetime, timedelta  # noqa: F401  (Task 6 uses timedelta)
-from typing import Any  # noqa: F401  (Task 6 uses this)
+from datetime import UTC, datetime, timedelta
 
 from tiro.anchors import content_hash
 from tiro.sync.crypto import CryptoError, SyncFormatError
@@ -393,3 +392,119 @@ def parse_device_doc(device_id: str, text: str) -> DeviceInfo:
         raise
     except Exception as e:
         raise SnapshotError(f"unreadable device doc for {device_id!r}: {e}") from e
+
+
+# --- Compaction / GC planning (spec para 6.5) — pure functions ---------------
+
+SNAPSHOT_OPS_THRESHOLD = 500  # FROZEN: snapshot when ops_since > 500 ...
+SNAPSHOT_MAX_AGE_DAYS = 7     # FROZEN: ... or last snapshot older than 7d
+DEAD_DEVICE_DAYS = 90         # FROZEN: unseen >90d stops blocking journal GC
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def should_snapshot(
+    ops_since_snapshot: int,
+    last_snapshot_at: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Spec para 6.5 cadence. Extra rule (decision #12a): a backend with no
+    snapshot yet gets one as soon as there is anything to cover, so a second
+    device never bootstraps off a raw full-journal replay. An unparseable
+    timestamp fail-safes to True (taking a redundant snapshot is harmless;
+    never taking one is not)."""
+    if ops_since_snapshot <= 0:
+        return False
+    if last_snapshot_at is None:
+        return True
+    if ops_since_snapshot > SNAPSHOT_OPS_THRESHOLD:
+        return True
+    last = _parse_iso(last_snapshot_at)
+    if last is None:
+        return True
+    now = now or datetime.now(UTC)
+    return (now - last) > timedelta(days=SNAPSHOT_MAX_AGE_DAYS)
+
+
+@dataclass(frozen=True)
+class GCPlan:
+    delete_segments: list[str]
+    delete_snapshots: list[str]
+    dropped_devices: list[str]
+    warnings: list[str]
+
+
+def plan_gc(
+    *,
+    devices: dict[str, DeviceInfo],
+    segment_keys: list[str],
+    snapshot_covers: dict[str, dict[str, int]],  # snapshot_id -> covers map
+    now: datetime | None = None,
+) -> GCPlan:
+    """Pure GC plan (spec para 6.5): a segment journal/{d}/{seq} is deletable
+    iff (a) the LATEST snapshot covers it (seq <= covers[d]) and (b) every
+    LIVE device has applied it (a device implicitly acks its own journal at
+    last_seq). Devices unseen > DEAD_DEVICE_DAYS are dropped from
+    ack-blocking with a warning so a dead device can't pin the journal
+    forever. Only the latest snapshot survives. S5 executes the plan;
+    nothing here does I/O."""
+    now = now or datetime.now(UTC)
+    warnings: list[str] = []
+
+    if not snapshot_covers:
+        return GCPlan([], [], [], ["no snapshot yet — journal GC blocked"])
+    latest_id = max(snapshot_covers)  # ULIDs sort by creation time
+    covers = snapshot_covers[latest_id]
+    delete_snapshots = sorted(snapshot_key(s) for s in snapshot_covers if s != latest_id)
+
+    live: dict[str, DeviceInfo] = {}
+    dropped: list[str] = []
+    for did in sorted(devices):
+        info = devices[did]
+        seen = _parse_iso(info.last_seen)
+        if seen is None or (now - seen) > timedelta(days=DEAD_DEVICE_DAYS):
+            dropped.append(did)
+            warnings.append(
+                f"device {did!r} unseen for >{DEAD_DEVICE_DAYS}d — "
+                "no longer blocks journal GC")
+        else:
+            live[did] = info
+
+    delete_segments: list[str] = []
+    for key in segment_keys:
+        try:
+            dev, seq = parse_journal_key(key)
+        except SnapshotError:
+            warnings.append(f"unrecognized key skipped by GC: {key!r}")
+            continue
+        if seq > covers.get(dev, -1):
+            continue
+        acked_by_all = all(
+            seq <= (info.last_seq if did == dev else info.acked.get(dev, -1))
+            for did, info in live.items()
+        )
+        if acked_by_all:
+            delete_segments.append(key)
+    return GCPlan(sorted(delete_segments), delete_snapshots, dropped, warnings)
+
+
+def plan_object_gc(live_hashes: set[str], object_keys: list[str]) -> list[str]:
+    """Objects referenced by neither the latest snapshot nor any surviving
+    segment are deletable. The caller (S5) computes live_hashes as
+    build_snapshot's hash set UNION every kept segment's referenced hashes.
+    Unparseable keys are left alone (never delete what we don't understand)."""
+    delete: list[str] = []
+    for key in object_keys:
+        try:
+            h = parse_object_key(key)
+        except SnapshotError:
+            continue
+        if h not in live_hashes:
+            delete.append(key)
+    return sorted(delete)
