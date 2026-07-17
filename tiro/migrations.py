@@ -586,6 +586,29 @@ def _m016_sync_shadow(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m017_suggestions(conn: sqlite3.Connection) -> None:
+    """Phase 6 K3: suggestions — persona (and probabilistic code-agent)
+    outputs pending user accept/dismiss. Columns FROZEN from the
+    agent-runtime spec §5. Accept runs the standard validated writes;
+    rows are derived output, excluded from export bundles."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL,
+            persona TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            citations_json TEXT,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_suggestions_status "
+        "ON suggestions(status, created_at)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -603,6 +626,9 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (14, "agent_runs table", _m014_agent_runs),
     (15, "sync S1 change-detection columns (body_hash/meta_updated_at/sources.uid)", _m015_sync_columns),
     (16, "sync S2 shadow store (sync_shadow)", _m016_sync_shadow),
+
+
+    (17, "suggestions table", _m017_suggestions),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

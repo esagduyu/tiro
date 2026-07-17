@@ -272,12 +272,69 @@ async function loadArticle(id) {
         // Audio player
         setupAudioPlayer(a.id, a.content || "");
 
+        // Pending suggestions panel (Phase 6 K3)
+        loadSuggestionsPanel(a.id);
+
         loadingEl.style.display = "none";
         contentEl.style.display = "block";
     } catch (err) {
         console.error("Failed to load article:", err);
         loadingEl.style.display = "none";
         errorEl.style.display = "block";
+    }
+}
+
+/** Pending suggestions for this article (Phase 6 K3) — rendered right below
+ * the summary; markdown payloads go through renderMarkdown only (sanitize
+ * on render), never raw innerHTML. */
+async function loadSuggestionsPanel(articleId) {
+    let rows = [];
+    try {
+        const res = await fetch(`/api/suggestions?status=pending&article_id=${num(articleId)}`);
+        rows = (await res.json()).data.suggestions || [];
+    } catch {
+        return;
+    }
+    const host = document.getElementById("reader-suggestions");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!rows.length) {
+        host.style.display = "none";
+        return;
+    }
+    host.style.display = "";
+    for (const s of rows) {
+        const card = document.createElement("div");
+        card.className = "suggestion-card callout";
+        card.innerHTML = `
+            <div class="suggestion-head">${icon("message", { size: 14 })}
+                <strong>${esc(s.persona)}</strong>
+                <span class="pill">${esc(s.kind)}</span></div>
+            <div class="suggestion-body">${s.payload.markdown
+                ? renderMarkdown(s.payload.markdown)
+                : `<code>${esc(JSON.stringify(s.payload))}</code>`}</div>
+            <div class="suggestion-actions">
+                <button type="button" class="btn btn-primary" data-a>Apply</button>
+                <button type="button" class="btn btn-ghost" data-d>Dismiss</button>
+            </div>`;
+        const resolve = async (action) => {
+            try {
+                const r = await fetch(`/api/suggestions/${encodeURIComponent(s.uid)}/${action}`, { method: "POST" });
+                if (r.ok) {
+                    card.remove();
+                    showToast(action === "accept" ? "Applied" : "Dismissed");
+                } else {
+                    showToast((await r.json().catch(() => ({}))).detail || "Failed", "error");
+                }
+            } catch {
+                showToast("Network error", "error");
+            } finally {
+                if (!host.querySelector(".suggestion-card")) host.style.display = "none";
+            }
+        };
+        card.querySelector("[data-a]").addEventListener("click", () => resolve("accept"));
+        card.querySelector("[data-d]").addEventListener("click", () => resolve("dismiss"));
+        host.appendChild(card);
     }
 }
 

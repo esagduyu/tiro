@@ -20,6 +20,22 @@
     </div>
 
     <div class="agents-runs-header">
+        <h3>Suggestions</h3>
+    </div>
+    <div id="suggestions-queue" class="suggestions-queue">
+        <div class="empty-state" id="suggestions-empty" style="display: none;">
+            {{ icon("message", size=40) }}
+            <h2>No pending suggestions.</h2>
+            <p>Run a persona below — its output lands here for you to apply or dismiss.</p>
+        </div>
+    </div>
+
+    <div class="agents-runs-header">
+        <h3>Personas</h3>
+    </div>
+    <div id="personas-list" class="personas-list"></div>
+
+    <div class="agents-runs-header">
         <h3>Run history</h3>
         <div class="agents-filters">
             <select id="runs-agent-filter" class="agents-select">

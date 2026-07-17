@@ -126,6 +126,16 @@ def ingenuity_analysis_prompt(full_article_text: str, source_name: str) -> str:
     )
 
 
+def contradiction_check_prompt(new_title: str, new_text: str,
+                               candidate_title: str,
+                               candidate_text: str) -> str:
+    """One light-tier contradiction verdict per trusted candidate
+    (Phase 6 K4, spec §6). Callers truncate both texts (EXCERPT_CHARS)."""
+    return load_template("contradiction_check").format(
+        new_title=new_title, new_text=new_text,
+        candidate_title=candidate_title, candidate_text=candidate_text)
+
+
 def learned_preferences_prompt(
     loved_articles: list[dict],
     liked_articles: list[dict],

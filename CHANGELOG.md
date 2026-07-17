@@ -45,6 +45,31 @@ day the release was tagged.
   resolution); conflict blockquote headers carry the date only (device
   labels are not byte-convergent at line level).
 
+### Agent runtime — personas (Phase 6 K3)
+- Persona files (`{library}/personas/*.md`): community-shareable prompt templates over a closed placeholder set, running through the agent runtime on scope-derived read-only contexts. Untrusted by construction: suggest-only writes, no network tool, fenced interpolation with a fixed preamble, forced output kind, adversarially tested.
+- `suggestions` table (migration 017) + accept/dismiss flow running the standard validated writes; suggestion chips in inbox/reader and a queue + persona management on `/agents`.
+- Three forkable default personas: devils-advocate, daily-themes, research-brief. `personas_disabled` config (API-toggled). Manual runs only in K3; on-ingest/cron dispatch arrives with K4's hook infrastructure.
+- Routes: `GET /api/personas`, `POST /api/personas/{slug}/enable`, `POST /api/personas/{slug}/disable`, `GET /api/suggestions?status=&article_id=`, `POST /api/suggestions/{uid}/accept`, `POST /api/suggestions/{uid}/dismiss`.
+- Backup snapshots now include `personas/` (an export/backup posture fix landed alongside K3 closeout — `agents/traces/` remains deliberately excluded, per the K1–K2 D15 owner-ratification item).
+- STATIC_VERSION 70.
+
+### Agent runtime — ContradictionDetector & on-ingest hooks (Phase 6 K4)
+- New `contradiction-detector` code agent runs on ingest (post-save hook, never
+  inside the rollback window; hook failures can never fail a save): finds up to
+  8 similar articles, keeps the trusted set (rating > 0 or must-read), gets one
+  light-tier claims-level verdict per candidate, and files confidence-gated
+  `contradiction` suggestions ("challenges something you trusted"). Accepting
+  appends the contradiction to the article's note. Empty trusted set = zero
+  LLM calls.
+- `contradiction_detector_enabled` kill-switch (default on, config/env only —
+  gates the on-ingest dispatch, never manual runs); `tiro agent run
+  contradiction-detector --backfill [--limit]` for existing libraries
+  (resumable, newest-first; bulk imports are hook-exempt by design).
+- On-ingest personas (article scope) now dispatch through the same hook —
+  K3's `schedule: on-ingest` value is live; `cron` dispatch still deferred.
+- Six-pair eval fixture set added to the harness (`fake_similars` +
+  `ai_tier` seed support). No new migration, no frontend change.
+
 ### Sync S1 — local reconcile engine (absorbed Phase 2b)
 - External edits to the library (Obsidian et al.) now reconcile into SQLite/
   ChromaDB/anchors: changed bodies re-index + re-embed and re-check highlight

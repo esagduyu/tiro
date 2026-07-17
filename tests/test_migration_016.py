@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from tiro.database import get_connection
-from tiro.migrations import LATEST_VERSION, run_migrations
+from tiro.migrations import MIGRATIONS, run_migrations
 
 
 def _pre016_library(tmp_path: Path) -> Path:
@@ -38,7 +38,11 @@ def test_migration_016_creates_sync_shadow(tmp_path):
     db_path = _pre016_library(tmp_path)
     applied = run_migrations(db_path, backup=False)
     assert any(a.startswith("016") for a in applied)
-    assert LATEST_VERSION == 16
+    # Sync S2 claimed exactly migration 016 (sync_shadow). Assert that
+    # specific claim rather than "016 is newest": K3 (017) lands on merge —
+    # the durable invariant is the number, not the ceiling (7c2ca0b precedent).
+    by_version = {v: desc for v, desc, _ in MIGRATIONS}
+    assert "sync_shadow" in by_version[16]
     conn = get_connection(db_path)
     try:
         cols = {r["name"] for r in conn.execute("PRAGMA table_xinfo(sync_shadow)")}

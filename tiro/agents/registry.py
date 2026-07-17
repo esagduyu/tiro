@@ -23,6 +23,27 @@ def unregister(name: str) -> None:
     _REGISTRY.pop(name, None)
 
 
+def unregister_prefix(prefix: str) -> None:
+    """Remove every registration whose name starts with prefix (persona
+    re-sync: files on disk are the source of truth, the registry is a
+    per-process cache)."""
+    for name in [n for n in _REGISTRY if n.startswith(prefix)]:
+        _REGISTRY.pop(name, None)
+
+
+def replace_prefix(prefix: str, agents: dict[str, TiroAgent]) -> None:
+    """Swap all prefix-named registrations for the given set. Existing
+    names are overwritten IN PLACE (dict item assignment -- a concurrent
+    reader's get() on a still-valid name never sees it vanish, unlike an
+    unregister-then-re-register window); only genuinely stale names are
+    popped. Writer-writer interleaving is serialized by the caller
+    (personas._SYNC_LOCK)."""
+    for name in [n for n in _REGISTRY
+                 if n.startswith(prefix) and n not in agents]:
+        _REGISTRY.pop(name, None)
+    _REGISTRY.update(agents)
+
+
 def get(name: str) -> TiroAgent:
     return _REGISTRY[name]  # KeyError is the contract for unknown names
 
@@ -41,6 +62,7 @@ def ensure_builtins() -> None:
     if _builtins_loaded:
         return
     _builtins_loaded = True
+    from tiro.agents.builtin.contradiction_detector import ContradictionDetector
     from tiro.agents.builtin.digest_writer import DigestWriter
     from tiro.agents.builtin.ingenuity_analyst import IngenuityAnalyst
     from tiro.agents.builtin.metadata_extractor import MetadataExtractor
@@ -50,3 +72,4 @@ def ensure_builtins() -> None:
     register(PreferenceClassifier())
     register(DigestWriter())
     register(IngenuityAnalyst())
+    register(ContradictionDetector())

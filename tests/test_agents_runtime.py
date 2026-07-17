@@ -94,7 +94,7 @@ def test_builtin_modules_never_touch_stores_directly():
     }
     builtin_dir = AGENTS_DIR / "builtin"
     offenders = []
-    for py in builtin_dir.glob("*.py"):
+    for py in [*builtin_dir.glob("*.py"), AGENTS_DIR / "personas.py"]:
         tree = ast.parse(py.read_text())
         for node in ast.walk(tree):
             mods = []

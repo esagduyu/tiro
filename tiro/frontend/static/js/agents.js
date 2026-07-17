@@ -14,7 +14,7 @@
  * fmtTimeAgo() helper below (same pattern as feeds.js's lastFetchedText()).
  */
 
-import { esc, num, showToast, timeAgo, confirmDialog } from "./core.js";
+import { esc, num, showToast, timeAgo, confirmDialog, renderMarkdown } from "./core.js";
 import { icon } from "./icons.js";
 
 const PAGE_SIZE = 50;
@@ -26,6 +26,8 @@ document.addEventListener("DOMContentLoaded", () => {
     setupKeyboard();
     loadAgents();
     loadRuns();
+    loadSuggestions();
+    loadPersonas();
 });
 
 function fmtTimeAgo(ts) {
@@ -317,4 +319,140 @@ function showAgentsShortcuts() {
         })
         .join("");
     overlay.style.display = "flex";
+}
+
+/* --- Suggestions queue (K3) ------------------------------------------------ */
+
+async function loadSuggestions() {
+    const queue = document.getElementById("suggestions-queue");
+    const empty = document.getElementById("suggestions-empty");
+    try {
+        const res = await fetch("/api/suggestions?status=pending");
+        const rows = (await res.json()).data.suggestions || [];
+        empty.style.display = rows.length ? "none" : "";
+        queue.querySelectorAll(".suggestion-card").forEach((n) => n.remove());
+        for (const s of rows) queue.appendChild(suggestionCard(s));
+    } catch {
+        showToast("Failed to load suggestions", "error");
+    }
+}
+
+function suggestionCard(s) {
+    const card = document.createElement("div");
+    card.className = "suggestion-card callout";
+    card.dataset.uid = s.uid;
+    const body = s.payload.markdown
+        ? renderMarkdown(s.payload.markdown)
+        : `<code>${esc(JSON.stringify(s.payload))}</code>`;
+    card.innerHTML = `
+        <div class="suggestion-head">
+            ${icon("message", { size: 16 })}
+            <strong>${esc(s.persona)}</strong>
+            <span class="pill">${esc(s.kind)}</span>
+            <span class="suggestion-when">${fmtTimeAgo(s.created_at)}</span>
+        </div>
+        <div class="suggestion-body">${body}</div>
+        <div class="suggestion-actions">
+            <button type="button" class="btn btn-primary" data-sugg-accept>Apply</button>
+            <button type="button" class="btn btn-ghost" data-sugg-dismiss>Dismiss</button>
+        </div>`;
+    card.querySelector("[data-sugg-accept]").addEventListener("click",
+        () => resolveSuggestion(s.uid, "accept", card));
+    card.querySelector("[data-sugg-dismiss]").addEventListener("click",
+        () => resolveSuggestion(s.uid, "dismiss", card));
+    return card;
+}
+
+async function resolveSuggestion(uid, action, card) {
+    try {
+        const res = await fetch(`/api/suggestions/${encodeURIComponent(uid)}/${action}`,
+            { method: "POST" });
+        if (!res.ok) {
+            const detail = (await res.json()).detail || "failed";
+            showToast(`Couldn't ${action}: ${detail}`, "error");
+            return;
+        }
+        card.remove();
+        showToast(action === "accept" ? "Suggestion applied" : "Dismissed");
+        loadSuggestions();
+    } catch {
+        showToast("Network error", "error");
+    }
+}
+
+/* --- Persona management (K3) ----------------------------------------------- */
+
+const SCOPE_INPUT_HINTS = {
+    article: { key: "article_id", label: "Article id", coerce: Number },
+    query: { key: "query", label: "Query", coerce: String },
+    library: { key: "wiki_slug", label: "Wiki slug", coerce: String },
+};
+
+async function loadPersonas() {
+    const el = document.getElementById("personas-list");
+    try {
+        const res = await fetch("/api/personas");
+        const personas = (await res.json()).data || [];
+        el.innerHTML = "";
+        for (const p of personas) el.appendChild(personaCard(p));
+    } catch {
+        el.innerHTML = '<p class="settings-error">Failed to load personas.</p>';
+    }
+}
+
+function personaCard(p) {
+    const card = document.createElement("div");
+    card.className = "agents-card persona-card";
+    if (p.error) {
+        card.innerHTML = `
+            <div class="agents-card-head">${icon("alert", { size: 16 })}
+                <strong>${esc(p.slug)}</strong>
+                <span class="pill agents-pill-error">broken</span></div>
+            <p class="persona-error">${esc(p.error)}</p>
+            <p class="persona-hint">Fix <code>${esc(p.path)}</code> — changes apply on next run.</p>`;
+        return card;
+    }
+    const hint = SCOPE_INPUT_HINTS[p.scope];
+    card.innerHTML = `
+        <div class="agents-card-head">${icon("pencil", { size: 16 })}
+            <strong>${esc(p.name)}</strong>
+            <span class="pill">${esc(p.scope)}</span>
+            <span class="pill">${esc(p.output)}</span>
+            <span class="pill">${esc(p.tier)}</span>
+            <span class="agents-version">v${esc(p.version)} · ${esc(p.schedule)}</span>
+        </div>
+        <div class="persona-actions">
+            ${hint ? `<input class="persona-input" placeholder="${esc(hint.label)}">` : ""}
+            <button type="button" class="btn btn-ghost" data-persona-run
+                ${p.enabled ? "" : "disabled"}>Run</button>
+            <button type="button" class="btn btn-ghost" data-persona-toggle>
+                ${p.enabled ? "Disable" : "Enable"}</button>
+        </div>
+        <p class="persona-hint">Edit <code>${esc(p.path)}</code> to customize — changes apply on next run.</p>`;
+    card.querySelector("[data-persona-toggle]").addEventListener("click", async () => {
+        await fetch(`/api/personas/${encodeURIComponent(p.slug)}/${p.enabled ? "disable" : "enable"}`,
+            { method: "POST" });
+        loadPersonas();
+    });
+    card.querySelector("[data-persona-run]").addEventListener("click", async () => {
+        const inputs = {};
+        if (hint) {
+            const raw = card.querySelector(".persona-input").value.trim();
+            if (!raw) { showToast(`${hint.label} required`, "error"); return; }
+            inputs[hint.key] = hint.coerce(raw);
+        }
+        showToast("Running persona…");
+        const res = await fetch(`/api/agents/persona:${encodeURIComponent(p.slug)}/run`,
+            { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ inputs }) });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.success) {
+            showToast("Persona finished — suggestion pending");
+            loadSuggestions();
+            loadRuns();
+        } else {
+            showToast(`Persona run failed: ${esc(body?.error || body?.detail || res.status)}`, "error");
+        }
+    });
+    return card;
 }

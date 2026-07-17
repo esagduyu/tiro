@@ -198,6 +198,9 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
     from tiro.database import init_db
 
     registry.ensure_builtins()
+    from tiro.agents import personas as personas_module
+
+    personas_module.sync_registry(config)
     try:
         agent = registry.get(name)
     except KeyError:
@@ -234,7 +237,8 @@ def run_agent(config: TiroConfig, name: str, inputs: dict, *,
                          inputs=inputs, provider=provider, model=model,
                          replay_of=replay_of)
             ctx = RunContext(config, trace=trace, run_uid=run_uid,
-                             model_override=model_override)
+                             model_override=model_override,
+                             agent_name=agent.name)
             result = agent.run(ctx, **inputs)
             if not isinstance(result.outputs, agent.output_model):
                 raise AgentRunError(

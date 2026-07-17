@@ -184,3 +184,16 @@ def fake_llm(test_config):
     llm._fake_responses.clear()
     yield llm.queue_fake_responses
     llm._fake_responses.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_ingest_hooks(monkeypatch):
+    """On-ingest agent hooks are opt-in per test (Phase 6 K4): default to a
+    no-op so ingest-heavy tests never spawn background agent threads
+    (determinism + the offline posture). Hook tests bind the real function
+    at module-import time or monkeypatch their own recorder over this."""
+    from tiro.agents import hooks
+
+    monkeypatch.setattr(
+        hooks, "dispatch_on_ingest",
+        lambda config, article_id, ingestion_method: None)

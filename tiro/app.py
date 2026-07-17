@@ -29,7 +29,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "69"
+STATIC_VERSION = "70"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -769,6 +769,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_graph import router as graph_router
     from tiro.api.routes_import import router as import_router
     from tiro.api.routes_ingest import router as ingest_router
+    from tiro.api.routes_personas import router as personas_router
     from tiro.api.routes_remote import router as remote_router
     from tiro.api.routes_search import router as search_router
     from tiro.api.routes_sessions import router as sessions_router
@@ -789,7 +790,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
         sessions_router, remote_router, feeds_router, import_router,
-        agents_router,
+        agents_router, personas_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])

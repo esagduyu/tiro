@@ -8,7 +8,7 @@ def test_all_builtin_evals_pass_structural():
     results = run_structural()          # all agents, temp libraries, fake LLM
     assert set(results) == {
         "metadata_extractor", "preference_classifier",
-        "digest_writer", "ingenuity_analyst",
+        "digest_writer", "ingenuity_analyst", "contradiction-detector",
     }
     failures = {
         agent: r["failures"] for agent, r in results.items() if r["failed"]

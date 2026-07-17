@@ -58,7 +58,7 @@ def test_wiki_page_view_loads_wiki_js(authenticated_client):
     assert f"/static/js/wiki.js?v={STATIC_VERSION}" in r.text
 
 
-def test_static_version_is_69():
+def test_static_version_is_70():
     from tiro.app import STATIC_VERSION
 
     # Bumped 59 -> 60 in M2.0 Task 5 (frontend module closeout), then
@@ -82,8 +82,9 @@ def test_static_version_is_69():
     # Phase 5 M5.0 Task 2 (legacy-library-path suggestion banner:
     # sidebar.js setupLibmoveBanner + styles.css .libmove-banner). Then
     # 68 -> 69 in Phase 6 K2.5 (/agents page: agents.html/agents.js,
-    # base.html sidebar + Library-sheet nav entries).
-    assert STATIC_VERSION == "69"
+    # base.html sidebar + Library-sheet nav entries). Then 69 -> 70 in
+    # Phase 6 K3.8 (suggestion chips + /agents queue & persona management).
+    assert STATIC_VERSION == "70"
 
 
 # --- Sidebar nav link ----------------------------------------------------------

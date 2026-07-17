@@ -195,6 +195,13 @@ async def replay_run(run_uid: str, request: Request,
 async def manual_run(name: str, request: Request, payload: ManualRunRequest):
     config = request.app.state.config
     registry.ensure_builtins()
+    if name.startswith("persona:"):
+        # Personas are files-as-truth (re-synced per run_agent); the friendly
+        # 404 pre-check must warm them too or a cold process rejects a valid
+        # persona that run_agent would happily execute (final-review I-1).
+        from tiro.agents import personas
+
+        personas.sync_registry(config)
     try:
         registry.get(name)
     except KeyError:

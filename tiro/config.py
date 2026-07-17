@@ -53,6 +53,14 @@ class TiroConfig:
     # {library}/agents/traces/ are pruned (age first, then LRU size cap).
     agent_trace_retention_days: int = 90
     agent_trace_max_mb: int = 500
+    # ContradictionDetector kill-switch (Phase 6 K4, spec §6). Default ON.
+    # False = the on-ingest hook never dispatches the detector; manual runs
+    # (`tiro agent run contradiction-detector`, --backfill, the /agents run
+    # button) still work — the flag removes the hook, not the agent.
+    # Toggle via config.yaml or TIRO_CONTRADICTION_DETECTOR_ENABLED; no
+    # settings UI (deployment-only, like obsidian_compatible_mode). Any
+    # programmatic write goes through persist_config.
+    contradiction_detector_enabled: bool = True
     # RSS/Atom recurring ingestion (Phase 4 M4.0). rss_enabled is the kill
     # switch: the poll loop registers whenever it's true (zero subscribed
     # feeds just means cheap no-op cycles); per-feed intervals live on the
@@ -126,6 +134,10 @@ class TiroConfig:
     # deployment's behavior untouched.
     extra_allowed_hosts: list[str] = field(default_factory=list)
     trust_proxy_headers: bool = False
+    # Personas (Phase 6 K3): slugs disabled via POST /api/personas/{slug}/disable.
+    # Disabled personas are never registered -- running one is structurally
+    # impossible. Written only through persist_config.
+    personas_disabled: list[str] = field(default_factory=list)
     # Notify-only update check (Phase 5 D5): once-a-day GET to GitHub Releases,
     # surfaced as a dismissible banner. The ONLY phone-home in Tiro (a
     # version-string-free request; nothing about the library is sent). Default

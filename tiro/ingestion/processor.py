@@ -390,7 +390,7 @@ def process_article(
                 )
             raise
 
-        return {
+        result = {
             "id": article_id,
             "title": title,
             "author": author,
@@ -404,5 +404,20 @@ def process_article(
             "summary": summary,
             "tags": tag_names,
         }
+
+        # --- On-ingest agent hooks (Phase 6 K4) ---
+        # The rollback window closed above: from here the article is fully
+        # saved. dispatch_on_ingest never raises by contract, and this
+        # try/except is the second belt — a hook problem must NEVER fail
+        # the save (test-asserted).
+        try:
+            from tiro.agents import hooks
+
+            hooks.dispatch_on_ingest(config, article_id, ingestion_method)
+        except Exception as e:
+            logger.error("On-ingest hook dispatch failed for article %d "
+                         "(non-fatal): %s", article_id, e)
+
+        return result
     finally:
         conn.close()

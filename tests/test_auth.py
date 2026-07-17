@@ -403,6 +403,7 @@ def test_route_walk_everything_gated(auth_client, configured_library):
         probe = probe.replace("{feed_id}", "1")
         probe = probe.replace("{kind}", "readwise")
         probe = probe.replace("{slug:path}", "entities/x")
+        probe = probe.replace("{slug}", "mine")
         probe = probe.replace("{uid}", "abc")
         probe = probe.replace("{run_uid}", "01ABC").replace("{name}", "metadata_extractor")
         assert "{" not in probe, f"unsubstituted placeholder in {probe}"
