@@ -1,0 +1,35 @@
+{
+  "description": "FROZEN cross-port crypto parity fixture (sync S3, spec para 9). passphrase (UTF-8 as-given, NO unicode normalization) + argon2id(kdf) -> 32 bytes -> Bech32 hrp 'age-secret-key-' uppercased = recovery_code; recipient = its age X25519 public key. ciphertext_b64 is an age blob that MUST decrypt to `plaintext` (decrypt-vector: age encrypt output is ephemeral-key nondeterministic, so only decryption is a fixed vector). Swift (iOS v2) and browser (7b) ports test against this file. Changing it is a BREAKING EVENT requiring an explicit decision record. The small-params passphrase deliberately contains decomposed (NFD) sequences mixed with precomposed (NFC) ones; ports must hash the passphrase bytes as-given, never normalize.",
+  "sync_format": 1,
+  "plaintext": "tiro sync crypto parity v1\n",
+  "vectors": [
+    {
+      "name": "default-params",
+      "passphrase": "correct horse battery staple",
+      "kdf": {
+        "algo": "argon2id",
+        "salt": "ABEiM0RVZneImaq7zN3u/w==",
+        "m": 65536,
+        "t": 3,
+        "p": 4
+      },
+      "recovery_code": "AGE-SECRET-KEY-146CG4QDAH8DQ0SE037WJEP70HGE38S8ACARGZ70YJNZKDQ8S46XSQSVZ7K",
+      "age_recipient": "age1p6gyy5zh0mu37gvj8q8jqakfga4hkc4sq5lf9tvjmzmvm9mc65hqn0t5au",
+      "ciphertext_b64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBDUVFJUzQ1WXZhOTBYeEpJTkU1MlR4YTcvZUhScFhXdTlSc2NqTjVSNWdJCnhzUUxjdGZ6YVliNlFmQWZrOC9BUEN3WTczY3ZqQlFaKzdtejVoeUhKSnMKLT4gblYtZ3JlYXNlIEEnMDgganIwTkBxdS0gWkYwVipYCnZWd05XczNtVitsOFo1ZXpuMjVLZVE5b3dqY1lCSTBWVzdTRWtueURGQjgrWG5HYTU0d2cKLS0tIGFtY3V4bmJVWWxUQXQ4TkdRbWFJOFpHVmllUzY4NkxWZkdJczhXcDFUR1UKmDXzJ/axiehMHe6PgZ2SWjfYe5A8beWjxMOVulhvcdLXRF2j9aji8Sx1PI5bgRInwLDskLShXNs/L/Y="
+    },
+    {
+      "name": "small-params",
+      "passphrase": "páthei máthos — πάθει μάθος",
+      "kdf": {
+        "algo": "argon2id",
+        "salt": "/+7dzLuqmYh3ZlVEMyIRAA==",
+        "m": 8,
+        "t": 1,
+        "p": 1
+      },
+      "recovery_code": "AGE-SECRET-KEY-1ST5UNC4RYXKXL6M84SHV6C0DNVGJ3PHZJ75RW9AP93RYKKEWAS6SVAQL08",
+      "age_recipient": "age142dmy744d7359q87793qdafn3hc8wgn3nkztlsf3evs0aun9ls2sqr8u56",
+      "ciphertext_b64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA4V0NGSEJ5U2VSMUV4QWNTYW9NMWwxdUJjOXNQWlJSTEVNdmNhVVNROEF3ClZjMjFiOEl1aDl6UVVOQW1uK1BZSmlDWVBsbVFLUkJXaU4xRWxNbk5ZRVkKLT4gfl1MVGxIUy1ncmVhc2UgdyBaO30gLjxYRGMKbEFobmdWK3hvZmh0KzJFWmJBYWF5SWt5VCtuRGl0amhQUEJtRWVidDA5bCtCZG8rZngxeXhoWm1paXVBRUQ0aApPUDhmaUxqZjdDVklSaFMyZCs0NEZXb05PdEkrRkZ5SFduZDc4WkdDc1pIV0ozUXE1U3JEeTJldWhCMFVpSDlwClhnCi0tLSBaR3NlR3RvcWh1d0l1TnA3YkZsR1VMU09XMmd1c1JYWkxlY3pRd3cxdTRJCktXZys5OI//AuQkLGurgl6q1TUlEU1sqgHGhCkp8c7d7eC08r89ERc9TtpQpo7k6Dl+fD572boJTBZ1"
+    }
+  ]
+}

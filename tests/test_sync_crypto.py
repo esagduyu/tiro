@@ -3,6 +3,9 @@
 The parity fixture test (TestParityFixture) is added in S3.2 and appended to
 this file; this module starts with behavior tests only."""
 import base64
+import json
+import unicodedata
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +48,15 @@ class TestKdf:
         other_salt = KdfParams(salt_b64=base64.b64encode(b"\x02" * 16).decode(), m=8, t=1, p=1)
         assert a != derive_secret_key("pass", other_salt)
         assert a != derive_secret_key("pass", KdfParams(salt_b64=SMALL.salt_b64, m=8, t=2, p=1))
+        assert a != derive_secret_key("pass", KdfParams(salt_b64=SMALL.salt_b64, m=16, t=1, p=1))
+
+    def test_passphrase_bytes_as_given_no_nfc_normalization(self):
+        """An NFD passphrase must derive differently from its NFC form —
+        derivation hashes the UTF-8 bytes as-given (parity fixture contract)."""
+        nfd = "e\u0301"  # e + U+0301 combining acute (decomposed é)
+        nfc = unicodedata.normalize("NFC", nfd)
+        assert nfd != nfc
+        assert derive_secret_key(nfd, SMALL) != derive_secret_key(nfc, SMALL)
 
     def test_bad_salt_is_crypto_error(self):
         with pytest.raises(CryptoError):
@@ -101,3 +113,42 @@ class TestCodecs:
         assert c.encrypt(b"abc") == b"abc"
         assert c.decrypt(b"abc") == b"abc"
         assert c.encryption == "none"
+
+
+PARITY = Path(__file__).parent / "fixtures" / "sync-crypto-parity.json"
+
+
+class TestParityFixture:
+    """The FROZEN cross-port parity contract (spec para 9). If any assertion
+    here fails after a code change, the CODE is wrong — never regenerate the
+    fixture (that is a breaking event requiring an explicit decision record)."""
+
+    def _doc(self):
+        return json.loads(PARITY.read_text())
+
+    def test_fixture_shape(self):
+        doc = self._doc()
+        assert doc["sync_format"] == 1
+        assert [v["name"] for v in doc["vectors"]] == ["default-params", "small-params"]
+
+    def test_fixture_passphrase_is_not_nfc_normalized(self):
+        """The small-params passphrase deliberately mixes NFD and NFC — a port
+        (or a future Python change) that NFC-normalizes before deriving would
+        silently produce a different key. This pins the as-given property."""
+        doc = self._doc()
+        pp = doc["vectors"][1]["passphrase"]
+        assert unicodedata.normalize("NFC", pp) != pp
+
+    def test_derivation_reproduces_frozen_vectors(self):
+        doc = self._doc()
+        for v in doc["vectors"]:
+            kdf = KdfParams.from_dict(v["kdf"])
+            assert derive_recovery_code(v["passphrase"], kdf) == v["recovery_code"], v["name"]
+            assert codec_from_passphrase(v["passphrase"], kdf).recipient == v["age_recipient"], v["name"]
+
+    def test_frozen_ciphertexts_decrypt(self):
+        doc = self._doc()
+        for v in doc["vectors"]:
+            codec = AgeCodec(v["recovery_code"])
+            pt = codec.decrypt(base64.b64decode(v["ciphertext_b64"]))
+            assert pt.decode("utf-8") == doc["plaintext"], v["name"]
