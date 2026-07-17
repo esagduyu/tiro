@@ -4,6 +4,7 @@ Hook/dispatch tests live in tests/test_ingest_hooks.py.
 """
 
 import json
+from argparse import Namespace
 
 import pytest
 
@@ -325,3 +326,118 @@ def test_apply_contradiction_validates(initialized_library):
     s2 = _contradiction_suggestion(initialized_library, aid, markdown="   ")
     with pytest.raises(SuggestionApplyError, match="no body"):
         apply_suggestion(initialized_library, s2)
+
+
+# --- Task 6: backfill CLI ----------------------------------------------------
+
+
+def _cli_config(initialized_library, tmp_path):
+    """cmd_agent load_config()s a yaml path — point one at the test library."""
+    cfg = tmp_path / "cli-config.yaml"
+    cfg.write_text(f"library_path: {initialized_library.library}\n")
+    return str(cfg)
+
+
+def _backfill_args(config_path, **over):
+    base = dict(config=config_path, agent_cmd="run",
+                name="contradiction-detector", input=[],
+                backfill=True, limit=200)
+    base.update(over)
+    return Namespace(**base)
+
+
+def _stub_run_agent(monkeypatch, calls, *, fail_ids=()):
+    from tiro.agents.base import AgentResult, AgentRunError
+
+    class _Out:
+        def model_dump_json(self, **k):
+            return "{}"
+
+    def fake_run(config, name, inputs, **kw):
+        aid = inputs["article_id"]
+        calls.append((name, aid))
+        if aid in fail_ids:
+            raise AgentRunError(f"boom on {aid}", run_uid="01FAIL")
+        return AgentResult(outputs=_Out(), citations=[], tokens_in=1,
+                           tokens_out=1, cost_usd=0.0, run_uid="01OK")
+
+    monkeypatch.setattr("tiro.agents.runtime.run_agent", fake_run)
+
+
+def _seed_ok_run(config, article_id):
+    from tiro.database import get_connection
+    from tiro.migrations import new_ulid
+
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            """INSERT INTO agent_runs (run_uid, agent_name, agent_version,
+               started_at, status, input_json)
+               VALUES (?, 'contradiction-detector', '1.0',
+                       datetime('now'), 'ok', ?)""",
+            (new_ulid(), json.dumps({"article_id": article_id})))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_backfill_skips_done_and_runs_newest_first(
+        initialized_library, tmp_path, monkeypatch, capsys):
+    from tiro.cli import cmd_agent
+
+    a1, _ = _seed_article(initialized_library, title="Backfill Old")
+    a2, _ = _seed_article(initialized_library, title="Backfill Done")
+    a3, _ = _seed_article(initialized_library, title="Backfill New")
+    _seed_ok_run(initialized_library, a2)
+
+    calls = []
+    _stub_run_agent(monkeypatch, calls)
+    cmd_agent(_backfill_args(_cli_config(initialized_library, tmp_path)))
+
+    ran_ids = [aid for _name, aid in calls]
+    assert a2 not in ran_ids                 # resumable dedup
+    assert set(ran_ids) == {a1, a3}
+    out = capsys.readouterr().out
+    assert "2 article(s)" in out and "2 ok, 0 failed" in out
+
+
+def test_backfill_continues_past_failures_and_exits_1(
+        initialized_library, tmp_path, monkeypatch, capsys):
+    from tiro.cli import cmd_agent
+
+    a1, _ = _seed_article(initialized_library, title="BF Fail A")
+    a2, _ = _seed_article(initialized_library, title="BF Fail B")
+    calls = []
+    _stub_run_agent(monkeypatch, calls, fail_ids={a2})
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_agent(_backfill_args(_cli_config(initialized_library, tmp_path)))
+    assert exc.value.code == 1
+    assert len(calls) == 2                   # kept going after the failure
+    assert "1 ok, 1 failed" in capsys.readouterr().out
+
+
+def test_backfill_respects_limit(initialized_library, tmp_path, monkeypatch):
+    from tiro.cli import cmd_agent
+
+    for i in range(3):
+        _seed_article(initialized_library, title=f"BF Limit {i}")
+    calls = []
+    _stub_run_agent(monkeypatch, calls)
+    cmd_agent(_backfill_args(_cli_config(initialized_library, tmp_path),
+                             limit=2))
+    assert len(calls) == 2
+
+
+def test_backfill_rejects_bad_agent_and_input_combo(
+        initialized_library, tmp_path, monkeypatch):
+    from tiro.cli import cmd_agent
+
+    cfg = _cli_config(initialized_library, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cmd_agent(_backfill_args(cfg, name="digest_writer"))
+    assert exc.value.code == 2               # inputs aren't {article_id}
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_agent(_backfill_args(cfg, input=["article_id=1"]))
+    assert exc.value.code == 2               # --backfill + --input conflict

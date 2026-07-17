@@ -639,6 +639,56 @@ def cmd_agent(args):
         sys.exit(1)
     migrate_db(config.db_path)
 
+    if args.agent_cmd == "run" and getattr(args, "backfill", False):
+        # Local import is load-bearing: resolve run_agent as a module
+        # attribute at call time so tests monkeypatching
+        # tiro.agents.runtime.run_agent are honored for the backfill loop.
+        from tiro.agents.runtime import run_agent as _run_agent
+        from tiro.database import get_connection
+
+        if args.input:
+            print("--backfill and --input are mutually exclusive")
+            sys.exit(2)
+        agent = registry.all_agents().get(args.name)
+        if agent is None or agent.inputs != {"article_id": int}:
+            print(f"--backfill needs a registered agent whose only input "
+                  f"is article_id; {args.name!r} does not qualify")
+            sys.exit(2)
+        conn = get_connection(config.db_path)
+        try:
+            rows = conn.execute(
+                """SELECT a.id FROM articles a
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM agent_runs r
+                       WHERE r.agent_name = ? AND r.status = 'ok'
+                         AND json_extract(r.input_json, '$.article_id') = a.id)
+                   ORDER BY a.ingested_at DESC
+                   LIMIT ?""",
+                (args.name, args.limit)).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            print("Backfill: nothing to do — every article already has a "
+                  "successful run.")
+            return
+        print(f"Backfill: {len(rows)} article(s) to process "
+              f"(newest first, limit {args.limit}).")
+        ok = failed = 0
+        for i, row in enumerate(rows, start=1):
+            try:
+                res = _run_agent(config, args.name,
+                                 {"article_id": row["id"]})
+                ok += 1
+                print(f"  [{i}/{len(rows)}] article {row['id']}: ok "
+                      f"(run {res.run_uid}, cost ${res.cost_usd:.4f})")
+            except AgentRunError as e:
+                failed += 1
+                print(f"  [{i}/{len(rows)}] article {row['id']}: FAILED — {e}")
+        print(f"Backfill complete: {ok} ok, {failed} failed.")
+        if failed:
+            sys.exit(1)
+        return
+
     inputs = {}
     for pair in args.input:
         if "=" not in pair:
@@ -1167,6 +1217,12 @@ def main():
     agent_run.add_argument("--input", action="append", default=[],
                            metavar="KEY=VALUE",
                            help="Agent input (JSON value or bare string); repeatable")
+    agent_run.add_argument("--backfill", action="store_true",
+                           help="Run once per article that has no prior "
+                                "successful run of this agent (newest first)")
+    agent_run.add_argument("--limit", type=int, default=200,
+                           help="Max articles per backfill invocation "
+                                "(default 200; re-run to continue)")
 
     evals_parser = subparsers.add_parser("evals", help="Run the agent evals harness")
     evals_sub = evals_parser.add_subparsers(dest="evals_cmd", required=True)
