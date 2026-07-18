@@ -7,16 +7,73 @@ day the release was tagged.
 
 ## [Unreleased]
 
-- Phase 2b (Obsidian bidirectional sync, 0.4.5 slot) — deferred by owner
-  decision 2026-07-06; scope intact in PRODUCT_ROADMAP.md.
+_Nothing yet — 0.8.0 and 0.9.0 below await their owner tags._
 
-### Agent runtime (Phase 6 K1–K2)
-- New `tiro/agents/` kernel: `TiroAgent`/`AgentContext` contract, `run_agent()` with per-run JSONL traces (`{library}/agents/traces/{run_uid}.jsonl`), `agent_runs` index table (migration 014), one-agent-at-a-time run lock, typed `AgentRunError`.
-- All four AI features migrated behavior-identically (golden transcript tests pin prompt bytes): MetadataExtractor (Haiku extraction — every web/email/imap/rss/import ingest is now a recorded run), PreferenceClassifier, DigestWriter (scheduler untouched), IngenuityAnalyst. `extract_metadata`/`classify_articles`/`generate_digest`/`analyze_article` remain as compat wrappers — zero call-site churn.
-- `/agents` page: agent cards, filterable paginated run history, collapsible trace viewer, replay with cost-note confirm. Routes: `GET /api/agents`, `GET /api/agents/runs`, `GET /api/agents/runs/{run_uid}` (`?trace=1` streams JSONL), `POST /api/agents/runs/{run_uid}/replay`, `POST /api/agents/{name}/run`.
-- Trace retention (`agent_trace_retention_days`/`agent_trace_max_mb`, files pruned, rows kept); doctor gains orphan-trace vacuum + stuck-run sweep.
-- Evals harness: `tiro/evals/` fixtures + `tiro evals run [agent] [--real]` (structural mode is free/CI-gated via pytest); `tiro agent list|run`.
-- STATIC_VERSION 69.
+## [0.9.0] — `sync-beta` (Phase 7a: BYO multi-device sync + the absorbed Phase 2b) — TAG PENDING (owner action)
+
+Multi-device sync where the user owns the storage: state-diff capture against
+a shadow manifest, LWW + both-versions-kept conflicts (no CRDT), age
+encryption over an Argon2id-derived identity, filesystem/S3/WebDAV backends.
+Phase 2b (Obsidian bidirectional reconciliation) shipped absorbed as S1.
+**The v1.0.0 go/no-go gate — S2's hypothesis property suite + S5's
+multi-device integration suite — is GREEN at this tip.** The physical
+2-laptops-+-phone owner acceptance matrix is still pending — machine-verified
+analogues exist for every criterion, but the tag is the owner's call after
+that run.
+
+### Sync S6 — hardening & acceptance
+- Failure drills (`tests/test_sync_drills.py`): corrupted-snapshot bootstrap
+  recovery (newest→oldest fallback, clean refusal naming `tiro sync repair`,
+  never a half-materialized library), journal-truncation reachability
+  refusal (a device doc ahead of present segments can no longer produce a
+  silently-stale "ok" — bootstrap AND steady-state), stale-lock steal/skip
+  pins, mass-delete-guard e2e extras (trip persistence across cycles, the
+  real-argv CLI acceptance path, the annotations-guard equivalent with
+  rows+sidecars surviving the trip, one-shot acceptance across two guarded
+  segments), library re-pair chain against naturally compacted backends,
+  CRLF newline-posture pin, lock-renewal and compaction-corruption drills.
+- Doctor: new report-only `sync` section (backend reachability, stale lock,
+  needs-attention reason, conflict-file census, cycle warnings, clock skew)
+  — exit-code neutral, offline-safe, no device-identity mint from a scan;
+  the ONE `--fix` action is clearing a provably stale backend lock.
+- Clock-skew warnings (>24h, spec §10): pull-time both-directions detection
+  (behind-check bounded by the previous successful cycle so an
+  offline-weekend reunion never false-fires) + a live ahead-check in
+  `load_sync_status["warnings"]`; surfaced in `tiro sync` status, the
+  settings card, and doctor.
+- library_id pinning: the backend's `format.json` identity is pinned in
+  `sync_shadow` and enforced every cycle — pointing `sync_path` at another
+  library's backend refuses (needs_attention) instead of cross-merging;
+  the setup ceremony re-pins deliberately (plaintext join included);
+  plaintext auto-init refuses when a pin exists (typo protection).
+- Same-device two-process race closed: a per-library `flock` (kernel-released
+  on process death) makes a concurrent server cycle + `tiro sync --now`
+  skip instead of double-writing a journal seq lockless.
+- Long-upload protection: mid-push/compaction advisory-lock renewal (never
+  clobbers a stolen lock; compaction additionally skips after an observed
+  mid-cycle theft).
+- Merge core hardened by the property gate itself — fresh hypothesis
+  exploration during S6's own gate runs falsified order-independence three
+  times (counterexamples #5–#7, all latent since S2); root-fixed
+  culminating in an atom-based canonical note form: freshly minted conflict
+  blocks now use a fixed dateless `> [conflict]` header (block dates and
+  intermediate-winner filtering were provably fold-order-dependent), legacy
+  dated blocks re-mint canonically at first touch. Note texts are never
+  lost (verbatim per atom); assertions never weakened; the generator was
+  extended to reach the legacy/header regime.
+- Sync UI pass (Playwright): warning lines now render in an actual warning
+  color in both themes (was a muted grey variable), interval-0 reads
+  "manual only"; needs_attention flips the sidebar + card dots (verified
+  in-browser).
+- Docs: README "Sync across devices (beta)" (setup, recovery-code warning,
+  backends table, honest limitations incl. device-local reading stats,
+  per-device vectors/audio, LF rewriting, the re-pair/repair story),
+  SECURITY.md sync-encryption posture (what bucket access reveals, what
+  the passphrase does not protect).
+- Accepted risks carried for owner ratification (decisions log D-S6-*):
+  memory-only emitted-alias window, line/link ops not alias-remapped,
+  repair drops in-flight tombstones, repair state reaches other
+  established devices only via re-bootstrap (cross-library re-pair edge).
 
 ### Sync S2 — pure merge core
 - `tiro/sync/{journal,manifest,merge}.py`: HLC + the eight journal op kinds
@@ -44,31 +101,6 @@ day the release was tagged.
   non-empty notes as conflict files unconditionally (plan-property-vs-spec
   resolution); conflict blockquote headers carry the date only (device
   labels are not byte-convergent at line level).
-
-### Agent runtime — personas (Phase 6 K3)
-- Persona files (`{library}/personas/*.md`): community-shareable prompt templates over a closed placeholder set, running through the agent runtime on scope-derived read-only contexts. Untrusted by construction: suggest-only writes, no network tool, fenced interpolation with a fixed preamble, forced output kind, adversarially tested.
-- `suggestions` table (migration 017) + accept/dismiss flow running the standard validated writes; suggestion chips in inbox/reader and a queue + persona management on `/agents`.
-- Three forkable default personas: devils-advocate, daily-themes, research-brief. `personas_disabled` config (API-toggled). Manual runs only in K3; on-ingest/cron dispatch arrives with K4's hook infrastructure.
-- Routes: `GET /api/personas`, `POST /api/personas/{slug}/enable`, `POST /api/personas/{slug}/disable`, `GET /api/suggestions?status=&article_id=`, `POST /api/suggestions/{uid}/accept`, `POST /api/suggestions/{uid}/dismiss`.
-- Backup snapshots now include `personas/` (an export/backup posture fix landed alongside K3 closeout — `agents/traces/` remains deliberately excluded, per the K1–K2 D15 owner-ratification item).
-- STATIC_VERSION 70.
-
-### Agent runtime — ContradictionDetector & on-ingest hooks (Phase 6 K4)
-- New `contradiction-detector` code agent runs on ingest (post-save hook, never
-  inside the rollback window; hook failures can never fail a save): finds up to
-  8 similar articles, keeps the trusted set (rating > 0 or must-read), gets one
-  light-tier claims-level verdict per candidate, and files confidence-gated
-  `contradiction` suggestions ("challenges something you trusted"). Accepting
-  appends the contradiction to the article's note. Empty trusted set = zero
-  LLM calls.
-- `contradiction_detector_enabled` kill-switch (default on, config/env only —
-  gates the on-ingest dispatch, never manual runs); `tiro agent run
-  contradiction-detector --backfill [--limit]` for existing libraries
-  (resumable, newest-first; bulk imports are hook-exempt by design).
-- On-ingest personas (article scope) now dispatch through the same hook —
-  K3's `schedule: on-ingest` value is live; `cron` dispatch still deferred.
-- Six-pair eval fixture set added to the harness (`fake_similars` +
-  `ai_tier` seed support). No new migration, no frontend change.
 
 ### Sync S1 — local reconcile engine (absorbed Phase 2b)
 - External edits to the library (Obsidian et al.) now reconcile into SQLite/
@@ -157,6 +189,44 @@ day the release was tagged.
   out of apply as a retryable cycle error, watermark held) and a
   property-oracle byte-honesty fix (the harness had read conflict notes
   lossily, masking a real failure class).
+
+## [0.8.0] — `agents-beta` (Phase 6: Agent runtime) — TAG PENDING (owner action)
+
+Every AI feature now executes as a recorded, replayable agent run; personas
+and the ContradictionDetector build on the frozen kernel contract.
+
+### Agent runtime (Phase 6 K1–K2)
+- New `tiro/agents/` kernel: `TiroAgent`/`AgentContext` contract, `run_agent()` with per-run JSONL traces (`{library}/agents/traces/{run_uid}.jsonl`), `agent_runs` index table (migration 014), one-agent-at-a-time run lock, typed `AgentRunError`.
+- All four AI features migrated behavior-identically (golden transcript tests pin prompt bytes): MetadataExtractor (Haiku extraction — every web/email/imap/rss/import ingest is now a recorded run), PreferenceClassifier, DigestWriter (scheduler untouched), IngenuityAnalyst. `extract_metadata`/`classify_articles`/`generate_digest`/`analyze_article` remain as compat wrappers — zero call-site churn.
+- `/agents` page: agent cards, filterable paginated run history, collapsible trace viewer, replay with cost-note confirm. Routes: `GET /api/agents`, `GET /api/agents/runs`, `GET /api/agents/runs/{run_uid}` (`?trace=1` streams JSONL), `POST /api/agents/runs/{run_uid}/replay`, `POST /api/agents/{name}/run`.
+- Trace retention (`agent_trace_retention_days`/`agent_trace_max_mb`, files pruned, rows kept); doctor gains orphan-trace vacuum + stuck-run sweep.
+- Evals harness: `tiro/evals/` fixtures + `tiro evals run [agent] [--real]` (structural mode is free/CI-gated via pytest); `tiro agent list|run`.
+- STATIC_VERSION 69.
+
+### Agent runtime — personas (Phase 6 K3)
+- Persona files (`{library}/personas/*.md`): community-shareable prompt templates over a closed placeholder set, running through the agent runtime on scope-derived read-only contexts. Untrusted by construction: suggest-only writes, no network tool, fenced interpolation with a fixed preamble, forced output kind, adversarially tested.
+- `suggestions` table (migration 017) + accept/dismiss flow running the standard validated writes; suggestion chips in inbox/reader and a queue + persona management on `/agents`.
+- Three forkable default personas: devils-advocate, daily-themes, research-brief. `personas_disabled` config (API-toggled). Manual runs only in K3; on-ingest/cron dispatch arrives with K4's hook infrastructure.
+- Routes: `GET /api/personas`, `POST /api/personas/{slug}/enable`, `POST /api/personas/{slug}/disable`, `GET /api/suggestions?status=&article_id=`, `POST /api/suggestions/{uid}/accept`, `POST /api/suggestions/{uid}/dismiss`.
+- Backup snapshots now include `personas/` (an export/backup posture fix landed alongside K3 closeout — `agents/traces/` remains deliberately excluded, per the K1–K2 D15 owner-ratification item).
+- STATIC_VERSION 70.
+
+### Agent runtime — ContradictionDetector & on-ingest hooks (Phase 6 K4)
+- New `contradiction-detector` code agent runs on ingest (post-save hook, never
+  inside the rollback window; hook failures can never fail a save): finds up to
+  8 similar articles, keeps the trusted set (rating > 0 or must-read), gets one
+  light-tier claims-level verdict per candidate, and files confidence-gated
+  `contradiction` suggestions ("challenges something you trusted"). Accepting
+  appends the contradiction to the article's note. Empty trusted set = zero
+  LLM calls.
+- `contradiction_detector_enabled` kill-switch (default on, config/env only —
+  gates the on-ingest dispatch, never manual runs); `tiro agent run
+  contradiction-detector --backfill [--limit]` for existing libraries
+  (resumable, newest-first; bulk imports are hook-exempt by design).
+- On-ingest personas (article scope) now dispatch through the same hook —
+  K3's `schedule: on-ingest` value is live; `cron` dispatch still deferred.
+- Six-pair eval fixture set added to the harness (`fake_similars` +
+  `ai_tier` seed support). No new migration, no frontend change.
 
 ## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
 
