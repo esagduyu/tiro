@@ -26,6 +26,17 @@ from tiro.config import TiroConfig
 from tiro.database import get_connection
 from tiro.migrations import new_ulid
 from tiro.sync.journal import FileDel, FilePut, HLCClock, Meta, RowDel
+from tiro.sync.snapshot import SnapshotError
+
+
+class NoUsableSnapshot(SnapshotError):
+    """Snapshots exist on the backend but NONE could be fully fetched +
+    decoded (S6.1 recovery drill). Subclasses SnapshotError deliberately so
+    any caller catching QUARANTINE_ERRORS still handles it; bootstrap() and
+    sync_cycle's auto-bootstrap catch it FIRST and map it to a plain
+    result="error" whose reason points at `tiro sync repair` — the library
+    is untouched (fetch-everything-before-apply held for every candidate)."""
+
 
 logger = logging.getLogger(__name__)
 
@@ -1277,6 +1288,14 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
+    except NoUsableSnapshot as e:
+        # Before QUARANTINE_ERRORS (it subclasses SnapshotError): the
+        # D-S5-3 auto-bootstrap found snapshots but none usable — same
+        # S6.1 semantics as bootstrap(): plain error + repair pointer,
+        # library untouched.
+        report.result = "error"
+        report.reason = str(e)[:300]
+        logger.error("Sync auto-bootstrap: %s", e)
     except QUARANTINE_ERRORS as e:
         report.result = "needs_attention"
         report.reason = str(e)[:300]
@@ -1423,23 +1442,32 @@ async def verify_passphrase(config: TiroConfig, adapter,
 
 async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
                                        report: CycleReport) -> bool:
-    """Materialize the backend's newest snapshot into the LOCAL library —
-    shared by bootstrap() and sync_cycle's empty-library auto-bootstrap
-    (D-S5-3). Returns False when the backend holds no snapshot.
+    """Materialize a backend snapshot into the LOCAL library — shared by
+    bootstrap() and sync_cycle's empty-library auto-bootstrap (D-S5-3).
+    Returns False when the backend holds no snapshot at all.
+
+    S6.1 recovery drill: candidates are tried NEWEST -> OLDEST. Per
+    candidate, the manifest is decoded and ALL its objects fetched+decoded
+    BEFORE anything touches the library (all-or-nothing per snapshot — the
+    frozen invariant); a candidate failing anywhere in that fetch phase is
+    logged + warned and the next-older one is tried. If snapshots existed
+    but NONE was usable, NoUsableSnapshot is raised — bootstrap()/
+    sync_cycle map it to result="error" pointing at `tiro sync repair`,
+    with the library left exactly as it was (empty, for a joining device).
 
     Ops are stamped with materialize_ops' DEFAULT epoch-pinned clock
     (HLC(0,n,'snapshot')) — NEVER a wall-time clock, which would outrank
     and silently skip-as-stale every journal-tail op written before the
     bootstrap moment (snapshot.py's docstring — the S3 obligation).
-    Watermarks come from the snapshot's covers with SELF filtered out: a
-    re-bootstrapping device must not watermark its own journal.
-    QUARANTINE_ERRORS propagate to the caller's taxonomy. Vector work:
-    none — materialized articles ride vector_status='pending' and the
-    existing vector-retry task."""
+    Watermarks come from the CHOSEN snapshot's covers with SELF filtered
+    out: a re-bootstrapping device must not watermark its own journal.
+    Other QUARANTINE_ERRORS (from apply) propagate to the caller's
+    taxonomy. Vector work: none — materialized articles ride
+    vector_status='pending' and the existing vector-retry task."""
     from tiro.sync.adapters.base import KeyMissing
     from tiro.sync.merge import apply_ops
     from tiro.sync.snapshot import (
-        SnapshotError,
+        QUARANTINE_ERRORS,
         decode_object,
         decode_snapshot,
         materialize_ops,
@@ -1452,36 +1480,56 @@ async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
                        if key.count("/") >= 2})
     if not snap_ids:
         return False
-    newest = snap_ids[-1]  # ULIDs sort by creation time
-    doc = decode_snapshot(await adapter.get(snapshot_key(newest)), codec)
-    objects_plain: dict[str, str] = {}
-    for addr in sorted(set(doc.objects.values())):
+    last_error: Exception | None = None
+    for snapshot_id in reversed(snap_ids):  # ULIDs sort by creation time
         try:
-            blob = await adapter.get(object_key(addr))
-        except KeyMissing as e:
-            # Honest quarantine (S5.5 review minor #1): a snapshot whose
-            # object is GONE is backend corruption/partial copy, and it is
-            # detected HERE, before any op is applied — bootstrap stays
-            # all-or-nothing. Raising SnapshotError routes it through the
-            # QUARANTINE_ERRORS taxonomy (needs_attention), never a
-            # bare-KeyMissing "error".
-            raise SnapshotError(
-                f"snapshot references missing object {addr!r}") from e
-        objects_plain[addr] = decode_object(blob, codec, expected_hash=addr)
-    ops = materialize_ops(doc, objects_plain)  # DEFAULT epoch-pinned clock
-    device_id, _name = get_or_create_device(config)
-    apply_report = await asyncio.to_thread(
-        apply_ops, config, ops, guard=False, clock=HLCClock(device_id))
-    report.applied += apply_report.applied
-    report.conflicts += apply_report.conflicts
-    report.errors += apply_report.errors
-    watermarks = {d: s for d, s in doc.covers.items() if d != device_id}
-    update_self_state(config, watermarks=watermarks)
-    logger.info(
-        "Sync bootstrap: materialized snapshot %s (%d applied, "
-        "%d conflicts, %d errors)", newest, apply_report.applied,
-        apply_report.conflicts, apply_report.errors)
-    return True
+            doc = decode_snapshot(
+                await adapter.get(snapshot_key(snapshot_id)), codec)
+            objects_plain: dict[str, str] = {}
+            for addr in sorted(set(doc.objects.values())):
+                try:
+                    blob = await adapter.get(object_key(addr))
+                except KeyMissing as e:
+                    # Honest quarantine (S5.5 review minor #1): a snapshot
+                    # whose object is GONE is backend corruption/partial
+                    # copy, and it is detected HERE, before any op is
+                    # applied — bootstrap stays all-or-nothing. Raising
+                    # SnapshotError keeps it inside the QUARANTINE_ERRORS
+                    # taxonomy, never a bare-KeyMissing "error".
+                    raise SnapshotError(
+                        f"snapshot references missing object {addr!r}"
+                    ) from e
+                objects_plain[addr] = decode_object(
+                    blob, codec, expected_hash=addr)
+        except QUARANTINE_ERRORS as e:
+            last_error = e
+            logger.warning(
+                "Sync bootstrap: snapshot %s unusable (%s) — trying older",
+                snapshot_id, e)
+            report.warnings.append(
+                f"snapshot {snapshot_id} unusable: {e}")
+            continue
+        # First fully-fetched candidate: materialize + apply. Failures
+        # from here on are NOT another candidate's problem — the fetch
+        # phase succeeded, so they propagate to the caller's taxonomy.
+        ops = materialize_ops(doc, objects_plain)  # epoch-pinned clock
+        device_id, _name = get_or_create_device(config)
+        apply_report = await asyncio.to_thread(
+            apply_ops, config, ops, guard=False, clock=HLCClock(device_id))
+        report.applied += apply_report.applied
+        report.conflicts += apply_report.conflicts
+        report.errors += apply_report.errors
+        watermarks = {d: s for d, s in doc.covers.items() if d != device_id}
+        update_self_state(config, watermarks=watermarks)
+        logger.info(
+            "Sync bootstrap: materialized snapshot %s (%d applied, "
+            "%d conflicts, %d errors)", snapshot_id, apply_report.applied,
+            apply_report.conflicts, apply_report.errors)
+        return True
+    raise NoUsableSnapshot(
+        f"no usable snapshot on backend ({len(snap_ids)} tried; "
+        f"last error: {str(last_error)[:120]}) — run 'tiro sync repair' "
+        "on a healthy device, then bootstrap again")
 
 
 async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
@@ -1554,6 +1602,13 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
+    except NoUsableSnapshot as e:
+        # Before QUARANTINE_ERRORS (it subclasses SnapshotError): every
+        # snapshot on the backend failed fetch/decode — a plain error with
+        # the repair pointer, library untouched (S6.1 frozen semantics).
+        report.result = "error"
+        report.reason = str(e)[:300]
+        logger.error("Sync bootstrap: %s", e)
     except QUARANTINE_ERRORS as e:
         report.result = "needs_attention"
         report.reason = str(e)[:300]

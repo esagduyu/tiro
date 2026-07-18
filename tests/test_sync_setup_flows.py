@@ -257,9 +257,12 @@ async def test_bootstrap_refuses_non_empty_library(initialized_library,
 async def test_bootstrap_all_or_nothing_on_missing_object(
     initialized_library, tmp_path
 ):
-    """Backend lost an object the snapshot references: honest quarantine
-    (needs_attention, S5.5-fix minor #1) and NO partial library — zero
-    articles materialized."""
+    """Backend lost an object the (only) snapshot references: with no
+    older snapshot to fall back to, that is S6.1's "snapshots exist but
+    none usable" — a CLEAN refusal (plain error pointing at `tiro sync
+    repair`; was needs_attention pre-S6.1) and NO partial library — zero
+    articles materialized. The fallback drills live in
+    tests/test_sync_drills.py."""
     from tests.test_reconcile import _ingest
 
     backend = tmp_path / "backend"
@@ -278,8 +281,9 @@ async def test_bootstrap_all_or_nothing_on_missing_object(
 
     report = await bootstrap(cfg_b, adapter_for_config(cfg_b))
 
-    assert report.result == "needs_attention"
+    assert report.result == "error"
     assert "missing object" in report.reason
+    assert "repair" in report.reason.lower()
     assert _count(cfg_b) == 0  # all-or-nothing: no partial library
 
 
