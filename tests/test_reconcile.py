@@ -679,6 +679,42 @@ class TestConflictWriter:
         assert is_conflict_file(p1.name) and is_conflict_file(p2.name)
         assert p1.read_text() == "one" and p2.read_text() == "two"
 
+    def test_same_content_dedupe_is_idempotent(self, tmp_path):
+        """D19#2: a re-applied journal segment (crash between apply and
+        watermark persist) must not mint duplicate conflict files."""
+        from tiro.sync.reconcile import write_conflict_file
+        p1 = write_conflict_file(tmp_path, "stem", "same body")
+        p2 = write_conflict_file(tmp_path, "stem", "same body")
+        assert p1 == p2
+        conflicts = [p for p in tmp_path.iterdir()
+                     if p.name.startswith("stem.conflict-")]
+        assert len(conflicts) == 1
+
+    def test_same_content_dedupe_matches_across_devices(self, tmp_path):
+        """The dedupe scans ALL {stem}.conflict-* files, device-agnostic:
+        the same losing body re-preserved under any device label returns
+        the existing file."""
+        from tiro.sync.reconcile import write_conflict_file
+        p1 = write_conflict_file(tmp_path, "stem", "body", device="devA")
+        p2 = write_conflict_file(tmp_path, "stem", "body", device="devB")
+        assert p1 == p2
+
+    def test_different_content_still_mints_new_file(self, tmp_path):
+        from tiro.sync.reconcile import write_conflict_file
+        p1 = write_conflict_file(tmp_path, "stem", "first body")
+        p2 = write_conflict_file(tmp_path, "stem", "second body")
+        assert p1 != p2
+        assert p1.read_text() == "first body"
+        assert p2.read_text() == "second body"
+
+    def test_dedupe_ignores_other_stems(self, tmp_path):
+        from tiro.sync.reconcile import write_conflict_file
+        p1 = write_conflict_file(tmp_path, "alpha", "body")
+        p2 = write_conflict_file(tmp_path, "beta", "body")
+        assert p1 != p2
+        assert p1.name.startswith("alpha.conflict-")
+        assert p2.name.startswith("beta.conflict-")
+
 
 class TestDoctorConflictCensus:
     def test_conflict_files_not_orphaned_and_censused(self, initialized_library):

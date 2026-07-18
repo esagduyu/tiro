@@ -29,7 +29,7 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # Single source of truth for static cache busting. Templates use
 # `?v={{ static_v }}`; bump ONLY this constant when changing static JS/CSS.
-STATIC_VERSION = "70"
+STATIC_VERSION = "71"
 
 
 def _theme_href(config: TiroConfig, name: str, fallback: str) -> str:
@@ -311,6 +311,38 @@ def _make_reconcile_task(config: TiroConfig) -> PeriodicTask:
     return PeriodicTask("reconcile", run_once, next_delay)
 
 
+def _make_sync_task(config: TiroConfig) -> PeriodicTask:
+    """PeriodicTask for the BYO sync engine loop (S5.7). Both gates —
+    sync_enabled and sync_interval_s — are re-read FRESH inside next_delay
+    every cycle (live-config semantics; a settings POST also restarts the
+    task explicitly, mirroring imap); <= 0 / disabled stops the loop.
+    sync_cycle itself never raises (every outcome is a recorded
+    CycleReport), so the loop's failure isolation is a second net."""
+    from tiro.sync.engine import sync_cycle
+
+    def next_delay() -> float:
+        if not (config.sync_enabled and config.sync_interval_s > 0):
+            return 0.0
+        return float(config.sync_interval_s)
+
+    async def run_once() -> None:
+        report = await sync_cycle(config)
+        if (report.result != "ok" or report.applied or report.pushed_ops
+                or report.conflicts or report.errors):
+            logger.info(
+                "Sync cycle: %s — pulled %d segment(s), applied %d, "
+                "pushed %d op(s)/%d object(s), conflicts %d, errors %d%s",
+                report.result, report.pulled_segments, report.applied,
+                report.pushed_ops, report.pushed_objects, report.conflicts,
+                report.errors,
+                f" ({report.reason})" if report.reason else "",
+            )
+        else:
+            logger.debug("Sync cycle: ok, no changes")
+
+    return PeriodicTask("sync", run_once, next_delay)
+
+
 def _make_update_check_task(app: FastAPI, config: TiroConfig) -> PeriodicTask:
     """PeriodicTask for the notify-only update check (Phase 5 D5).
 
@@ -482,6 +514,7 @@ async def lifespan(app: FastAPI):
     app.state.vector_retry_task = None
     app.state.rss_task = None
     app.state.reconcile_task = None
+    app.state.sync_task = None
     app.state.update_check_task = None
     # In-memory update-check result (Phase 5 D5): {etag, latest_version,
     # html_url, checked_at}. Always present (even with the check disabled) so
@@ -519,6 +552,13 @@ async def lifespan(app: FastAPI):
     if config.reconcile_interval_s > 0:
         scheduler.start_periodic("reconcile", _make_reconcile_task(config))
         logger.info("Reconcile loop started: every %d seconds", config.reconcile_interval_s)
+
+    # Start the BYO sync engine loop (S5.7). Registered when enabled with a
+    # positive interval; POST /api/settings/sync restarts it dynamically
+    # (imap pattern), and next_delay re-reads both gates each cycle anyway.
+    if config.sync_enabled and config.sync_interval_s > 0:
+        scheduler.start_periodic("sync", _make_sync_task(config))
+        logger.info("Sync loop started: every %d seconds", config.sync_interval_s)
 
     # Notify-only update check (Phase 5 D5). Registered only when
     # update_check_enabled (default True) — the kill switch. Run-first, so the
@@ -778,6 +818,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
     from tiro.api.routes_setup import router as setup_router
     from tiro.api.routes_sources import router as sources_router
     from tiro.api.routes_stats import router as stats_router
+    from tiro.api.routes_sync import router as sync_router
     from tiro.api.routes_tokens import router as tokens_router
     from tiro.api.routes_views import router as views_router
     from tiro.api.routes_wiki import router as wiki_router
@@ -790,7 +831,7 @@ def create_app(config: TiroConfig | None = None, tls_enabled: bool = False) -> F
         graph_router, filters_router, tokens_router, backup_router,
         authors_router, views_router, wiki_router, annotations_router,
         sessions_router, remote_router, feeds_router, import_router,
-        agents_router, personas_router,
+        agents_router, personas_router, sync_router,
     ]
     for r in protected:
         app.include_router(r, dependencies=[Depends(auth.require_auth)])

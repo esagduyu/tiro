@@ -73,6 +73,24 @@ class TiroConfig:
     # Chroma/anchors. Seconds between passes; 0 = off (manual `tiro
     # reconcile` only). Env override: TIRO_RECONCILE_INTERVAL_S.
     reconcile_interval_s: int = 30
+    # --- BYO sync engine (S5, spec §8; FROZEN key names). sync_identity is
+    # the device-local age recovery code (Bech32 secret) — a SECRET, always
+    # masked in GET /api/settings/sync; background cycles decrypt with it
+    # without prompting. sync_encrypt: auto = OFF for filesystem, ON for
+    # s3/webdav (spec §5). sync_interval_s 0 = manual only.
+    sync_enabled: bool = False
+    sync_backend: str = "filesystem"   # filesystem | s3 | webdav
+    sync_path: str = ""                # filesystem adapter root
+    sync_s3_endpoint: str = ""
+    sync_s3_bucket: str = ""
+    sync_s3_access_key: str = ""
+    sync_s3_secret_key: str = ""
+    sync_webdav_url: str = ""
+    sync_webdav_user: str = ""
+    sync_webdav_password: str = ""
+    sync_encrypt: str = "auto"         # auto | on | off
+    sync_interval_s: int = 300         # seconds; 0 = manual only
+    sync_identity: str = ""            # age recovery code (SECRET, masked)
     anthropic_api_key: str | None = None
     digest_email: str | None = None
     smtp_host: str = "localhost"
@@ -245,6 +263,22 @@ def load_config(config_path: str | Path | None = None) -> TiroConfig:
         os.environ["OPENAI_API_KEY"] = config.openai_api_key
 
     return config
+
+
+def yaml_quote(value: str) -> str:
+    """Pin a string for persist_config as a single-quoted YAML scalar.
+
+    persist_config writes through ruamel's YAML 1.2 emitter, which leaves
+    values like ``on``/``off``/``yes``/``no`` as plain scalars — but
+    load_config reads with pyyaml (YAML 1.1), where those plain scalars
+    parse as BOOLEANS. Any persisted string whose value can collide with a
+    YAML 1.1 boolean literal (sync_encrypt's "on"/"off") must go through
+    this helper so it round-trips as the string it is instead of poisoning
+    the config (the S5.6-fix `_pin` trap, centralized here in S5.7).
+    """
+    from ruamel.yaml.scalarstring import SingleQuotedScalarString
+
+    return SingleQuotedScalarString(value)
 
 
 def persist_config(config: TiroConfig, updates: dict) -> None:

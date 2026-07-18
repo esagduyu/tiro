@@ -754,6 +754,57 @@ function setupUpdateBanner() {
     });
 }
 
+/* ---- Sync status dot (S5.8) ----
+   The #sync-status footer anchor ships `hidden` in base.html and is unhidden
+   here only when GET /api/settings/sync says sync is configured. One fetch
+   per page load, never polled (same posture as the unread badge — a stale
+   dot self-corrects on the next navigation). Any failure — network error,
+   non-2xx, unparseable body — leaves the anchor hidden: an unconfigured or
+   broken status endpoint must never surface chrome. */
+
+function formatSyncedAgo(iso) {
+    if (!iso) return null;
+    // Engine timestamps are UTC ISO with a trailing Z; keep the Safari-safe
+    // space->T guard anyway (matches inbox.js's timestamp handling).
+    const d = new Date(String(iso).replace(" ", "T"));
+    if (isNaN(d.getTime())) return null;
+    const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+}
+
+async function setupSyncStatus() {
+    const el = document.getElementById("sync-status");
+    if (!el) return;
+    try {
+        const res = await fetch("/api/settings/sync");
+        if (!res.ok) return;
+        const json = await res.json();
+        const d = json?.data;
+        if (!d || !d.configured) return;
+        const dot = document.getElementById("sync-dot");
+        if (dot) {
+            const cls = d.dot === "err" ? "status-err"
+                : d.dot === "warn" ? "status-warn" : "status-ok";
+            dot.classList.add(cls);
+        }
+        let title;
+        if (!d.enabled) {
+            title = "Sync paused";
+        } else {
+            const ago = formatSyncedAgo(d.last_synced_at);
+            title = ago ? `Synced ${ago}` : "Sync enabled — no cycle yet";
+        }
+        el.title = title;
+        el.hidden = false;
+    } catch (e) {
+        // Silently hidden — status chrome is best-effort only.
+    }
+}
+
 /* ---- Add-to-Home-Screen hint (M3.1 Task 3) ----
    A one-time, dismissable nudge -- NOT a beforeinstallprompt capture (that
    event is Chromium-only, non-standard, and effectively unsupported on iOS
@@ -966,6 +1017,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Notify-only update banner (Phase 5 D5)
     setupUpdateBanner();
+
+    // Sync status dot (S5.8): unhides the footer anchor when configured.
+    setupSyncStatus();
 
     // Offline save queue (M3.1 Task 3): reflect whatever survived from a
     // prior page load, then try to drain it right away -- covers the "user

@@ -47,6 +47,28 @@ default_embedding_model: "all-MiniLM-L6-v2"
 # to the library (Obsidian etc.). 0 disables the background scan.
 # reconcile_interval_s: 30
 
+# BYO multi-device sync (Phase 7a) — sync your library through storage YOU
+# control: a synced folder (Dropbox/iCloud/Syncthing), an S3-compatible
+# bucket, or a WebDAV server. Run `uv run tiro sync setup` to configure —
+# it walks backend, encryption, and the recovery-code ceremony for you.
+# sync_enabled: false
+# sync_backend: "filesystem"   # Options: filesystem | s3 | webdav
+# sync_path: ""                # filesystem backend root dir
+# sync_s3_endpoint: ""         # S3-compatible endpoint URL
+# sync_s3_bucket: ""
+# sync_s3_access_key: ""
+# sync_s3_secret_key: ""
+# sync_webdav_url: ""
+# sync_webdav_user: ""
+# sync_webdav_password: ""
+# sync_encrypt: "auto"    # Options: auto | on | off — auto means off for
+#                         # filesystem and ON for network backends (s3/webdav);
+#                         # turning it off on a network backend stores your
+#                         # library as plaintext and requires typed confirmation
+# sync_interval_s: 300    # Seconds between sync cycles (0 = manual only)
+# sync_identity: ""       # DEVICE-LOCAL SECRET — your age recovery code, set by
+#                         # `tiro sync setup`. Never share or commit this value.
+
 # Intelligence
 opus_model: "claude-opus-4-6"
 haiku_model: "claude-haiku-4-5-20251001"

@@ -609,6 +609,36 @@ def _m017_suggestions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m018_sync_state(conn: sqlite3.Connection) -> None:
+    """Sync-engine S5 device registry/watermarks (number 018 is PRE-ASSIGNED
+    and the LAST reserved number of the weekend campaign). One row per known
+    sync device: the is_self=1 row is THIS device's identity (device_id
+    minted once as a ULID) plus its own journal head (last_seq), per-remote
+    applied watermarks (watermarks_json) and the last cycle's report
+    (last_cycle_json); is_self=0 rows mirror remote devices' device docs.
+    Local operational state — never exported, never backed-up-specially,
+    never doctor-reconciled (it rides along in the whole-tiro.db copy)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sync_state (
+            device_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            is_self INTEGER NOT NULL DEFAULT 0,
+            last_seq INTEGER NOT NULL DEFAULT 0,
+            watermarks_json TEXT,
+            last_cycle_json TEXT,
+            last_seen TEXT,
+            last_wall_ms INTEGER
+        )
+    """)
+    # Exactly ONE self identity row, enforced at the schema level — a
+    # duplicate self row minted by a SELECT-then-INSERT race would poison
+    # remote device docs permanently (S5.1 review Major #2).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_state_self "
+        "ON sync_state(is_self) WHERE is_self = 1"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "ingestion_method column", _m001_ingestion_method),
     (2, "vector_status column", _m002_vector_status),
@@ -629,6 +659,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
 
 
     (17, "suggestions table", _m017_suggestions),
+    (18, "sync_state device registry/watermarks (S5)", _m018_sync_state),
 ]
 
 LATEST_VERSION = max(v for v, _, _ in MIGRATIONS)

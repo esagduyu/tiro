@@ -113,6 +113,51 @@ day the release was tagged.
 - New dependency: boto3 (Apache-2.0, license re-verified). No migration, no routes,
   no UI — the engine loop and settings surface land in S5.
 
+### Sync engine (S5)
+- The full pull-merge-push cycle (`tiro/sync/engine.py`): S1 reconcile first,
+  pull per-device journal segments on watermarks and apply through the S2
+  merge core, push local changes in the FROZEN crash-safety order (objects →
+  journal segment → device doc → local last_seq THEN shadow LAST — a crash
+  anywhere leaves a duplicate, never a loss), then lock-gated compaction/GC.
+- Safety semantics: per-cycle `format.json` encryption pinning — the local
+  pin is the authority, a disagreeing backend doc is refused before any
+  codec is built (downgrade refusal); corrupted/undecryptable/malformed
+  remote data quarantines the cycle as `needs_attention` with the watermark
+  held — never a half-apply; a journal gap (missing segment) refuses the
+  pull the same way; the S2 pull-side mass-delete guard gains a ONE-SHOT
+  acceptance (`tiro sync --now --accept-mass-delete` / `{accept_mass_delete}`
+  on the API), consumed by a single guard trip.
+- Empty-library auto-bootstrap: a zero-article, never-synced device pointed
+  at a populated backend materializes the latest snapshot before its first
+  pull (explicitly not triggered for libraries that ever pushed).
+- Repair: wipe the backend's sync state and re-seed from this device,
+  keeping `format.json` byte-identical — other devices keep decrypting,
+  detect the repair epoch via their vanished device doc, and re-diff/re-push
+  on their next cycle.
+- `tiro sync` CLI: `--status` (default, offline), `--now`, `setup`
+  (interactive backend + encryption + passphrase ceremony — the recovery
+  code is printed exactly once and never stored by Tiro), `repair` (typed
+  confirmation).
+- Routes: `GET`/`POST /api/settings/sync` (secrets masked; typed
+  `UNENCRYPTED` confirm guarding the plaintext-on-a-network-backend end
+  state; dynamic scheduler restart), `POST /api/sync/now` (409
+  `sync_running`), `POST /api/sync/repair` (typed `{"confirm": "REPAIR"}`).
+- Settings sync card + sidebar sync status dot (STATIC_VERSION 71);
+  background loop as scheduler `PeriodicTask("sync")` on `sync_interval_s`
+  (default 300 s, 0 = manual only).
+- Migration 018: `sync_state` device registry/watermarks — the campaign's
+  last pre-assigned number. Every backend byte flows through the uniform
+  `AuditedAdapter` audit lines, now recording `bytes_in` alongside
+  `bytes_out`.
+- `tests/test_sync_multidevice.py`: the multi-device integration suite (all
+  spec-§9 scenarios, FilesystemAdapter + encryption ON) — the second half
+  of the v1.0.0 go/no-go gate.
+- Hardening shaken out by the suites: two hypothesis-found S2 merge fixes
+  (line-note fold order independence; `sqlite3.OperationalError` re-raises
+  out of apply as a retryable cycle error, watermark held) and a
+  property-oracle byte-honesty fix (the harness had read conflict notes
+  lossily, masking a real failure class).
+
 ## [0.7.0] — `desktop-beta` (Phase 5: Installable personal app)
 
 Tiro becomes something you install, not just something you run from a terminal:

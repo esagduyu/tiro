@@ -534,7 +534,14 @@ def test_apply_never_loses_note_text(ops):
                           for lines in sidecars.values() for ln in lines)]
         notes_root = config.library / "notes"
         if notes_root.exists():
-            pool += [p.read_text() for p in notes_root.glob("*.md")]
+            # read_bytes().decode(), NOT read_text(): universal-newline
+            # translation folds a lone "\r" inside a preserved note into
+            # "\n", making a byte-perfect conflict-note file look like note
+            # loss (hypothesis-found harness false-negative, 2026-07-17 —
+            # bytes on disk verified exact: b"0\r"). Oracle precision fix;
+            # the assertion below is untouched.
+            pool += [p.read_bytes().decode("utf-8")
+                     for p in notes_root.glob("*.md")]
         haystack = "\n".join(pool)
 
         latest: dict[str, LinePut] = {}
@@ -588,3 +595,62 @@ def test_diff_apply_roundtrip(tmp_path):
             out[k] = (h, f)
         return out
     assert norm(mb) == norm(ma)
+
+
+def test_rebind_fold_note_convergence_pinned(tmp_path):
+    """Pinned 2026-07-17 hypothesis counterexamples (two shapes, one root):
+    a highlight REBOUND across articles (in-family via URL-dedupe sidecar
+    moves) whose note rides only one side of the rebind fold. Pre-fix, one
+    apply order blockified the note under a blank head (and the equal-core
+    tiebreak then compared the MUTATED note, hiding the real head) while
+    the other order kept the plain head — byte divergence. Fixed by
+    _note_rank (blank-loses + head-based ranking) and _merge_notes'
+    winner-head block filter. Deterministic replay of both shapes."""
+    from tiro.sync.journal import HLC, LineDel, LinePut
+    from tiro.sync.merge import apply_ops
+
+    base = {"uid": HL_UIDS[0], "quote": "0", "prefix": "", "suffix": "",
+            "position_start": 0, "position_end": 0, "content_hash": "a" * 64,
+            "color": "yellow", "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": None}
+
+    def lp(dev, c, art, note):
+        ln = dict(base)
+        ln["article_uid"] = art
+        ln["note_markdown"] = note
+        return LinePut(op_id=f"01K{dev[-1].upper()}{c:021d}",
+                       hlc=HLC(1, c, dev), device=dev,
+                       uid=HL_UIDS[0], article_uid=art, line=ln)
+
+    def ld(dev, c, art):
+        return LineDel(op_id=f"01K{dev[-1].upper()}{c:021d}",
+                       hlc=HLC(1, c, dev), device=dev,
+                       uid=HL_UIDS[0], article_uid=art,
+                       observed_updated_at=None)
+
+    a0, a1 = ART_UIDS[0], ART_UIDS[1]
+    shapes = {
+        # deva rebinds mid-journal; devc's note rides the OLD binding.
+        "single-device-rebind": (
+            [lp("deva", 0, a0, None), lp("deva", 1, a0, None),
+             ld("deva", 2, a0), ld("deva", 3, a0), ld("deva", 4, a0),
+             lp("deva", 5, a1, None), lp("deva", 6, a1, "0")],
+            [lp("devc", 0, a0, "0")]),
+        # conflicting cross-device binding (first counterexample shape).
+        "cross-device-binding": (
+            [lp("deva", 0, a0, None), lp("deva", 1, a0, None),
+             ld("deva", 2, a0), ld("deva", 3, a0), ld("deva", 4, a0),
+             lp("deva", 5, a0, None), lp("deva", 6, a0, "0")],
+            [lp("devc", 0, a1, "0")]),
+    }
+    for name, (batch_a, batch_b) in shapes.items():
+        states = []
+        for order in ((batch_a, batch_b), (batch_b, batch_a)):
+            root = tmp_path / f"{name}-{len(states)}"
+            config = _mini_lib(root, "lib")
+            for i, uid in enumerate(ART_UIDS[:2]):
+                _seed_article(config, uid, f"https://seed.example.com/{i}")
+            for batch in order:
+                apply_ops(config, batch, guard=False)
+            states.append(_observable_state(config))
+        assert states[0] == states[1], f"order divergence in shape {name}"

@@ -611,8 +611,25 @@ def write_conflict_file(dir_path: Path, stem: str, body: str, *,
     (spec §4 naming; S1 passes the default 'local', S2's merge passes the
     losing op's device label). Collision-safe; never overwrites. `device` is
     sanitized to the `_CONFLICT_RE` alphabet ([A-Za-z0-9]) so the file always
-    round-trips as a conflict file (excluded from ingest/orphan handling)."""
+    round-trips as a conflict file (excluded from ingest/orphan handling).
+
+    Same-content dedupe (D19#2): before minting a new file, the existing
+    {stem}.conflict-* files are scanned and a byte-identical one is returned
+    as-is. A re-applied journal segment (crash between apply and watermark
+    persist) must not mint duplicate conflict files — the dedupe makes
+    conflict-file creation idempotent."""
     device = re.sub(r"[^A-Za-z0-9]", "", device) or "peer"
+    if dir_path.is_dir():
+        prefix = f"{stem}.conflict-"
+        for existing in sorted(dir_path.iterdir()):
+            if not existing.name.startswith(prefix) or not existing.is_file():
+                continue
+            try:
+                if existing.read_text(encoding="utf-8") == body:
+                    return existing
+            # Unreadable/undecodable candidate never blocks preservation.
+            except (OSError, UnicodeDecodeError):
+                continue
     dir_path.mkdir(parents=True, exist_ok=True)
     day = datetime.now(UTC).strftime("%Y%m%d")
     dest = dir_path / f"{stem}.conflict-{device}-{day}.md"
@@ -620,7 +637,7 @@ def write_conflict_file(dir_path: Path, stem: str, body: str, *,
     while dest.exists():
         dest = dir_path / f"{stem}.conflict-{device}-{day}-{n}.md"
         n += 1
-    dest.write_text(body)
+    dest.write_text(body, encoding="utf-8")
     return dest
 
 

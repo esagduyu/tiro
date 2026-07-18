@@ -687,3 +687,45 @@ class TestS28MetaClockFix:
                                 (uid,)).fetchone()["rating"] == -1
         finally:
             conn.close()
+
+
+def _uid_for(config, article_id):
+    conn = get_connection(config.db_path)
+    try:
+        return conn.execute("SELECT uid FROM articles WHERE id = ?",
+                            (article_id,)).fetchone()["uid"]
+    finally:
+        conn.close()
+
+
+class TestTransientInfraErrors:
+    """S5.3 review M2: sqlite3.OperationalError is transient infra (e.g.
+    "database is locked" from the concurrent S1 reconcile loop) — apply_ops
+    must RE-RAISE it so the engine holds the watermark and re-applies the
+    whole segment next cycle, instead of folding it into report.errors and
+    letting the watermark advance (permanent op loss)."""
+
+    def test_operational_error_reraises(self, initialized_library, monkeypatch):
+        import sqlite3
+
+        art = _ingest(initialized_library)
+        uid = _uid_for(initialized_library, art["id"])
+
+        def boom(_config, _op, _report):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("tiro.sync.merge._apply_meta", boom)
+        with pytest.raises(sqlite3.OperationalError):
+            apply_ops(initialized_library,
+                      [_meta(uid, "rating", 2, "2026-07-11T00:00:00Z")])
+
+    def test_deterministic_bad_op_still_folds_into_errors(
+            self, initialized_library):
+        art = _ingest(initialized_library)
+        uid = _uid_for(initialized_library, art["id"])
+        # Disallowed meta field raises ValueError inside _apply_meta —
+        # deterministic, folds into report.errors, never raises out.
+        report = apply_ops(initialized_library,
+                           [_meta(uid, "not_a_field", 1,
+                                  "2026-07-11T00:00:00Z")])
+        assert report.errors == 1

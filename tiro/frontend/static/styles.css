@@ -475,6 +475,14 @@ body.has-lan-banner .content {
     width: 100%;
 }
 
+/* The bare [hidden] attribute loses to the author-origin display:flex above
+   (same trap .tab-badge[hidden]/.sheet[hidden] already guard against) — the
+   sync footer anchor must render hidden until sidebar.js confirms sync is
+   configured (S5.8 review M1). */
+.sidebar-footer-item[hidden] {
+    display: none;
+}
+
 .sidebar-footer-item .ti {
     flex-shrink: 0;
 }
@@ -4186,6 +4194,16 @@ main {
 
 .status-ok {
     background: var(--tiro-secondary);
+}
+
+/* Sync status tiers (S5.8): warn = gold, err = the must-read crimson.
+   Both variables exist in papyrus.css AND roman-night.css. */
+.status-warn {
+    background: var(--tiro-gold);
+}
+
+.status-err {
+    background: var(--tiro-tier-must-read);
 }
 
 .status-off {
