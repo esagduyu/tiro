@@ -1430,6 +1430,13 @@
                 html += '<div class="status-detail muted">' + escapeHtml(String(w)) + '</div>';
             });
         }
+        // Clock-skew warnings (S6.3): live status warnings, warning-colored
+        // like the needs-attention line above (not muted — actionable).
+        if (Array.isArray(d.warnings)) {
+            d.warnings.forEach(function(w) {
+                html += '<div class="status-detail" style="color: var(--tiro-rate-dislike);">Warning: ' + escapeHtml(String(w)) + '</div>';
+            });
+        }
 
         (d.devices || []).forEach(function(dev) {
             var line = escapeHtml(dev.name || dev.device_id);

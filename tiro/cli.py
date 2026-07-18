@@ -843,6 +843,8 @@ def cmd_doctor(args):
                           "settings (`tiro sync setup`)")
                 for warning in sync_info.get("cycle_warnings") or []:
                     print(f"sync: last-cycle warning — {warning}")
+                for warning in sync_info.get("clock_skew") or []:
+                    print(f"sync: {warning}")
                 if sync_info.get("conflict_files"):
                     print(f"sync: {sync_info['conflict_files']} conflict "
                           "file(s) pending review (listed above)")
@@ -936,6 +938,7 @@ def cmd_sync(args):
     from tiro.sync.engine import (
         SyncConfigError,
         adapter_for_config,
+        load_sync_status,
         read_sync_state,
         repair,
         resolve_encryption,
@@ -1030,6 +1033,10 @@ def cmd_sync(args):
                  else (row["name"] or row["device_id"]))
         print(f"  {label}: seq {row['last_seq'] or 0}, "
               f"last seen {row['last_seen'] or 'never'}")
+    # Clock-skew warnings (S6.3): live ahead-check + persisted last-cycle
+    # skew lines, already deduped by load_sync_status.
+    for warning in load_sync_status(config)["warnings"]:
+        print(f"⚠ {warning}")
 
 
 def _sync_setup(config):

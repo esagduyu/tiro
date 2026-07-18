@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 
 LOCK_TTL_S = 120  # backend advisory-lock TTL, used by the S5.4 cycle
 
+#: FROZEN (spec §10 / D-S6-1): a remote device whose wall clock is more
+#: than this many hours off ours gets a clock-skew warning — LWW merges
+#: may misorder until the clock is fixed.
+CLOCK_SKEW_WARN_HOURS = 24
+
 #: Cap on alias-chain hops in _remap_alias_uids — a chain deeper than this
 #: (or any cycle) leaves the op untouched rather than looping.
 _ALIAS_CHAIN_CAP = 20
@@ -57,6 +62,30 @@ _OBJECT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _iso_to_ms(stamp) -> int | None:
+    """Epoch-ms for a _now_iso()-format stamp; None on anything else."""
+    try:
+        return int(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+                   .replace(tzinfo=UTC).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _skew_warning(label: str, hours: float, direction: str) -> str:
+    """One clock-skew warning line (S6.3, D-S6-1). Hedged + actionable;
+    `direction` is "ahead of" or "behind". Format is load-bearing for the
+    label-dedupe regex in load_sync_status — change both together."""
+    return (f"clock skew: device '{label}' is ~{hours:.0f}h {direction} "
+            "this device's clock — last-write-wins merges may misorder "
+            "until fixed")
+
+
+#: Extracts the device label back out of a _skew_warning line so prong A
+#: (persisted cycle warnings) and prong B (live registry check) never
+#: double-report the same device in load_sync_status.
+_SKEW_LABEL_RE = re.compile(r"^clock skew: device '(.*?)' is ")
 
 
 @dataclass
@@ -272,12 +301,18 @@ def load_sync_status(config: TiroConfig) -> dict:
     dot semantics: "err" when the last cycle errored; "warn" when it needs
     attention OR sync is enabled but has never completed a cycle; else "ok"
     (skipped_lock counts as ok — another device legitimately held the lock).
+
+    "warnings" (always present, [] default) carries clock-skew warnings
+    (S6.3): the live registry ahead-check plus any persisted `clock skew:`
+    lines from the last cycle, deduped by device label.
     """
     configured = bool(config.sync_path or config.sync_s3_bucket
                       or config.sync_webdav_url)
     last_cycle = None
     device_name = None
     devices: list[dict] = []
+    warnings: list[str] = []
+    warned_labels: set[str] = set()
     try:
         if config.db_path.exists():
             state = read_sync_state(config)
@@ -295,8 +330,40 @@ def load_sync_status(config: TiroConfig) -> dict:
                 }
                 for r in state["devices"]
             ]
+            # Prong B of the clock-skew check (S6.3, D-S6-1): LIVE
+            # ahead-check over the registry's last_wall_ms (a monotone MAX
+            # of pulled stamps) — keeps the warning visible for as long as
+            # future-stamped LWW misordering is still material, not just
+            # in the cycle that pulled the stamp. A behind clock leaves no
+            # such durable local trace, so "behind" surfaces only via the
+            # persisted prong-A cycle warning folded in below.
+            now_ms = int(datetime.now(UTC).timestamp() * 1000)
+            threshold_ms = CLOCK_SKEW_WARN_HOURS * 3600 * 1000
+            for r in state["devices"]:
+                if r["is_self"]:
+                    continue
+                wall = r.get("last_wall_ms")
+                if wall and wall > now_ms + threshold_ms:
+                    label = r.get("name") or r["device_id"]
+                    warned_labels.add(label)
+                    warnings.append(_skew_warning(
+                        label, (wall - now_ms) / 3_600_000, "ahead of"))
     except Exception as e:  # read_sync_state already degrades; belt on top
         logger.warning("load_sync_status: unreadable sync state: %s", e)
+    # Fold in prong A's persisted clock-skew warnings, deduped by device
+    # label so A+B never double-report the same device. isinstance guard on
+    # the list itself: last_cycle_json is only parse-validated to a dict,
+    # and this function must never raise.
+    cycle_warnings = (last_cycle or {}).get("warnings")
+    for w in (cycle_warnings if isinstance(cycle_warnings, list) else []):
+        if not isinstance(w, str) or not w.startswith("clock skew:"):
+            continue
+        m = _SKEW_LABEL_RE.match(w)
+        label = m.group(1) if m else w
+        if label in warned_labels:
+            continue
+        warned_labels.add(label)
+        warnings.append(w)
     result = (last_cycle or {}).get("result")
     if result == "error":
         dot = "err"
@@ -313,6 +380,7 @@ def load_sync_status(config: TiroConfig) -> dict:
         "last_synced_at": (last_cycle or {}).get("finished_at"),
         "device_name": device_name,
         "devices": devices,
+        "warnings": warnings,
     }
 
 
@@ -655,6 +723,25 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     state = read_sync_state(config)
     watermarks = dict(state["watermarks"])
 
+    # Clock-skew baseline (S6.3, D-S6-1 prong A), captured ONCE before this
+    # cycle overwrites anything: the behind-check compares pulled stamps
+    # against the PREVIOUS successful cycle's finish time — a segment new to
+    # this pull was written after that pull in real time, so a stamp >24h
+    # before it proves the remote clock is behind. No previous success (a
+    # bootstrap/catch-up pull) => no behind-check, so a laptop offline all
+    # weekend can never false-fire. The ahead-check needs no baseline: an
+    # HLC wall stamp from the future proves relative skew outright.
+    prev_cycle = state["last_cycle"]
+    prev_success_ms = (_iso_to_ms(prev_cycle.get("finished_at"))
+                       if isinstance(prev_cycle, dict)
+                       and prev_cycle.get("result") == "ok" else None)
+    skew_now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    skew_threshold_ms = CLOCK_SKEW_WARN_HOURS * 3600 * 1000
+    skew_warned: set[str] = set()  # one warning per device per cycle
+    remote_names: dict[str, str] = {
+        r["device_id"]: r["name"] for r in state["devices"]
+        if not r["is_self"] and r.get("name")}
+
     # 0. Repair-epoch detection (spec §6.6 / S5 plan decision #5): we have
     # SYNC HISTORY — pushed before (last_seq > 0) OR pulled before
     # (non-empty watermarks: a freshly-bootstrapped pull-only device
@@ -710,6 +797,8 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
             report.warnings.append(f"unreadable device doc {key}: {e}")
             continue
         doc_last_seqs[remote_id] = info.last_seq
+        if info.name:
+            remote_names[remote_id] = info.name
         upsert_remote_device(config, remote_id, name=info.name,
                              last_seq=info.last_seq, last_seen=info.last_seen)
 
@@ -849,6 +938,22 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         mx = max((op.hlc.wall_ms for op in ops), default=None)
         if mx:
             update_remote_wall(config, dev, mx)
+            # Prong A of the clock-skew check (S6.3, D-S6-1): both
+            # directions, one warning per device per cycle, riding
+            # report.warnings -> _record_cycle -> last_cycle_json. mx is
+            # the segment's NEWEST stamp, so "even the max is old" is the
+            # honest behind signal.
+            if dev not in skew_warned:
+                label = remote_names.get(dev) or dev
+                if mx > skew_now_ms + skew_threshold_ms:
+                    skew_warned.add(dev)
+                    report.warnings.append(_skew_warning(
+                        label, (mx - skew_now_ms) / 3_600_000, "ahead of"))
+                elif (prev_success_ms is not None
+                        and mx < prev_success_ms - skew_threshold_ms):
+                    skew_warned.add(dev)
+                    report.warnings.append(_skew_warning(
+                        label, (prev_success_ms - mx) / 3_600_000, "behind"))
         report.pulled_segments += 1
         report.applied += apply_report.applied
         report.conflicts += apply_report.conflicts

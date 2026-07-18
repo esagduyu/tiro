@@ -577,3 +577,165 @@ def test_cli_doctor_prints_cycle_warnings(plain_synced, monkeypatch, capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "sync: last-cycle warning — snapshot 01FAKE unusable" in out
+
+
+# --- S6.3: clock-skew warnings (>24h, spec §10 / D-S6-1) ---------------------
+
+
+def _skewed_hlc_factory(offset_ms):
+    """engine.HLCClock stand-in whose wall clock runs offset_ms off the real
+    one — the honest seam: HLCClock already accepts a now_ms time source, so
+    no journal-side patching is needed."""
+    import time
+
+    from tiro.sync.journal import HLCClock
+
+    def _factory(device):
+        return HLCClock(
+            device, now_ms=lambda: time.time_ns() // 1_000_000 + offset_ms)
+
+    return _factory
+
+
+def _skews(warnings):
+    return [w for w in warnings if w.startswith("clock skew:")]
+
+
+def test_clock_skew_constant_frozen():
+    """FROZEN: the >24h threshold is spec §10 — never tune it casually."""
+    assert engine.CLOCK_SKEW_WARN_HOURS == 24
+
+
+def test_status_live_ahead_check(initialized_library):
+    """Prong B unit: a registry row whose last_wall_ms sits ~30h in the
+    future warns (naming the device); ~1h ahead stays silent."""
+    import time
+
+    from tiro.sync.engine import load_sync_status, upsert_remote_device
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+
+    upsert_remote_device(cfg, "01SKEWFASTLAPTOP0000000000",
+                         name="fast-laptop",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+    warnings = load_sync_status(cfg)["warnings"]
+    assert len(warnings) == 1
+    assert "fast-laptop" in warnings[0]
+    assert "clock" in warnings[0]
+    assert "ahead" in warnings[0]
+
+    # ~1h of skew is normal life (timezones don't matter — HLC wall stamps
+    # are UTC epoch ms — but drift/suspend jitter must never warn).
+    upsert_remote_device(cfg, "01SKEWFASTLAPTOP0000000000",
+                         last_wall_ms=now_ms + 1 * 3600 * 1000)
+    assert load_sync_status(cfg)["warnings"] == []
+
+
+@pytest.fixture
+def skew_rig(tmp_path, initialized_library):
+    """(cfg_a, cfg_b, backend): plaintext two-device rig. A pushed one
+    normal-clock cycle (auto-snapshot on first cycle covers it); B joined
+    via the empty-library auto-bootstrap and completed one SUCCESSFUL
+    cycle — the prev-success baseline the behind-check needs."""
+    backend = tmp_path / "skew-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Alpha", body="# Alpha\n\nBody one.",
+            url="https://example.com/alpha")
+    assert _sync(cfg_a).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-skew-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+    cfg_b.sync_enabled = True
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    assert _titles(cfg_b) == {"Alpha"}
+    return cfg_a, cfg_b, backend
+
+
+def test_pull_warns_on_remote_clock_ahead(skew_rig, monkeypatch):
+    """Prong A ahead e2e: A pushes ops stamped ~30h in the future; B's next
+    pull warns (one line, naming A), the warning persists into
+    load_sync_status via last_cycle AND the live registry check — deduped
+    to a single line — and doctor's sync section carries it report-only."""
+    from tiro.sync.engine import load_sync_status
+
+    cfg_a, cfg_b, _backend = skew_rig
+    _, name_a = get_or_create_device(cfg_a)
+
+    _ingest(cfg_a, title="Beta", body="# Beta\n\nBody two.",
+            url="https://example.com/beta")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "HLCClock",
+                  _skewed_hlc_factory(30 * 3600 * 1000))
+        assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    skews = _skews(report.warnings)
+    assert len(skews) == 1
+    assert name_a in skews[0]
+    assert "ahead" in skews[0]
+
+    status = load_sync_status(cfg_b)
+    skews = _skews(status["warnings"])
+    assert len(skews) == 1  # prong A + prong B deduped by device label
+    assert name_a in skews[0]
+    assert "ahead" in skews[0]
+
+    # Doctor's sync section carries it (report-only, like the rest of the
+    # section — exit-code neutrality is pinned by the S6.2 drills; the
+    # structural keys aren't asserted here because the joined library
+    # shares the process-global test vectorstore with A's).
+    scan = doctor_scan(cfg_b)
+    skews = _skews(scan["sync"]["clock_skew"])
+    assert len(skews) == 1
+    assert name_a in skews[0]
+
+
+def test_pull_warns_on_remote_clock_behind(skew_rig, tmp_path, monkeypatch):
+    """Prong A behind e2e: B has a previous SUCCESSFUL cycle, so a segment
+    new to this pull whose newest stamp predates that cycle by >24h proves
+    the remote clock is behind. A fresh device C joining afterwards
+    (bootstrap/catch-up, no previous success) pulls the SAME old-stamped
+    ops with NO behind warning — offline-all-weekend can never false-fire."""
+    from tiro.sync.engine import load_sync_status
+
+    cfg_a, cfg_b, backend = skew_rig
+    _, name_a = get_or_create_device(cfg_a)
+
+    # Drain B's journal into A first (a normal-clock cycle): each cycle's
+    # fresh HLC clock observes every pulled stamp and tick() never
+    # regresses, so a backdated wall clock only actually mints old stamps
+    # when the pull observed nothing newer — which is exactly the dangerous
+    # LWW case this warning exists for (a behind device writing without
+    # having seen others' recent ops).
+    assert _sync(cfg_a).result == "ok"
+
+    _ingest(cfg_a, title="Gamma", body="# Gamma\n\nBody three.",
+            url="https://example.com/gamma")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "HLCClock",
+                  _skewed_hlc_factory(-30 * 3600 * 1000))
+        assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    skews = _skews(report.warnings)
+    assert len(skews) == 1
+    assert name_a in skews[0]
+    assert "behind" in skews[0]
+    # A behind clock leaves no future last_wall_ms, so status carries the
+    # persisted cycle warning (folded, not the live prong-B check).
+    assert _skews(load_sync_status(cfg_b)["warnings"]) == skews
+    assert doctor_scan(cfg_b)["sync"]["clock_skew"] == skews
+
+    cfg_c = _second_library(tmp_path, "lib-skew-c")
+    _sync_cfg(cfg_c, backend, encrypt="off")
+    cfg_c.sync_enabled = True
+    report_c = _sync(cfg_c)
+    assert report_c.result == "ok"
+    assert _titles(cfg_c) >= {"Alpha", "Gamma"}
+    assert _skews(report_c.warnings) == []

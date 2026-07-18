@@ -287,6 +287,11 @@ def scan(config: TiroConfig) -> dict:
             "stale_lock": False,
             "conflict_files": len(report["conflict_files"]),
             "cycle_warnings": list(last_cycle.get("warnings") or []),
+            # Clock-skew warnings (S6.3): load_sync_status already merges
+            # the live registry ahead-check with persisted cycle warnings
+            # and dedupes by device label — report-only, like the rest of
+            # this section.
+            "clock_skew": list(status.get("warnings") or []),
         }
         if status["configured"] and config.sync_enabled:
 
