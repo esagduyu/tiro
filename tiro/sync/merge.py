@@ -607,16 +607,46 @@ def _line_sort_key(line: dict) -> tuple:
     return (line.get("created_at") or "", line.get("uid") or "")
 
 
+def _note_rank(note) -> tuple:
+    """Blank notes (None/empty/whitespace) rank BELOW any real note.
+
+    Load-bearing for order independence (hypothesis-found, 2026-07-17):
+    the previous raw canonical_json tiebreak made 'null' sort ABOVE '"0"',
+    so at equal cores an ABSENT note could beat a PRESENT one — the real
+    note was then demoted into a conflict block against a blank head in
+    one fold order but kept as the head in another, byte-diverging the
+    merged note across devices (same-uid lines meeting through different
+    intermediate pairings). With blank-loses, the winning head is the
+    deterministic max over non-blank notes (or blank only when every note
+    is blank, in which case nothing is ever blockified), restoring the
+    canonical head+sorted-block-set form's grouping independence."""
+    if note is None or not str(note).strip():
+        return (0, "", "")
+    # Rank by the DECOMPOSED HEAD, not the mutated full note (second
+    # hypothesis-found divergence, 2026-07-17): folds mutate notes by
+    # accruing conflict blocks, and a rebind fold can leave a real note
+    # blockified under a BLANK head — comparing full notes then let that
+    # mutated form outrank a genuine head ('> [conflict...' > '"0"'),
+    # hiding the head-worthy note on one fold path but not another. The
+    # head is fold-invariant content; the full note stays only as the
+    # final total-order disambiguator.
+    head, _blocks = _decompose_note(str(note))
+    blank_head = not head.strip()
+    return (1 if blank_head else 2, canonical_json(head),
+            canonical_json(note))
+
+
 def _line_key(line: dict) -> tuple:
     """Total order for LWW: updated_at (missing loses), then canonical JSON
-    of the line WITHOUT note_markdown, then the note itself. The core must
-    outrank the note: notes mutate during folds (conflict blocks accrue), so
-    a note-inclusive tiebreak would let the fold GROUPING flip which core
-    wins — breaking associativity-on-line-sets. The note participates only
-    as the final key, where either pick yields the same core."""
+    of the line WITHOUT note_markdown, then the note (blank notes lose —
+    see _note_rank). The core must outrank the note: notes mutate during
+    folds (conflict blocks accrue), so a note-inclusive tiebreak would let
+    the fold GROUPING flip which core wins — breaking associativity-on-
+    line-sets. The note participates only as the final key, where either
+    pick yields the same core."""
     core = {k: v for k, v in line.items() if k != "note_markdown"}
     return (line.get("updated_at") or "", canonical_json(core),
-            canonical_json(line.get("note_markdown")))
+            _note_rank(line.get("note_markdown")))
 
 
 def _lww_pick(a: dict, b: dict) -> tuple[dict, dict]:
@@ -667,16 +697,29 @@ def _decompose_note(note: str | None) -> tuple[str, list[str]]:
     return head, blocks
 
 
+def _block_body(block: str) -> str:
+    """The quoted text of a conflict block (everything after its header)."""
+    _header, _nl, body = block.partition("\n")
+    return body
+
+
 def _merge_notes(winner: dict, loser: dict) -> str | None:
     """Canonical note merge: winner's head stays the head; the loser's head
     (when non-blank and different) joins the conflict-block SET, and the
     union is reassembled sorted. Set semantics make the result independent
     of fold order and stable under re-delivery (a block already present is
-    never appended twice)."""
+    never appended twice).
+
+    Blocks whose body EQUALS the winner's head are dropped (second
+    hypothesis-found divergence, 2026-07-17): a rebind fold can blockify a
+    note under a blank-head winner before the line carrying that same text
+    as its real head arrives — without the filter, one fold order ends
+    with head+self-quoting block while the other ends with the plain head.
+    The text is never lost: it IS the head."""
     w_note = winner.get("note_markdown")
     wh, wb = _decompose_note(w_note)
     lh, lb = _decompose_note(loser.get("note_markdown"))
-    blocks = set(wb) | set(lb)
+    blocks = {b for b in (set(wb) | set(lb)) if _block_body(b) != wh}
     if lh.strip() and lh != wh:
         blocks.add(_conflict_block(lh, loser.get("updated_at")))
     if blocks == set(wb):
