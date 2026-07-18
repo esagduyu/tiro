@@ -1148,7 +1148,13 @@ def _sync_setup(config):
         # (adapter_for_config -> get_or_create_device): a local-only ULID,
         # reused on any later retry — so "Nothing was changed" on the
         # abort paths below refers to config.yaml + the backend, not to
-        # that row.
+        # that row. The library pin moves the same way (S6.5-fix finding
+        # 3, accepted): a successful verify_passphrase/init_backend/
+        # plaintext-join re-pins BEFORE the persist step, so an abort
+        # after that point leaves the pin already pointed at this backend
+        # — harmless (it self-heals by simply re-running setup, which
+        # re-pins again), which is why the post-verify abort messages
+        # below say "Config not persisted", not "Nothing was changed".
         try:
             adapter = adapter_for_config(config)
         except SyncConfigError as e:
@@ -1186,10 +1192,31 @@ def _sync_setup(config):
                         typed = input(
                             "Type UNENCRYPTED to join it anyway: ").strip()
                         if typed != "UNENCRYPTED":
-                            print("Aborted. Nothing was changed.")
+                            print("Aborted. Config not persisted.")
                             return
                         updates["sync_encrypt"] = yaml_quote("off")
                         config.sync_encrypt = "off"
+                    # Joining a plaintext backend is still the RE-PAIR
+                    # ceremony (S6.5-fix review HIGH, D-S6-9):
+                    # verify_passphrase's plaintext leg returns "" and
+                    # overwrites the library pin — without this a
+                    # deliberately re-pointed plaintext user loops on the
+                    # D-S6-2 pin mismatch forever (bootstrap refuses a
+                    # non-empty library; repair itself opens the backend
+                    # and trips the same mismatch first).
+                    try:
+                        joined = await verify_passphrase(config, adapter, "")
+                    except SyncFormatError as e:
+                        print(f"Cannot join this backend: {e}")
+                        print("Nothing was changed.")
+                        return
+                    if joined is None:
+                        # format.json vanished between the probe above and
+                        # the verify — a backend changing underneath the
+                        # ceremony is a refusal, never a half-join.
+                        print("Backend changed while setting up. "
+                              "Nothing was changed.")
+                        return
                 elif fmt_exists:
                     # Backend is ENCRYPTED: verify the passphrase.
                     pw = getpass.getpass("Sync passphrase: ")
@@ -1251,7 +1278,11 @@ def _sync_setup(config):
                     updates["sync_identity"] = secret
                     config.sync_identity = secret
             except KeyboardInterrupt:
-                print("\nAborted. Nothing was changed.")
+                # "Config not persisted", not "Nothing was changed": by
+                # here the device row and (after a successful verify) the
+                # library pin may already have moved — see the step-3
+                # comment above.
+                print("\nAborted. Config not persisted.")
                 return
 
             # 6. Persist — the point of no return for this ceremony.

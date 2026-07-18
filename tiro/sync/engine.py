@@ -1071,7 +1071,9 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
 
     A missing format.json on a plaintext-pinned backend is auto-initialized
     (plaintext form only — an encrypted backend is only ever initialized by
-    the explicit setup ceremony, Task 5's init_backend).
+    the explicit setup ceremony, Task 5's init_backend — and ONLY for a
+    library with no library pin yet: a pinned library pointed at an
+    uninitialized dir refuses instead, see finding 4 below).
 
     LIBRARY PIN (D-S6-2): format.json's library_id is compared against the
     sync_shadow 'libinfo' pin — the one check that stops a re-pointed
@@ -1107,13 +1109,25 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
             raise SyncFormatError(
                 "backend has sync data but no format.json — refusing to "
                 "initialize (possible tamper or partial copy)")
+        # S6.5-fix finding 4: auto-init is for a FIRST-EVER sync only. A
+        # library that already carries a pin but points at an uninitialized
+        # dir is most likely a mis-pointed sync_path (unmounted drive, typo,
+        # half-copied folder) — silently minting a fresh backend here would
+        # orphan the pinned one and fork the sync history. Only the explicit
+        # ceremonies (init_backend / verify_passphrase) re-point a pinned
+        # library.
+        pinned_pre = get_library_pin(config)
+        if pinned_pre is not None:
+            raise SyncFormatError(
+                f"this library is pinned to backend library {pinned_pre}, "
+                "but sync_path points at an uninitialized directory — fix "
+                "sync_path, or run `tiro sync setup` to re-pair")
         lib_id = new_ulid()
         text = build_format_json(lib_id)
         await adapter.put(FORMAT_KEY, text.encode("utf-8"))
-        # Auto-init IS initialization (the m1 guard proved the backend
-        # empty — nothing to cross-merge), so it pins like init_backend
-        # does: overwrite, even if a previous backend's pin exists (a user
-        # re-pointing at a fresh empty dir is a fresh first push).
+        # Auto-init IS initialization (the m1 + pin guards proved the
+        # backend empty AND this library never pinned), so it pins like
+        # init_backend does.
         set_library_pin(config, lib_id)
         logger.info("Sync: auto-initialized plaintext backend format.json")
         return parse_format_json(text), PlainCodec()

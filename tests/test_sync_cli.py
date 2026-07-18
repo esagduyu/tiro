@@ -323,10 +323,71 @@ def test_sync_setup_plaintext_join_refused_changes_nothing(
     cmd_sync(Args(cfg, sync_cmd="setup"))
 
     out = capsys.readouterr().out
-    assert "Aborted. Nothing was changed." in out
+    # "Config not persisted", not "Nothing was changed" (S6.5-fix finding
+    # 3): the ceremony may already have minted the device row by this
+    # point, so the abort wording no longer overclaims.
+    assert "Aborted. Config not persisted." in out
     text = config_path.read_text()
     assert "sync_enabled: true" not in text
     assert "sync_encrypt" not in text
+
+
+def test_sync_setup_plaintext_join_repins_pinned_library(
+    initialized_library, tmp_path, capsys, monkeypatch
+):
+    """S6.5-fix review HIGH (D-S6-9): the plaintext-join branch of the setup
+    ceremony must RE-PIN the library (verify_passphrase's plaintext leg),
+    exactly like the encrypted branch — otherwise a plaintext user who
+    deliberately re-points loops on the D-S6-2 pin mismatch forever (the
+    mismatch message's own remedy is `tiro sync setup`)."""
+    import asyncio as _asyncio
+
+    from tests.test_reconcile import _ingest
+    from tiro.migrations import new_ulid
+    from tiro.sync.crypto import build_format_json
+    from tiro.sync.engine import sync_cycle
+    from tiro.sync.manifest import get_library_pin
+
+    cfg = initialized_library
+    _write_config_yaml(cfg, tmp_path)
+    # Pin the library to backend X via a real first cycle (plaintext).
+    backend_x = tmp_path / "backend-x"
+    cfg.sync_backend = "filesystem"
+    cfg.sync_path = str(backend_x)
+    cfg.sync_encrypt = "off"
+    cfg.sync_enabled = True
+    _ingest(cfg)
+    assert _asyncio.run(sync_cycle(cfg)).result == "ok"
+    pin_x = get_library_pin(cfg)
+    assert pin_x is not None
+
+    # A SEPARATE, already-initialized plaintext backend Y.
+    backend_y = tmp_path / "backend-y"
+    backend_y.mkdir()
+    id_y = new_ulid()
+    (backend_y / "format.json").write_text(build_format_json(id_y))
+    assert id_y != pin_x
+
+    # The REAL ceremony path: backend choice, path, encrypt default N.
+    cfg.sync_encrypt = "auto"  # setup re-collects it
+    answers = iter(["filesystem", str(backend_y), ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("plaintext join must never prompt getpass"))
+
+    cmd_sync(Args(cfg, sync_cmd="setup"))
+
+    out = capsys.readouterr().out
+    assert "Setup complete" in out
+    # The ceremony re-pinned onto Y.
+    assert get_library_pin(cfg) == id_y
+    # And a subsequent cycle against Y does NOT hit the pin mismatch: it
+    # epoch-resets (fresh backend, own device doc absent) and re-pushes.
+    report = _asyncio.run(sync_cycle(cfg))
+    assert report.result == "ok"
+    assert "mismatch" not in (report.reason or "")
+    assert get_library_pin(cfg) == id_y
 
 
 def test_sync_requires_library(test_config, capsys):

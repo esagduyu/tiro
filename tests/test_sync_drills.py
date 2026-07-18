@@ -1093,7 +1093,10 @@ def pin_rig(tmp_path, initialized_library):
     # Seed Y with its journal segment INTACT (no auto-snapshot + own-segment
     # GC): the re-pair drill later pulls Y's history through a plain cycle,
     # which needs the segment — a GC'd journal would (correctly) refuse as
-    # truncated, but that's not what these drills pin.
+    # truncated, but that's not what these drills pin. The REALISTIC flow
+    # (naturally-compacted backends, truncation refusal, repair, epoch
+    # re-push) is pinned by
+    # test_library_pin_repair_chain_against_compacted_backend below.
     with pytest.MonkeyPatch.context() as m:
         async def _no_compact(*args, **kwargs):
             return None
@@ -1162,6 +1165,35 @@ def test_library_pin_repair_via_setup_ceremony(pin_rig):
     assert _titles(cfg) >= {"Mine", "Theirs"}
 
 
+def test_auto_init_refused_when_library_pinned(pin_rig, tmp_path):
+    """S6.5-fix finding 4: plaintext auto-init is FIRST-EVER-sync only. A
+    PINNED library whose sync_path lands on an empty, uninitialized dir
+    (unmounted drive, typo, half-copied folder) refuses needs_attention
+    instead of minting a fresh backend — silently auto-initing would orphan
+    the pinned backend and fork the sync history. The explicit ceremonies
+    (init_backend/verify_passphrase) remain the deliberate re-point path."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, backend_x, _backend_y = pin_rig
+    pin = get_library_pin(cfg)
+    before = _titles(cfg)
+    empty_dir = tmp_path / "empty-foreign-dir"
+    empty_dir.mkdir()
+    cfg.sync_path = str(empty_dir)
+
+    report = _sync(cfg)
+
+    assert report.result == "needs_attention"
+    assert pin in report.reason
+    assert "uninitialized" in report.reason and "setup" in report.reason
+    assert not (empty_dir / "format.json").exists()  # nothing initialized
+    assert _titles(cfg) == before                    # library untouched
+    assert get_library_pin(cfg) == pin               # pin unchanged
+    # Pointing back at the pinned backend self-heals without ceremony.
+    cfg.sync_path = str(backend_x)
+    assert _sync(cfg).result == "ok"
+
+
 def test_library_pin_survives_repair_and_clear_shadow(pin_rig):
     """Repair keeps format.json, so the pin stays valid: cycles pass after
     a repair on the same backend. The repair-epoch reset (clear_shadow)
@@ -1181,6 +1213,118 @@ def test_library_pin_survives_repair_and_clear_shadow(pin_rig):
     clear_shadow(cfg)  # the epoch reset other devices run after a repair
     assert get_library_pin(cfg) == pin
     assert _sync(cfg).result == "ok"
+
+
+def test_library_pin_repair_chain_against_compacted_backend(
+        tmp_path, initialized_library, capsys, monkeypatch):
+    """The REALISTIC re-pair chain (S6.5-fix finding 2, D-S6-9): real
+    backends are compacted from cycle 1, so a re-paired NON-empty library's
+    first cycle hits the S6.1-fix truncation refusal — and the field remedy
+    is `tiro sync repair` from the re-paired device, after which the other
+    device detects the repair epoch and re-pushes.
+
+    Pinned HONESTLY, including the gap the chain exposes (described in the
+    S6.5-fix commit body): the merge completes on the RE-PAIRED device (A
+    ends with the union), but B never converges through cycles alone — A's
+    pre-repair content reached Y only inside the repair SNAPSHOT, snapshot
+    content is never journaled, and a non-empty library never reads
+    snapshots, so B stays at its own subset while reporting ok. B's
+    convergence path is the truncation message's other arm (re-bootstrap
+    from an empty library), proven by fresh library C at the end — which
+    also proves the union is fully recoverable from Y (no data loss)."""
+    from tests.test_sync_cli import _write_config_yaml
+    from tiro.sync.manifest import get_library_pin
+
+    def _journal_files(backend):
+        d = backend / "journal"
+        return [p for p in d.rglob("*") if p.is_file()] if d.exists() else []
+
+    # Library A against backend X — compacted NATURALLY (the first cycle
+    # snapshots immediately and GCs its own acked segment).
+    backend_x = tmp_path / "chain-x"
+    cfg_a = _sync_cfg(initialized_library, backend_x, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Mine", body="# Mine\n\nBody.",
+            url="https://example.com/chain-mine")
+    assert _sync(cfg_a).result == "ok"
+    assert _journal_files(backend_x) == []  # compacted from cycle 1
+
+    # Library B established backend Y — also naturally compacted.
+    backend_y = tmp_path / "chain-y"
+    cfg_b = _second_library(tmp_path, "lib-chain-b")
+    _sync_cfg(cfg_b, backend_y, encrypt="off")
+    cfg_b.sync_enabled = True
+    _ingest(cfg_b, title="Theirs", body="# Theirs\n\nBody.",
+            url="https://example.com/chain-theirs")
+    assert _sync(cfg_b).result == "ok"
+    assert _journal_files(backend_y) == []  # compacted from cycle 1
+
+    # Re-pair A onto Y through the REAL setup ceremony (finding 1's path).
+    _write_config_yaml(cfg_a, tmp_path)
+    cfg_a.sync_encrypt = "auto"  # setup re-collects it
+    answers = iter(["filesystem", str(backend_y), ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("plaintext join must never prompt getpass"))
+    cmd_sync(Args(cfg_a, sync_cmd="setup"))
+    assert "Setup complete" in capsys.readouterr().out
+    assert get_library_pin(cfg_a) == _format_library_id(backend_y)
+
+    # A's first cycle against Y: the PIN passes (the ceremony re-pinned),
+    # the repair-epoch reset fires first (A has history, its own device doc
+    # is absent on Y), and then the S6.1-fix reachability check refuses —
+    # B's device doc reports seq 1 but the segment was GC'd and A's
+    # watermark for B is 0. Nothing applied, nothing pushed.
+    report = _sync(cfg_a)
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason and "repair" in report.reason
+    assert "library mismatch" not in report.reason  # the pin itself passed
+    assert "repair epoch detected — full re-diff/re-push" in report.warnings
+    assert _titles(cfg_a) == {"Mine"}
+    assert _journal_files(backend_y) == []
+
+    # The field remedy: `tiro sync repair` from the re-paired device — Y is
+    # wiped and re-seeded from A's local library; format.json (and so the
+    # pin) is kept.
+    adapter = adapter_for_config(cfg_a)
+    try:
+        assert asyncio.run(engine.repair(cfg_a, adapter)).result == "ok"
+    finally:
+        asyncio.run(adapter.aclose())
+    assert get_library_pin(cfg_a) == _format_library_id(backend_y)
+
+    # B detects the repair epoch and re-pushes its full local state.
+    rb = _sync(cfg_b)
+    assert rb.result == "ok"
+    assert "repair epoch detected — full re-diff/re-push" in rb.warnings
+    assert rb.pushed_ops > 0
+
+    # A pulls B's re-push: the merge completes ON THE RE-PAIRED DEVICE.
+    ra = _sync(cfg_a)
+    assert ra.result == "ok"
+    assert ra.applied > 0
+    assert _titles(cfg_a) == {"Mine", "Theirs"}
+
+    # Stable state (cycles on both until quiescent): A keeps the union; B
+    # HONESTLY pinned at its own subset while reporting ok — the exposed
+    # gap (see docstring; commit body has the full account).
+    for _ in range(2):
+        ra, rb = _sync(cfg_a), _sync(cfg_b)
+        assert ra.result == "ok" and rb.result == "ok"
+    assert ra.pushed_ops == 0 and ra.applied == 0
+    assert rb.pushed_ops == 0 and rb.applied == 0
+    assert _titles(cfg_a) == {"Mine", "Theirs"}
+    assert _titles(cfg_b) == {"Theirs"}
+
+    # No data loss: the union IS fully recoverable from Y — a fresh empty
+    # library bootstrapping from it (the message's other arm) gets both.
+    cfg_c = _second_library(tmp_path, "lib-chain-c")
+    _sync_cfg(cfg_c, backend_y, encrypt="off")
+    cfg_c.sync_enabled = True
+    report_c = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    assert report_c.result == "ok"
+    assert _titles(cfg_c) == {"Mine", "Theirs"}
 
 
 def test_library_flock_blocks_second_process(plain_synced):
