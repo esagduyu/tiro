@@ -44,7 +44,7 @@ The original hackathon submission is preserved, frozen, at [esagduyu/project-tir
 
 Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile), 0.6 (RSS & imports), 0.7 (installable desktop app) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
 
-**In development (on `main`, unreleased):** the road to **1.0 — the fully local, fully owned product** — is a local **agent runtime** (inspectable, replayable AI agents over your library; → 0.8) and **bring-your-own-cloud sync** (multi-device sync where you own the storage, and Obsidian as a co-equal editor; → 0.9). The runtime kernel and the local reconcile engine have landed on `main`; see [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)'s "Path to v1.0" for the full plan and [`VISION.md`](VISION.md) for the five principles the whole product is judged against. Tiro Cloud (optional paid hosted convenience) is a post-1.0 track — a user who never pays gets every feature.
+**In development (on `main`, unreleased):** the road to **1.0 — the fully local, fully owned product** — is a local **agent runtime** (inspectable, replayable AI agents over your library; → 0.8) and **bring-your-own-cloud sync** (multi-device sync where you own the storage, and Obsidian as a co-equal editor; → 0.9). BYO sync is now feature-complete on `main` (0.9.0 `sync-beta`, release pending — the physical multi-device acceptance run is still ahead of it); the runtime kernel landed earlier. See [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)'s "Path to v1.0" for the full plan and [`VISION.md`](VISION.md) for the five principles the whole product is judged against. Tiro Cloud (optional paid hosted convenience) is a post-1.0 track — a user who never pays gets every feature.
 
 The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
 
@@ -374,6 +374,11 @@ Storage Layer (all local)
 | `uv run tiro delete <id>` | Delete an article by id from all stores |
 | `uv run tiro migrate-library [dest]` | Copy the library to a new location (old copy is never deleted; stop the server first) |
 | `tiro service install\|uninstall\|status\|logs` | Run Tiro at login as a background service (see below) |
+| `uv run tiro reconcile [--dry-run] [--json]` | Fold external library edits (Obsidian etc.) into the index — one pass, server stopped (also runs automatically in the background) |
+| `uv run tiro sync` | Show multi-device sync status, including warnings (no network) |
+| `uv run tiro sync --now [--accept-mass-delete]` | Run one sync cycle now (`--accept-mass-delete` = one-shot acceptance of a guarded mass delete) |
+| `uv run tiro sync setup` | Interactive sync setup — backend, credentials, passphrase (prints the recovery code **once**) |
+| `uv run tiro sync repair` | Delete all cloud sync state and re-upload from this device (typed confirmation) |
 
 ### Run at login (`tiro service`)
 
@@ -652,6 +657,68 @@ This runs automatically every 30 seconds (`reconcile_interval_s` in `config.yaml
 **External files are never rewritten** — Tiro only reads them. That means your own YAML frontmatter and comments are always safe, but it also means Tiro's AI-derived tags/summary/analysis for an externally-created or externally-edited article live only inside Tiro (SQLite), not written back into the file.
 
 **Guard:** if an entire `articles/` directory appears to have gone missing, or more than `max(10, 20%)` of articles vanish in one pass, reconcile refuses to delete anything and logs a warning instead — protecting you from an accidentally unmounted drive or moved folder being misread as a mass deletion. `tiro doctor` surfaces the resulting drift, and any conflict files it finds, as a report-only census.
+
+---
+
+## Sync across devices (beta)
+
+Tiro can sync your library across machines through storage **you** own — a folder, an S3-compatible bucket, or a WebDAV server. There is no Tiro-run service in the middle: every device talks only to your backend, and (on remote backends) everything it uploads is end-to-end encrypted with a key derived from your passphrase.
+
+### Quick start
+
+```bash
+uv run tiro sync setup     # interactive: pick a backend, enter credentials, choose a passphrase
+```
+
+Setup prints a **recovery code** at the end. Then on each additional device, run `tiro sync setup` again with the same backend and the same passphrase. After that:
+
+```bash
+uv run tiro sync --now     # run one sync cycle right now
+uv run tiro sync           # show sync status (no network)
+```
+
+Background sync runs automatically while the server is up, every `sync_interval_s` seconds (default 300; `0` = manual only).
+
+> **The recovery code is shown exactly once.** Print it or store it in a password manager. Losing both the passphrase and the recovery code makes your synced data unrecoverable — by design, there is no escrow.
+
+### Backends
+
+| Backend | What it is | Encryption default |
+|---------|-----------|--------------------|
+| `filesystem` | Point at a folder synced by Syncthing, Dropbox, iCloud Drive, etc. | **Off** — the folder is your own disk |
+| `s3` | Any S3-compatible object store: AWS S3, Cloudflare R2, Backblaze B2, MinIO | **On** |
+| `webdav` | Nextcloud or any WebDAV server | **On** |
+
+Turning encryption off on `s3`/`webdav` requires a typed confirmation during setup — you're putting plaintext on a remote host, and Tiro makes you say so out loud.
+
+S3-compatible backends are the recommended path for active multi-device users. Dropbox/iCloud-style folder sync works, but those services aren't real filesystems — they sync lazily, produce conflict copies, and can expose partial writes. The engine defends itself against all of that (hash settling, per-device append-only journals, quarantine-not-half-apply), but a real object store is simply better for active use.
+
+### What syncs, what never syncs
+
+**Syncs:** articles, notes, highlights, wiki pages, ratings, read state, VIP flags, snoozes, sources, saved views, tags.
+
+**Never syncs:** ChromaDB vectors and TTS audio — they regenerate per device (semantic search re-indexes in the background on a new device). Reading stats stay device-local (a v1 limitation). `config.yaml` and auth tokens never leave the device.
+
+### Conflicts
+
+Concurrent edits keep **both** versions, never a silent overwrite. Articles and notes get a `{stem}.conflict-{device}-{date}.md` file next to the winner, surfaced by `tiro doctor` for you to merge by hand. Highlight-anchored notes merge in place with `> [conflict]` blocks — conflicting text is never silently dropped.
+
+### Limitations (honest list)
+
+- Reading stats are device-local; they don't merge across devices yet.
+- ChromaDB vectors and TTS audio regenerate per device rather than syncing.
+- A CRLF file edited externally comes back with LF line endings after syncing — hashes live in newline-translated space, by design.
+- Merging two **already-established** libraries via re-pairing is not a supported flow. After a `tiro sync repair`, a device that wants content it never had must re-bootstrap from an empty library.
+- Renaming article files externally is still a delete+create (see the Obsidian section above).
+
+### Troubleshooting
+
+- `uv run tiro sync` — status, including warnings (clock skew of more than 24 hours between devices is flagged).
+- `uv run tiro doctor` — the sync section reports a stale backend lock (`--fix` clears it), quarantine reasons, and a conflict-file census.
+- `uv run tiro sync repair` — typed confirmation; **deletes all cloud sync state** and re-uploads from this device. Other devices re-diff against the fresh state on their next cycle.
+- If a pulled change would delete most of your library, the mass-delete guard halts sync with a `needs_attention` status until you explicitly run `uv run tiro sync --now --accept-mass-delete`.
+
+External edits (Obsidian or any other editor) are picked up automatically every `reconcile_interval_s` seconds by `tiro reconcile` — that's how vault edits flow into sync.
 
 ---
 
