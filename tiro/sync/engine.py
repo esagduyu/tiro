@@ -1694,8 +1694,11 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                     # pusher's objects-before-segment window would be
                     # misread as garbage and deleted. Compaction is
                     # best-effort anyway; skipping it under lock uncertainty
-                    # (got_lock is None) costs nothing.
-                    if got_lock is True:
+                    # (got_lock is None) costs nothing. Same reasoning for a
+                    # MID-CYCLE theft (whole-branch review m1): if the
+                    # renewer observed our lock stolen/vanished during the
+                    # push, compaction/GC must not race the thief's own.
+                    if got_lock is True and not (renewer and renewer.stolen):
                         await _maybe_compact(config, adapter, codec, report,
                                              renewer=renewer)
             finally:
