@@ -593,13 +593,41 @@ def _source_for(conn, meta: dict) -> int:
 # hard gate): the original pairwise blockquote-append was order-DEPENDENT —
 # folding three notes as F(F(a,b),c) vs F(F(b,c),a) nested the conflict
 # blockquotes differently, and the positional local/remote device label made
-# even the two-note case byte-diverge across arrival orders. Merged notes are
-# now a CANONICAL form — winner head + a sorted SET of conflict blocks, each
-# quoting a loser's head VERBATIM under a content-derived "[conflict {day}]"
-# header — so any fold order over the same set of lines produces identical
-# bytes (test_apply_order_independent_across_devices), re-delivery never
-# grows the note (idempotence), and every non-empty note appears verbatim as
-# a substring of the merged note (test_merge_jsonl_never_loses_a_note — the
+# even the two-note case byte-diverge across arrival orders.
+#
+# ATOM MODEL (S6.5d, decision D-S6-11 — closes the order-dependence family
+# the property gate kept falsifying, counterexamples #4-#7): a merged note
+# is a CANONICAL function of its ATOM SET. The atoms of a note text are its
+# decomposed head (when non-blank) plus every conflict-block BODY (non-
+# blank) — a pure function of the bytes (_note_atoms). Merging unions the
+# two sides' atom sets; the LWW winner's head stays the head (the line
+# total order is total — counterexample #5), and every OTHER atom in the
+# union is minted as a conflict block under ONE FIXED, DATELESS header
+# "> [conflict]", assembled sorted by body (headers are uniform, so body
+# order and block-byte order coincide). Why nothing weaker converges: no
+# block metadata that is not derivable from the note-TEXT set can be
+# order-independent —
+#   - the previous content-derived "[conflict {day}]" header stamped the
+#     LOSER line's updated_at day, but the same body can arrive via
+#     different loser-line versions, and WHICH loser mints the block is
+#     fold-history-shaped (counterexample #7: 'línea única' minted as both
+#     "[conflict 2026-07-01]" and "[conflict unknown-date]" in one fold
+#     order, once in the other);
+#   - the winner-head block filter compared against the CURRENT fold's
+#     winner head — an INTERMEDIATE winner in a multi-fold tree, which
+#     varies with grouping (counterexamples #4/#6's blank-head shapes).
+# Dateless headers + atom reassembly make merged bytes = f(final winner
+# head, atom union) — both fold-invariant — so any fold order over the same
+# set of lines produces identical bytes
+# (test_apply_order_independent_across_devices) and re-delivery never grows
+# the note (idempotence, via the nothing-new early return in _merge_notes).
+# That early return also GRANDFATHERS legacy dated blocks (field sidecars
+# contain them): a fold that adds no new atom returns the winner's note
+# byte-verbatim, dated blocks and all; the first fold that genuinely
+# changes the atom set re-mints ALL of the note's blocks in the dateless
+# form (bodies preserved verbatim) — a deliberate one-way migration at
+# genuine-merge time. Every non-empty note still appears verbatim as a
+# substring of the merged note (test_merge_jsonl_never_loses_a_note — the
 # old "> "-per-line quoting broke verbatim substring for multi-line notes).
 
 
@@ -662,19 +690,20 @@ def _lww_pick(a: dict, b: dict) -> tuple[dict, dict]:
     return (a, b) if _line_key(a) >= _line_key(b) else (b, a)
 
 
-# A conflict block header is a FULL line: "> [conflict 2026-07-10]" (loser's
-# updated_at day) or "> [conflict unknown-date]". The day is CONTENT-derived
-# (never a positional local/remote device label) so the same set of merged
-# lines produces byte-identical notes on every device regardless of which
-# side each line arrived from. Markdown lazy continuation renders the raw
-# note lines that follow as part of the same blockquote.
+# A conflict block header is a FULL line. Freshly minted blocks use the
+# FIXED, DATELESS "> [conflict]" (D-S6-11: any date would be LOSER-line
+# metadata, which is not derivable from the note-text set — counterexample
+# #7); the legacy dated forms "> [conflict 2026-07-10]" / "> [conflict
+# unknown-date]" are still PARSED for decomposition, since field sidecars
+# contain them (grandfathered until a genuine merge re-mints — section
+# comment above). Markdown lazy continuation renders the raw note lines
+# that follow as part of the same blockquote.
 _CONFLICT_HEADER_RE = re.compile(
-    r"(?m)^> \[conflict (?:\d{4}-\d{2}-\d{2}|unknown-date)\]$")
+    r"(?m)^> \[conflict(?: (?:\d{4}-\d{2}-\d{2}|unknown-date))?\]$")
 
 
-def _conflict_block(text: str, when: str | None) -> str:
-    day = (when or "")[:10] or "unknown-date"
-    return f"> [conflict {day}]\n{text}"
+def _conflict_block(text: str) -> str:
+    return f"> [conflict]\n{text}"
 
 
 def _decompose_note(note: str | None) -> tuple[str, list[str]]:
@@ -711,41 +740,49 @@ def _block_body(block: str) -> str:
     return body
 
 
+def _note_atoms(note: str | None) -> tuple[str, set[str]]:
+    """(head, atom set) of a note text — a pure function of the bytes.
+    Atoms are the decomposed head (when non-blank) plus every conflict-
+    block BODY (non-blank). Atoms never contain a full-line conflict
+    header themselves (_decompose_note splits at every header line), so
+    decomposing a reassembled note yields exactly the atoms it was built
+    from — the round-trip that makes the fold's atom union associative."""
+    head, blocks = _decompose_note(note)
+    atoms = {b for b in (_block_body(blk) for blk in blocks) if b.strip()}
+    if head.strip():
+        atoms.add(head)
+    return head, atoms
+
+
 def _merge_notes(winner: dict, loser: dict) -> str | None:
-    """Canonical note merge: winner's head stays the head; the loser's head
-    (when non-blank and different) joins the conflict-block SET, and the
-    union is reassembled sorted. Set semantics make the result independent
-    of fold order and stable under re-delivery (a block already present is
-    never appended twice).
+    """Atom-based canonical note merge (D-S6-11, section comment above):
+    the merged note is a pure function of (winner head, atom union).
 
-    Blocks whose body EQUALS the winner's head are dropped (second
-    hypothesis-found divergence, 2026-07-17): a rebind fold can blockify a
-    note under a blank-head winner before the line carrying that same text
-    as its real head arrives — without the filter, one fold order ends
-    with head+self-quoting block while the other ends with the plain head.
-    The text is never lost: it IS the head.
-
-    A BLANK winner head (None/empty/whitespace) contributes NO bytes to a
-    reassembled note (fourth hypothesis-found divergence, 2026-07-17,
-    S6.5c): every blank note shape ranks interchangeably below a real note
-    (_note_rank), so WHICH blank happens to be the winner's note at the
-    moment a real head is blockified is fold-order-shaped — but the old
-    `[wh] if wh` kept a whitespace-only head's bytes ('   \\n\\n> ...')
-    while a None/'' head yielded a headless block ('> ...'), byte-
-    diverging the same line set. Dropping blank heads makes reassembly a
-    function of the SET again; whitespace is not content, so no-note-loss
-    (which exempts blank notes by strip()) is untouched, and a blank note
-    that never meets a real head keeps its exact bytes via the
-    nothing-new early return above."""
+    - The LWW winner's head stays the head; a BLANK head (None/empty/
+      whitespace) contributes NO bytes (counterexample #6's rule —
+      whitespace is not content, and which blank shape happens to be the
+      winner's note is fold-order-shaped).
+    - Every atom in atoms(winner) ∪ atoms(loser) EXCEPT one equal to the
+      winner's head is minted as a dateless "> [conflict]" block; blocks
+      assemble sorted by body. The head-equality filter is safe because
+      the FINAL winner's head is fold-invariant (max head over the equal-
+      core group — _note_rank ranks by decomposed head), and the filtered
+      text is never lost: it IS the head (counterexample #4).
+    - Nothing-new early return: when the loser contributes no atom the
+      winner doesn't already carry, the winner's note returns BYTE-
+      VERBATIM. This keeps idempotence/re-delivery byte-stable, preserves
+      a blank-only note's exact bytes (it never meets a merge that
+      changes its atoms), and grandfathers legacy dated blocks until a
+      fold genuinely changes the atom set — at which point ALL blocks
+      re-mint dateless (one-way migration at genuine-merge time)."""
     w_note = winner.get("note_markdown")
-    wh, wb = _decompose_note(w_note)
-    lh, lb = _decompose_note(loser.get("note_markdown"))
-    blocks = {b for b in (set(wb) | set(lb)) if _block_body(b) != wh}
-    if lh.strip() and lh != wh:
-        blocks.add(_conflict_block(lh, loser.get("updated_at")))
-    if blocks == set(wb):
+    wh, w_atoms = _note_atoms(w_note)
+    _lh, l_atoms = _note_atoms(loser.get("note_markdown"))
+    if l_atoms <= w_atoms:
         return w_note  # nothing new — keep the winner's bytes untouched
-    parts = ([wh] if wh.strip() else []) + sorted(blocks)
+    blocks = [_conflict_block(a) for a in sorted(w_atoms | l_atoms)
+              if a != wh]
+    parts = ([wh] if wh.strip() else []) + blocks
     return "\n\n".join(parts) if parts else w_note
 
 
@@ -754,10 +791,10 @@ def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
     """FROZEN core signature. Per-uid set union; same-uid clash resolves
     LWW-whole-line on updated_at (_line_key total order), and a losing
     note_markdown that differs is preserved in the winning note as a
-    "[conflict {date}]" block — never silently dropped (spec §4). Pure,
+    dateless "> [conflict]" block — never silently dropped (spec §4). Pure,
     deterministic, commutative AND order-independent across arbitrary fold
-    groupings (canonical head+sorted-block-set note form; see the section
-    comment above). label_a/label_b are retained for signature stability but
+    groupings (atom-based canonical note form; see the section comment
+    above). label_a/label_b are retained for signature stability but
     are no longer embedded in conflict blocks — a positional label ("local"
     vs a device id for the SAME line, depending on arrival order) is exactly
     what byte-level convergence cannot contain."""

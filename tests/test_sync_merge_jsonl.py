@@ -61,12 +61,15 @@ class TestMergeJsonl:
                                 label_a="laptop", label_b="phone")
         assert "winner text" in merged["note_markdown"]
         assert "precious loser text" in merged["note_markdown"]
-        # S2.8 property fix: the block header is content-derived (loser's
-        # updated_at day) — the old positional device label ("laptop" here,
-        # but "local" vs the device id depending on which side a line
-        # arrived from) made merged notes byte-diverge across arrival
-        # orders, failing the apply-level order-independence property.
-        assert "[conflict 2026-07-10]" in merged["note_markdown"]
+        # S6.5d (D-S6-11): freshly minted blocks carry the FIXED, DATELESS
+        # "> [conflict]" header. The S2.8 content-derived day (loser's
+        # updated_at) — itself a fix for the older positional device label —
+        # still byte-diverged across fold orders: the same body arriving via
+        # different loser-line versions minted different date labels
+        # (property counterexample #7). Pinned bytes updated consciously
+        # with the decided format.
+        assert merged["note_markdown"] == \
+            "winner text\n\n> [conflict]\nprecious loser text"
 
     def test_identical_notes_not_duplicated(self):
         a = _line(note="same", updated="2026-07-10T00:00:00Z")
@@ -122,6 +125,38 @@ class TestMergeJsonl:
         (twice,) = merge_jsonl([once], [loser], label_a="a", label_b="c")
         assert twice["note_markdown"] == once["note_markdown"]
         assert twice["note_markdown"].count("[conflict") == 1
+
+    def test_legacy_dated_blocks_survive_nothing_new_folds(self):
+        """S6.5d grandfathering pin: a winner note carrying LEGACY dated
+        conflict blocks (pre-D-S6-11 field sidecars contain them) keeps its
+        bytes VERBATIM through any fold that adds no new atom — the
+        nothing-new early return, recomputed in atom terms."""
+        legacy = ("winner head\n\n> [conflict 2026-07-01]\nold alpha\n\n"
+                  "> [conflict unknown-date]\nold beta")
+        winner = _line(note=legacy, updated="2026-07-11T00:00:00Z")
+        # Loser contributes atoms the winner already carries (a block body
+        # and the head itself):
+        for stale_note in (None, "old alpha", "winner head", "old beta"):
+            loser = _line(note=stale_note, updated="2026-07-10T00:00:00Z")
+            (merged,) = merge_jsonl([winner], [loser])
+            assert merged["note_markdown"] == legacy
+
+    def test_genuine_merge_remints_legacy_blocks_dateless(self):
+        """S6.5d one-way migration pin: the first fold that genuinely
+        changes the atom set re-mints ALL blocks in the dateless form,
+        bodies preserved verbatim, sorted by body."""
+        legacy = "winner head\n\n> [conflict 2026-07-01]\nold alpha"
+        winner = _line(note=legacy, updated="2026-07-11T00:00:00Z")
+        loser = _line(note="brand new", updated="2026-07-10T00:00:00Z")
+        (merged,) = merge_jsonl([winner], [loser])
+        assert merged["note_markdown"] == (
+            "winner head\n\n> [conflict]\nbrand new\n\n"
+            "> [conflict]\nold alpha")
+        # Idempotent from the canonical form onwards:
+        (again,) = merge_jsonl([merged], [loser])
+        assert again["note_markdown"] == merged["note_markdown"]
+        (thrice,) = merge_jsonl([merged], [winner])
+        assert thrice["note_markdown"] == merged["note_markdown"]
 
 
 def _ingest(config, title="Hello World",

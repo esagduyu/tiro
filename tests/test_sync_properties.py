@@ -516,6 +516,29 @@ def _ex_line(note, updated, color="yellow"):
              device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
              line=_ex_line("   ", "2026-07-01T00:00:00Z"))],
 ))
+@example(pair=(
+    # Pinned counterexample #7 kernel (hypothesis-found 2026-07-17, S6.5
+    # gate run; minimized from a 12-op soup — the dels/rebind/Meta were
+    # noise): the SAME note body 'línea única' carried by two line versions
+    # with DIFFERING updated_at (a date vs None), plus a blank-note LWW
+    # winner. The content-derived "[conflict {day}]" header stamped the
+    # LOSER's updated_at day, and WHICH loser mints the block is fold-
+    # history-shaped: deva-first blockified BOTH versions (two blocks,
+    # "[conflict 2026-07-01]" + "[conflict unknown-date]"), devb-first
+    # collapsed them head-to-head before the winner arrived (one block).
+    # Fixed by D-S6-11's atom model: dateless "> [conflict]" headers make
+    # the merged note a function of the atom SET — no loser-line metadata
+    # survives into the bytes.
+    [LinePut(op_id="01OPLINE00000000000000000H", hlc=HLC(1, 0, "deva"),
+             device="deva", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line(None, "2026-07-02T00:00:00Z"))],
+    [LinePut(op_id="01OPLINE00000000000000000I", hlc=HLC(1, 0, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("línea única", "2026-07-01T00:00:00Z")),
+     LinePut(op_id="01OPLINE00000000000000000J", hlc=HLC(1, 1, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("línea única", None))],
+))
 def test_apply_order_independent_across_devices(pair):
     """Two devices' batches applied in either order converge (spec §9's
     commutativity across op reorderings per device pair). Libraries start
