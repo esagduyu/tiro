@@ -161,6 +161,92 @@ def test_bootstrap_missing_shared_object_refuses_cleanly(
     assert list(cfg_c.articles_dir.glob("*.md")) == []
 
 
+def test_bootstrap_falls_back_on_parse_failure(tmp_path, seeded_backend):
+    """Decision #1(a)'s PARSE-failure leg, pinned distinctly from the
+    decrypt-failure leg: the newest manifest DECRYPTS fine (real codec)
+    but is not a snapshot doc -> parse_snapshot raises -> bootstrap falls
+    back to the older snapshot and the tail pull still converges to all
+    three titles."""
+    from tiro.sync.snapshot import encode_snapshot
+
+    cfg_a, backend, manifests = seeded_backend
+    codec = codec_for_config(cfg_a)
+    manifests[-1].write_bytes(
+        encode_snapshot("this is not a snapshot doc", codec))
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "ok"
+    assert _titles(cfg_c) == {"Alpha", "Beta", "Gamma"}
+    assert any("unusable" in w for w in report.warnings)
+
+
+def test_fallback_bootstrap_with_truncated_journal_refuses(
+        tmp_path, seeded_backend):
+    """S6.1-fix review Major 1, field case (a): newest manifest corrupt AND
+    every journal segment beyond the OLDER snapshot's covers fully GC'd.
+    The fallback materializes the older snapshot, but the pull must then
+    detect that A's device doc reports a journal head the listing cannot
+    reach — needs_attention (truncated/GC'd + repair pointer), NEVER a
+    silently-stale "ok"."""
+    from tiro.sync.snapshot import decode_snapshot, parse_journal_key
+
+    cfg_a, backend, manifests = seeded_backend
+    codec = codec_for_config(cfg_a)
+    older_covers = decode_snapshot(manifests[0].read_bytes(), codec).covers
+    manifests[-1].write_bytes(CORRUPTION)
+    deleted = 0
+    for seg in backend.glob("journal/*/*.age"):
+        dev, seq = parse_journal_key(seg.relative_to(backend).as_posix())
+        if seq > older_covers.get(dev, 0):
+            seg.unlink()
+            deleted += 1
+    assert deleted  # the Gamma tail segment was present, and is now gone
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason
+    assert "GC'd" in report.reason
+    assert "repair" in report.reason
+    # Honest partial: the older snapshot's two articles DID materialize;
+    # what must never happen is an "ok" that hides the missing tail.
+    assert _titles(cfg_c) == {"Alpha", "Beta"}
+
+
+def test_steady_state_truncated_segment_refuses(tmp_path, seeded_backend):
+    """S6.1-fix review Major 1, field case (b): two converged devices; A
+    pushes a new segment B has not pulled; that segment file is then lost
+    from the backend while A's device doc still reports it. B's next cycle
+    must be needs_attention (truncated), not an ok that silently strands B
+    behind A's journal head forever."""
+    from tiro.sync.snapshot import journal_key
+
+    cfg_a, backend, _manifests = seeded_backend
+    cfg_b = _join(tmp_path, backend, name="lib-b")
+    report = asyncio.run(bootstrap(cfg_b, adapter_for_config(cfg_b)))
+    assert report.result == "ok"
+    assert _titles(cfg_b) == {"Alpha", "Beta", "Gamma"}
+
+    _ingest(cfg_a, title="Delta", body="# Delta\n\nBody four.",
+            url="https://example.com/delta")
+    report = _sync(cfg_a)
+    assert report.result == "ok"
+    dev_a, _name = get_or_create_device(cfg_a)
+    head = (read_sync_state(cfg_a)["self"] or {}).get("last_seq") or 0
+    seg = backend / journal_key(dev_a, head)
+    assert seg.exists()
+    seg.unlink()
+
+    report = _sync(cfg_b)
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason
+    assert "repair" in report.reason
+    assert "Delta" not in _titles(cfg_b)
+
+
 def test_bootstrap_tail_segment_object_missing_quarantines_after_snapshot(
         tmp_path, seeded_backend):
     """Honest-partial pin: delete exactly the object(s) snapshot #2 needs

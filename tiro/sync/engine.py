@@ -628,6 +628,9 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     # registry is ADVISORY (S5.3 review n4): a garbage doc OR a transient
     # adapter fault on any single doc is a warning, never a stopped cycle —
     # unlike the journal loop below, which keeps strict propagation.
+    # doc_last_seqs feeds the truncation check in step 3b: each REMOTE doc's
+    # self-reported journal head (never our own device's).
+    doc_last_seqs: dict[str, int] = {}
     for key in await adapter.list("devices/"):
         tail = key[len("devices/"):]
         if not tail.endswith(".json") or "/" in tail:
@@ -643,6 +646,7 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         except Exception as e:
             report.warnings.append(f"unreadable device doc {key}: {e}")
             continue
+        doc_last_seqs[remote_id] = info.last_seq
         upsert_remote_device(config, remote_id, name=info.name,
                              last_seq=info.last_seq, last_seen=info.last_seen)
 
@@ -670,13 +674,44 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
             report.result = "needs_attention"
             report.reason = (
                 f"journal gap for device {dev}: expected segment {want}, "
-                f"found {seq} — NOTHING from this run was applied; segments "
+                f"found {seq} — NOTHING from this pull was applied; segments "
                 "were GC'd past this device's ack; run `tiro sync repair` "
                 "on the most complete device (bootstrap only fits an "
                 "empty library)")
             logger.error("Sync pull: %s", report.reason)
             return False
         expected[dev] = seq + 1
+
+    # 3b. Truncation/reachability check (S6.1-fix review Major 1), all-or-
+    # nothing like the gap check above: a remote device doc that reports a
+    # journal head BEYOND what the listing can contiguously reach from our
+    # watermark means segments were GC'd (or lost) past OUR ack — the gap
+    # walk alone cannot see it when the missing segments are missing
+    # ENTIRELY (empty pending = silent-stale "ok"). Field cases: a fallback
+    # bootstrap from an older snapshot whose newer covered segments were
+    # GC'd, and a >90-day-offline device that plan_gc dropped from
+    # ack-blocking. Ordering soundness: push order is objects -> segment ->
+    # device doc, and this pull reads docs BEFORE listing journal/, so a
+    # doc's last_seq N implies segment N was uploaded before the doc write —
+    # a doc ahead of the listing means GC/loss, not a push race (the same
+    # list-after-put consistency the engine already assumes; a
+    # Dropbox-style partial copy transiently refuses here and self-heals on
+    # a later cycle once the files arrive).
+    for dev, doc_last_seq in sorted(doc_last_seqs.items()):
+        if doc_last_seq <= watermarks.get(dev, 0):
+            continue
+        have = expected.get(dev, watermarks.get(dev, 0) + 1) - 1
+        if have < doc_last_seq:
+            report.result = "needs_attention"
+            report.reason = (
+                f"journal truncated for device {dev}: its device doc "
+                f"reports seq {doc_last_seq} but only segments up to "
+                f"{have} are present — NOTHING from this pull was applied; "
+                "segments were GC'd past this device's ack; run "
+                "`tiro sync repair` on the most complete device, or "
+                "re-bootstrap this device from an empty library")
+            logger.error("Sync pull: %s", report.reason)
+            return False
 
     # One-shot mass-delete consent (S5.3 review M3): --accept-mass-delete
     # covers exactly ONE guard trip per run, never every segment of the
@@ -1501,6 +1536,14 @@ async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
                     ) from e
                 objects_plain[addr] = decode_object(
                     blob, codec, expected_hash=addr)
+            # materialize_ops is PURE (no library writes), so it belongs
+            # INSIDE the per-candidate try (S6.1-fix review Minor 2): a
+            # manifest that decrypts + parses but cannot be materialized
+            # (SnapshotError "cannot be materialized" / "no object address
+            # for ...") is just another corrupt candidate and must trigger
+            # the same newest->oldest fallback, never escape as
+            # needs_attention with older snapshots untried.
+            ops = materialize_ops(doc, objects_plain)  # epoch-pinned clock
         except QUARANTINE_ERRORS as e:
             last_error = e
             logger.warning(
@@ -1509,10 +1552,10 @@ async def _materialize_latest_snapshot(config: TiroConfig, adapter, codec,
             report.warnings.append(
                 f"snapshot {snapshot_id} unusable: {e}")
             continue
-        # First fully-fetched candidate: materialize + apply. Failures
-        # from here on are NOT another candidate's problem — the fetch
-        # phase succeeded, so they propagate to the caller's taxonomy.
-        ops = materialize_ops(doc, objects_plain)  # epoch-pinned clock
+        # First fully-fetched + materialized candidate: apply. Failures
+        # from here on are NOT another candidate's problem — apply_ops and
+        # the watermark write stay OUTSIDE (post-choice) and propagate to
+        # the caller's taxonomy.
         device_id, _name = get_or_create_device(config)
         apply_report = await asyncio.to_thread(
             apply_ops, config, ops, guard=False, clock=HLCClock(device_id))
