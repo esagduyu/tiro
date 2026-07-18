@@ -495,6 +495,27 @@ def _ex_line(note, updated, color="yellow"):
              device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
              line=_ex_line("precious", "2026-07-09T00:00:00Z"))],
 ))
+@example(pair=(
+    # Pinned counterexample #6 (hypothesis-found 2026-07-17, S6.5-fix gate
+    # run; minimized from an 11-op soup — the dels/rebind/Meta were all
+    # noise): three same-uid puts whose notes are None / "0" / "   ".
+    # Every blank note shape ranks interchangeably below a real note, so
+    # which blank was the winner's note when "0" got blockified depended
+    # on fold order — and _merge_notes' reassembly kept a whitespace-only
+    # head's BYTES ("   \n\n> [conflict...]") while a None head yielded a
+    # headless block ("> [conflict...]"). Fixed by dropping blank heads at
+    # reassembly (_merge_notes): blank heads contribute no bytes, making
+    # the merged note a function of the line SET again.
+    [LinePut(op_id="01OPLINE00000000000000000E", hlc=HLC(1, 0, "deva"),
+             device="deva", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line(None, "2026-07-01T00:00:00Z"))],
+    [LinePut(op_id="01OPLINE00000000000000000F", hlc=HLC(1626, 0, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("0", None)),
+     LinePut(op_id="01OPLINE00000000000000000G", hlc=HLC(1626, 1, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("   ", "2026-07-01T00:00:00Z"))],
+))
 def test_apply_order_independent_across_devices(pair):
     """Two devices' batches applied in either order converge (spec §9's
     commutativity across op reorderings per device pair). Libraries start

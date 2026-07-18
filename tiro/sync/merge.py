@@ -723,7 +723,20 @@ def _merge_notes(winner: dict, loser: dict) -> str | None:
     note under a blank-head winner before the line carrying that same text
     as its real head arrives — without the filter, one fold order ends
     with head+self-quoting block while the other ends with the plain head.
-    The text is never lost: it IS the head."""
+    The text is never lost: it IS the head.
+
+    A BLANK winner head (None/empty/whitespace) contributes NO bytes to a
+    reassembled note (fourth hypothesis-found divergence, 2026-07-17,
+    S6.5c): every blank note shape ranks interchangeably below a real note
+    (_note_rank), so WHICH blank happens to be the winner's note at the
+    moment a real head is blockified is fold-order-shaped — but the old
+    `[wh] if wh` kept a whitespace-only head's bytes ('   \\n\\n> ...')
+    while a None/'' head yielded a headless block ('> ...'), byte-
+    diverging the same line set. Dropping blank heads makes reassembly a
+    function of the SET again; whitespace is not content, so no-note-loss
+    (which exempts blank notes by strip()) is untouched, and a blank note
+    that never meets a real head keeps its exact bytes via the
+    nothing-new early return above."""
     w_note = winner.get("note_markdown")
     wh, wb = _decompose_note(w_note)
     lh, lb = _decompose_note(loser.get("note_markdown"))
@@ -732,7 +745,7 @@ def _merge_notes(winner: dict, loser: dict) -> str | None:
         blocks.add(_conflict_block(lh, loser.get("updated_at")))
     if blocks == set(wb):
         return w_note  # nothing new — keep the winner's bytes untouched
-    parts = ([wh] if wh else []) + sorted(blocks)
+    parts = ([wh] if wh.strip() else []) + sorted(blocks)
     return "\n\n".join(parts) if parts else w_note
 
 
