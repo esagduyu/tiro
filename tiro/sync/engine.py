@@ -1008,6 +1008,58 @@ def sync_cycle_running() -> bool:
     return _CYCLE_LOCK.locked()
 
 
+#: Sentinel handle for platforms without fcntl / an unopenable lock file:
+#: "proceed as today" (per-process _CYCLE_LOCK only) — never a skip.
+_NO_LIBRARY_LOCK = object()
+
+#: The cross-process skip reason (D-S6-3) — asserted by drills.
+_LIBRARY_LOCK_REASON = "another tiro process is syncing this library"
+
+
+def _acquire_library_lock(config: TiroConfig):
+    """Non-blocking per-LIBRARY file lock (D-S6-3, fixes D-S5-7b): a
+    server scheduler cycle and a concurrent `tiro sync --now` are SEPARATE
+    processes, so _CYCLE_LOCK cannot see each other; if the backend
+    advisory lock then RAISES for both, both would degrade lockless and
+    could PUT the same journal seq with different bytes (append-only
+    violation via concurrency). flock(LOCK_EX | LOCK_NB) on
+    {library}/.sync-cycle.lock closes that hole; the kernel releases it on
+    process death, so there is no staleness protocol. The lock file is
+    ephemeral coordination state in the library dir — nothing sweeps it
+    (doctor/reconcile only handle *.md under articles/, backup's
+    create_snapshot is a per-directory allowlist).
+
+    Returns an open file object holding the flock, None on contention
+    (caller skips the cycle), or _NO_LIBRARY_LOCK when flock is
+    unavailable (Windows has no fcntl) / the file can't be opened —
+    proceed as today rather than wedging sync."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        return _NO_LIBRARY_LOCK
+    try:
+        handle = open(config.library / ".sync-cycle.lock", "a")
+    except OSError as e:
+        logger.warning("Sync: cannot open library lock file: %s", e)
+        return _NO_LIBRARY_LOCK
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None  # another process holds it
+    return handle
+
+
+def _release_library_lock(handle) -> None:
+    """Release _acquire_library_lock's handle (closing the fd drops the
+    flock). No-op for the _NO_LIBRARY_LOCK sentinel."""
+    if handle is not None and handle is not _NO_LIBRARY_LOCK:
+        try:
+            handle.close()
+        except OSError:  # pragma: no cover - close on a regular file
+            pass
+
+
 async def _open_backend(config: TiroConfig, adapter) -> tuple:
     """Per-cycle format.json check -> (fmt_or_None, codec).
 
@@ -1019,13 +1071,24 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
 
     A missing format.json on a plaintext-pinned backend is auto-initialized
     (plaintext form only — an encrypted backend is only ever initialized by
-    the explicit setup ceremony, Task 5's init_backend)."""
+    the explicit setup ceremony, Task 5's init_backend).
+
+    LIBRARY PIN (D-S6-2): format.json's library_id is compared against the
+    sync_shadow 'libinfo' pin — the one check that stops a re-pointed
+    sync_path from cross-merging two PLAINTEXT libraries (encrypted
+    backends are already protected by the age-recipient check below).
+    Absent pin = first cycle against any backend (also covers existing
+    0.8-era users on upgrade): trust and pin. Mismatch = SyncFormatError
+    (quarantine taxonomy -> needs_attention). The explicit ceremonies
+    (init_backend, verify_passphrase) overwrite the pin — that is the
+    user-intent boundary for a deliberate re-point."""
     from tiro.sync.crypto import (
         PlainCodec,
         SyncFormatError,
         build_format_json,
         parse_format_json,
     )
+    from tiro.sync.manifest import get_library_pin, set_library_pin
     from tiro.sync.snapshot import FORMAT_KEY
 
     raw = await _get_or_none(adapter, FORMAT_KEY)
@@ -1044,8 +1107,14 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
             raise SyncFormatError(
                 "backend has sync data but no format.json — refusing to "
                 "initialize (possible tamper or partial copy)")
-        text = build_format_json(new_ulid())
+        lib_id = new_ulid()
+        text = build_format_json(lib_id)
         await adapter.put(FORMAT_KEY, text.encode("utf-8"))
+        # Auto-init IS initialization (the m1 guard proved the backend
+        # empty — nothing to cross-merge), so it pins like init_backend
+        # does: overwrite, even if a previous backend's pin exists (a user
+        # re-pointing at a fresh empty dir is a fresh first push).
+        set_library_pin(config, lib_id)
         logger.info("Sync: auto-initialized plaintext backend format.json")
         return parse_format_json(text), PlainCodec()
     try:
@@ -1067,6 +1136,17 @@ async def _open_backend(config: TiroConfig, adapter) -> tuple:
     if fmt.encryption == "age" and codec.recipient != fmt.age_recipient:
         raise SyncFormatError(
             "sync identity does not match this backend's recipient")
+    # LIBRARY PIN (D-S6-2) — quick sync SQLite, direct calls are fine in
+    # async context (get_or_create_device does the same).
+    pinned = get_library_pin(config)
+    if pinned is None:
+        set_library_pin(config, fmt.library_id)  # first-cycle trust
+    elif pinned != fmt.library_id:
+        raise SyncFormatError(
+            "backend library mismatch: this library was previously synced "
+            f"against backend library {pinned}; this backend is "
+            f"{fmt.library_id} — if this re-point is intentional, run "
+            "`tiro sync setup` again to re-pair")
     return fmt, codec
 
 
@@ -1418,6 +1498,16 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
         report.reason = "another cycle is running in this process"
         report.finished_at = _now_iso()
         return report  # not recorded — we don't own the state
+    lib_lock = _acquire_library_lock(config)
+    if lib_lock is None:
+        _CYCLE_LOCK.release()
+        report.result = "skipped_lock"
+        report.reason = _LIBRARY_LOCK_REASON
+        report.finished_at = _now_iso()
+        # Not recorded either — the OTHER process owns the state, and a
+        # write here would race its last_cycle_json (same "we don't own
+        # the state" semantics as the in-process skip above).
+        return report
     engine_built_adapter = adapter is None
     cancelled = False
     try:
@@ -1558,6 +1648,7 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 except Exception as e:
                     logger.warning("Sync adapter close failed: %s", e)
         finally:
+            _release_library_lock(lib_lock)
             _CYCLE_LOCK.release()
     return report
 
@@ -1592,6 +1683,7 @@ async def init_backend(config: TiroConfig, adapter, passphrase: str, *,
         derive_recovery_code,
         new_kdf_params,
     )
+    from tiro.sync.manifest import set_library_pin
     from tiro.sync.snapshot import FORMAT_KEY
 
     if await _get_or_none(adapter, FORMAT_KEY) is not None:
@@ -1608,8 +1700,10 @@ async def init_backend(config: TiroConfig, adapter, passphrase: str, *,
             "backend has sync data but no format.json — refusing to "
             "initialize (possible tamper or partial copy)")
     if not resolve_encryption(config):
+        lib_id = new_ulid()
         await adapter.put(FORMAT_KEY,
-                          build_format_json(new_ulid()).encode("utf-8"))
+                          build_format_json(lib_id).encode("utf-8"))
+        set_library_pin(config, lib_id)  # ceremony: pin the new backend
         return ""
     if kdf_params is None:
         kdf = new_kdf_params()
@@ -1619,8 +1713,10 @@ async def init_backend(config: TiroConfig, adapter, passphrase: str, *,
             **kdf_params)
     recovery = derive_recovery_code(passphrase, kdf)
     recipient = AgeCodec(recovery).recipient
-    text = build_format_json(new_ulid(), kdf=kdf, age_recipient=recipient)
+    lib_id = new_ulid()
+    text = build_format_json(lib_id, kdf=kdf, age_recipient=recipient)
     await adapter.put(FORMAT_KEY, text.encode("utf-8"))
+    set_library_pin(config, lib_id)  # ceremony: pin the new backend
     return recovery
 
 
@@ -1633,7 +1729,12 @@ async def verify_passphrase(config: TiroConfig, adapter,
     (no identity needed). Clean refusal (spec §9 scenario 6): no exception
     on a wrong passphrase, no partial state. SyncFormatError (e.g. a NEWER
     sync_format) deliberately PROPAGATES — version refusal must be LOUD,
-    never disguised as "wrong passphrase"."""
+    never disguised as "wrong passphrase".
+
+    SUCCESS also re-pins the library_id (D-S6-2): this IS the `tiro sync
+    setup` re-pair ceremony — proving the passphrase (or joining a
+    plaintext backend explicitly) is the user-intent boundary that
+    overwrites a stale pin after a deliberate backend re-point."""
     from tiro.sync.crypto import (
         AgeCodec,
         CryptoError,
@@ -1641,6 +1742,7 @@ async def verify_passphrase(config: TiroConfig, adapter,
         derive_recovery_code,
         parse_format_json,
     )
+    from tiro.sync.manifest import set_library_pin
     from tiro.sync.snapshot import FORMAT_KEY
 
     raw = await _get_or_none(adapter, FORMAT_KEY)
@@ -1653,6 +1755,7 @@ async def verify_passphrase(config: TiroConfig, adapter,
         raise SyncFormatError(f"format.json is not valid UTF-8: {e}") from e
     fmt = parse_format_json(text)  # SyncFormatError propagates (loud)
     if fmt.encryption == "none":
+        set_library_pin(config, fmt.library_id)  # ceremony: re-pair
         return ""
     try:
         rc = derive_recovery_code(passphrase, fmt.kdf)
@@ -1665,6 +1768,7 @@ async def verify_passphrase(config: TiroConfig, adapter,
         raise SyncFormatError(
             f"format.json kdf params unusable: {e}") from e
     if AgeCodec(rc).recipient == fmt.age_recipient:
+        set_library_pin(config, fmt.library_id)  # ceremony: re-pair
         return rc
     return None
 
@@ -1786,6 +1890,21 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
     report = CycleReport()
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        # D-S5-7c: like sync_cycle's own in-process skip, NOT recorded —
+        # we don't own the state, and recording would clobber the running
+        # cycle's fresher last_cycle with a stale skip report.
+        report.result = "skipped_lock"
+        report.reason = "another cycle is running in this process"
+        report.finished_at = _now_iso()
+        return report
+    lib_lock = _acquire_library_lock(config)
+    if lib_lock is None:
+        _CYCLE_LOCK.release()
+        report.result = "skipped_lock"
+        report.reason = _LIBRARY_LOCK_REASON
+        report.finished_at = _now_iso()
+        return report  # not recorded — the other process owns the state
     cancelled = False
     try:
         n = _count_articles(config)
@@ -1793,47 +1912,41 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
             report.result = "error"
             report.reason = ("bootstrap requires an empty library "
                              f"(this library has {n} articles)")
-        elif not _CYCLE_LOCK.acquire(blocking=False):
-            report.result = "skipped_lock"
-            report.reason = "another cycle is running in this process"
         else:
-            try:
-                _fmt, codec = await _open_backend(config, adapter)
-                # A lock fault -> error via the generic taxonomy below.
-                got = await adapter.lock(LOCK_TTL_S)
-                if not got:
-                    report.result = "skipped_lock"
-                    report.reason = "backend lock held — try again"
-                else:
+            _fmt, codec = await _open_backend(config, adapter)
+            # A lock fault -> error via the generic taxonomy below.
+            got = await adapter.lock(LOCK_TTL_S)
+            if not got:
+                report.result = "skipped_lock"
+                report.reason = "backend lock held — try again"
+            else:
+                try:
+                    await _materialize_latest_snapshot(
+                        config, adapter, codec, report)
+                    device_id, _name = get_or_create_device(config)
+                    clock = HLCClock(device_id)
+                    clock_state: dict = {}
+                    # Bootstrap trusts the backend's state wholesale:
+                    # the journal tail may legitimately mass-delete
+                    # relative to the snapshot. skip_epoch_check: our
+                    # device doc publishes at this cycle's push — the
+                    # covers-derived watermarks must survive the pull.
+                    ok = await _pull(config, adapter, codec, clock,
+                                     clock_state, report,
+                                     accept_mass_delete=True,
+                                     skip_epoch_check=True)
+                    if ok:
+                        await _push(config, adapter, codec, clock,
+                                    clock_state, report)
+                finally:
                     try:
-                        await _materialize_latest_snapshot(
-                            config, adapter, codec, report)
-                        device_id, _name = get_or_create_device(config)
-                        clock = HLCClock(device_id)
-                        clock_state: dict = {}
-                        # Bootstrap trusts the backend's state wholesale:
-                        # the journal tail may legitimately mass-delete
-                        # relative to the snapshot. skip_epoch_check: our
-                        # device doc publishes at this cycle's push — the
-                        # covers-derived watermarks must survive the pull.
-                        ok = await _pull(config, adapter, codec, clock,
-                                         clock_state, report,
-                                         accept_mass_delete=True,
-                                         skip_epoch_check=True)
-                        if ok:
-                            await _push(config, adapter, codec, clock,
-                                        clock_state, report)
-                    finally:
-                        try:
-                            await adapter.unlock()
-                        except Exception as e:
-                            logger.warning(
-                                "Sync bootstrap unlock failed: %s", e)
-            finally:
-                _CYCLE_LOCK.release()
+                        await adapter.unlock()
+                    except Exception as e:
+                        logger.warning(
+                            "Sync bootstrap unlock failed: %s", e)
     except asyncio.CancelledError:
         # m4 parity with sync_cycle: a cancelled half-bootstrap records
-        # nothing; the inner finallys above already released the locks.
+        # nothing; the outer finally below still releases both locks.
         cancelled = True
         raise
     except SyncConfigError as e:
@@ -1855,9 +1968,16 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
         report.result = "error"
         report.reason = str(e)[:300]
     finally:
-        if not cancelled:
-            report.finished_at = _now_iso()
-            _record_cycle(config, report)
+        try:
+            # D-S5-7c: record BEFORE releasing the locks (m5 parity with
+            # sync_cycle) — a raced-in cycle's fresher last_cycle must
+            # never be clobbered by this stale report after release.
+            if not cancelled:
+                report.finished_at = _now_iso()
+                _record_cycle(config, report)
+        finally:
+            _release_library_lock(lib_lock)
+            _CYCLE_LOCK.release()
     return report
 
 
@@ -1880,58 +2000,65 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
     report = CycleReport()
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        # D-S5-7c: NOT recorded — we don't own the state (m5 parity with
+        # sync_cycle's own in-process skip).
+        report.result = "skipped_lock"
+        report.reason = "another cycle is running in this process"
+        report.finished_at = _now_iso()
+        return report
+    lib_lock = _acquire_library_lock(config)
+    if lib_lock is None:
+        _CYCLE_LOCK.release()
+        report.result = "skipped_lock"
+        report.reason = _LIBRARY_LOCK_REASON
+        report.finished_at = _now_iso()
+        return report  # not recorded — the other process owns the state
     cancelled = False
     try:
-        if not _CYCLE_LOCK.acquire(blocking=False):
+        _fmt, codec = await _open_backend(config, adapter)
+        # A fault -> error, never lockless.
+        got = await adapter.lock(LOCK_TTL_S)
+        if not got:
             report.result = "skipped_lock"
-            report.reason = "another cycle is running in this process"
+            report.reason = "backend lock held by another device"
         else:
             try:
-                _fmt, codec = await _open_backend(config, adapter)
-                # A fault -> error, never lockless.
-                got = await adapter.lock(LOCK_TTL_S)
-                if not got:
-                    report.result = "skipped_lock"
-                    report.reason = "backend lock held by another device"
-                else:
-                    try:
-                        device_id, name = get_or_create_device(config)
-                        # Derivation FIRST (M2), reconcile before it (spec
-                        # §6.3 parity with _push) so the epoch seed captures
-                        # external edits. covers={} deliberately: the
-                        # journal will be empty (nothing subsumed), and a
-                        # bootstrapping device starts at watermarks {} and
-                        # pulls future segments from seq 1.
-                        await asyncio.to_thread(reconcile_library, config)
-                        (snapshot_id, doc_text, addresses, bodies_by_address,
-                         manifest) = await _derive_local_snapshot(
-                            config, device_id, {})
-                        # Only NOW is the backend touched.
-                        for prefix in ("journal/", "objects/", "snapshots/",
-                                       "devices/"):
-                            for key in await adapter.list(prefix):
-                                await adapter.delete(key)
-                        uploaded = await _upload_snapshot(
-                            adapter, codec, snapshot_id, doc_text, addresses,
-                            bodies_by_address)
-                        report.pushed_objects += uploaded
-                        update_self_state(config, last_seq=0, watermarks={})
-                        await _put_device_doc(config, adapter, device_id,
-                                              name, last_seq=0)
-                        # Shadow = the exact manifest the snapshot was built
-                        # from: nothing is pending to push after a repair.
-                        await asyncio.to_thread(save_shadow, config, manifest)
-                    finally:
-                        try:
-                            await adapter.unlock()
-                        except Exception as e:
-                            logger.warning(
-                                "Sync repair unlock failed: %s", e)
+                device_id, name = get_or_create_device(config)
+                # Derivation FIRST (M2), reconcile before it (spec
+                # §6.3 parity with _push) so the epoch seed captures
+                # external edits. covers={} deliberately: the
+                # journal will be empty (nothing subsumed), and a
+                # bootstrapping device starts at watermarks {} and
+                # pulls future segments from seq 1.
+                await asyncio.to_thread(reconcile_library, config)
+                (snapshot_id, doc_text, addresses, bodies_by_address,
+                 manifest) = await _derive_local_snapshot(
+                    config, device_id, {})
+                # Only NOW is the backend touched.
+                for prefix in ("journal/", "objects/", "snapshots/",
+                               "devices/"):
+                    for key in await adapter.list(prefix):
+                        await adapter.delete(key)
+                uploaded = await _upload_snapshot(
+                    adapter, codec, snapshot_id, doc_text, addresses,
+                    bodies_by_address)
+                report.pushed_objects += uploaded
+                update_self_state(config, last_seq=0, watermarks={})
+                await _put_device_doc(config, adapter, device_id,
+                                      name, last_seq=0)
+                # Shadow = the exact manifest the snapshot was built
+                # from: nothing is pending to push after a repair.
+                await asyncio.to_thread(save_shadow, config, manifest)
             finally:
-                _CYCLE_LOCK.release()
+                try:
+                    await adapter.unlock()
+                except Exception as e:
+                    logger.warning(
+                        "Sync repair unlock failed: %s", e)
     except asyncio.CancelledError:
         # m4 parity with sync_cycle: a cancelled half-repair records
-        # nothing; the inner finallys above already released the locks.
+        # nothing; the outer finally below still releases both locks.
         cancelled = True
         raise
     except SyncConfigError as e:
@@ -1946,7 +2073,13 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
         report.result = "error"
         report.reason = str(e)[:300]
     finally:
-        if not cancelled:
-            report.finished_at = _now_iso()
-            _record_cycle(config, report)
+        try:
+            # D-S5-7c: record BEFORE releasing the locks (m5 parity with
+            # sync_cycle).
+            if not cancelled:
+                report.finished_at = _now_iso()
+                _record_cycle(config, report)
+        finally:
+            _release_library_lock(lib_lock)
+            _CYCLE_LOCK.release()
     return report

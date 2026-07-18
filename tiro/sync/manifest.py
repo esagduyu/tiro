@@ -392,6 +392,13 @@ def load_shadow(config: TiroConfig) -> Shadow:
                 # keeps save_shadow from tombstoning them as "deleted" and
                 # diff from ever seeing them.
                 continue
+            if r["kind"] == "libinfo":
+                # Backend library_id pin (D-S6-2, engine._open_backend) —
+                # same special-kind pattern as alias/metats: not a sync-set
+                # entry, so the differ never sees a phantom and save_shadow
+                # (whose tombstone sweep iterates THIS function's entries)
+                # can never tombstone it.
+                continue
             if r["deleted_at"]:
                 s.tombstones[(r["kind"], r["uid"])] = r["deleted_at"]
                 continue
@@ -430,6 +437,49 @@ def shadow_tombstone(conn, kind: str, uid: str, *, hlc: str | None,
         "hlc = excluded.hlc, deleted_at = excluded.deleted_at",
         (kind, uid, canonical_json(fields or {}), hlc, _now_iso(now)),
     )
+
+
+def get_library_pin(config: TiroConfig) -> str | None:
+    """Read the backend library_id pin (D-S6-2) — the sync_shadow special
+    row kind='libinfo', uid='library_id'. None when never pinned (a fresh
+    library, or a pre-S6.5 install upgrading — first cycle pins on trust)."""
+    import json as _json
+
+    conn = get_connection(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT fields_json FROM sync_shadow "
+            "WHERE kind = 'libinfo' AND uid = 'library_id'"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        pin = _json.loads(row["fields_json"] or "{}").get("library_id")
+    except ValueError:
+        return None
+    return pin or None
+
+
+def set_library_pin(config: TiroConfig, library_id: str) -> None:
+    """Write/overwrite the backend library_id pin (D-S6-2). Overwriting is
+    the USER-INTENT boundary: only first-cycle trust (engine._open_backend,
+    pin absent) and the explicit ceremonies (init_backend, a successful
+    verify_passphrase — i.e. `tiro sync setup`) call this."""
+    conn = get_connection(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO sync_shadow (kind, uid, hash, fields_json, hlc, "
+            "deleted_at) VALUES ('libinfo', 'library_id', NULL, ?, NULL, NULL) "
+            "ON CONFLICT(kind, uid) DO UPDATE SET "
+            "fields_json = excluded.fields_json, hash = NULL, hlc = NULL, "
+            "deleted_at = NULL",
+            (canonical_json({"library_id": library_id}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def save_shadow(config: TiroConfig, manifest: Manifest, *,
@@ -632,15 +682,18 @@ def hydrate_bodies(config: TiroConfig, ops: list[Op]) -> list[Op]:
 
 def clear_shadow(config: TiroConfig) -> None:
     """Repair-epoch reset (S5.5): wipe sync_shadow entries AND tombstones so
-    the next diff re-emits the full local state as a fresh push. Two kinds
+    the next diff re-emits the full local state as a fresh push. Three kinds
     survive by design: `alias` rows are permanent uid mappings (deleting
-    them would let late ops resurrect deduped losers), and `metats` rows are
+    them would let late ops resurrect deduped losers), `metats` rows are
     per-field meta LWW clocks (deleting them would let older remote meta
-    values overwrite newer local ones after the epoch reset)."""
+    values overwrite newer local ones after the epoch reset), and the
+    `libinfo` library_id pin (D-S6-2) stays valid — repair keeps
+    format.json byte-identical, so the pinned id is still the backend's."""
     conn = get_connection(config.db_path)
     try:
         conn.execute(
-            "DELETE FROM sync_shadow WHERE kind NOT IN ('alias', 'metats')")
+            "DELETE FROM sync_shadow "
+            "WHERE kind NOT IN ('alias', 'metats', 'libinfo')")
         conn.commit()
     finally:
         conn.close()

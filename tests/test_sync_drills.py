@@ -1060,6 +1060,213 @@ def test_guard_acceptance_is_one_shot_across_segments(guard_rig):
     assert _count(cfg_b) == 3
 
 
+# --- S6.5: library_id pin (D-S6-2), per-library flock (D-S6-3),
+# record-before-release (D-S5-7c) ---------------------------------------------
+
+
+def _format_library_id(backend):
+    from tiro.sync.crypto import parse_format_json
+
+    return parse_format_json((backend / "format.json").read_text()).library_id
+
+
+@pytest.fixture
+def pin_rig(tmp_path, initialized_library):
+    """(cfg, backend_x, backend_y): PLAINTEXT device synced against X (pin
+    set by its first cycle), plus a SECOND initialized plaintext backend Y
+    holding a different library's data — the exact cross-merge hole the
+    library pin exists to close (encrypted backends were already protected
+    by the age-recipient check)."""
+    backend_x = tmp_path / "pin-backend-x"
+    cfg = _sync_cfg(initialized_library, backend_x, encrypt="off")
+    cfg.sync_enabled = True
+    _ingest(cfg, title="Mine", body="# Mine\n\nBody.",
+            url="https://example.com/mine")
+    assert _sync(cfg).result == "ok"
+
+    backend_y = tmp_path / "pin-backend-y"
+    cfg_other = _second_library(tmp_path, "lib-pin-other")
+    _sync_cfg(cfg_other, backend_y, encrypt="off")
+    cfg_other.sync_enabled = True
+    _ingest(cfg_other, title="Theirs", body="# Theirs\n\nBody.",
+            url="https://example.com/theirs")
+    # Seed Y with its journal segment INTACT (no auto-snapshot + own-segment
+    # GC): the re-pair drill later pulls Y's history through a plain cycle,
+    # which needs the segment — a GC'd journal would (correctly) refuse as
+    # truncated, but that's not what these drills pin.
+    with pytest.MonkeyPatch.context() as m:
+        async def _no_compact(*args, **kwargs):
+            return None
+
+        m.setattr(engine, "_maybe_compact", _no_compact)
+        assert _sync(cfg_other).result == "ok"
+    return cfg, backend_x, backend_y
+
+
+def test_library_pin_set_and_idempotent(pin_rig):
+    """The first cycle pins format.json's library_id (first-cycle trust —
+    also the 0.8-era upgrade path); the same backend keeps working across
+    cycles with the pin unchanged."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, backend_x, _backend_y = pin_rig
+    assert get_library_pin(cfg) == _format_library_id(backend_x)
+    assert _sync(cfg).result == "ok"
+    assert _sync(cfg).result == "ok"
+    assert get_library_pin(cfg) == _format_library_id(backend_x)
+
+
+def test_library_pin_blocks_repointed_backend(pin_rig):
+    """D-S6-2, the plaintext leg: re-pointing sync_path at a DIFFERENT
+    initialized backend refuses needs_attention — reason names BOTH ids and
+    the setup remedy — with NOTHING applied locally and nothing pushed."""
+    cfg, backend_x, backend_y = pin_rig
+    id_x = _format_library_id(backend_x)
+    id_y = _format_library_id(backend_y)
+    before = _titles(cfg)
+    dev, _name = get_or_create_device(cfg)
+
+    cfg.sync_path = str(backend_y)
+    report = _sync(cfg)
+
+    assert report.result == "needs_attention"
+    assert id_x in report.reason and id_y in report.reason
+    assert "setup" in report.reason
+    assert _titles(cfg) == before  # nothing applied
+    assert not list((backend_y / "journal" / dev).glob("*"))  # nothing pushed
+    # The refusal never self-clears: a second cycle re-trips identically.
+    assert _sync(cfg).result == "needs_attention"
+    assert _titles(cfg) == before
+
+
+def test_library_pin_repair_via_setup_ceremony(pin_rig):
+    """A successful verify_passphrase IS the `tiro sync setup` re-pair
+    ceremony: the pin moves to Y, and cycles against Y then succeed —
+    merging the two libraries is now the user's declared intent."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, _backend_x, backend_y = pin_rig
+    cfg.sync_path = str(backend_y)
+    assert _sync(cfg).result == "needs_attention"
+
+    adapter = adapter_for_config(cfg)
+    try:
+        # Plaintext backend: "" = success-no-identity (never None).
+        assert asyncio.run(verify_passphrase(cfg, adapter, "")) == ""
+    finally:
+        asyncio.run(adapter.aclose())
+    assert get_library_pin(cfg) == _format_library_id(backend_y)
+
+    report = _sync(cfg)
+    assert report.result == "ok"
+    assert _titles(cfg) >= {"Mine", "Theirs"}
+
+
+def test_library_pin_survives_repair_and_clear_shadow(pin_rig):
+    """Repair keeps format.json, so the pin stays valid: cycles pass after
+    a repair on the same backend. The repair-epoch reset (clear_shadow)
+    preserves the libinfo row directly, and the pin is invisible to the
+    differ (no libinfo shadow entry)."""
+    from tiro.sync.manifest import clear_shadow, get_library_pin, load_shadow
+
+    cfg, backend_x, _backend_y = pin_rig
+    pin = get_library_pin(cfg)
+    assert pin == _format_library_id(backend_x)
+    assert all(kind != "libinfo" for (kind, _uid) in load_shadow(cfg).entries)
+
+    report = asyncio.run(engine.repair(cfg, adapter_for_config(cfg)))
+    assert report.result == "ok"
+    assert get_library_pin(cfg) == pin
+
+    clear_shadow(cfg)  # the epoch reset other devices run after a repair
+    assert get_library_pin(cfg) == pin
+    assert _sync(cfg).result == "ok"
+
+
+def test_library_flock_blocks_second_process(plain_synced):
+    """D-S6-3 (fixes D-S5-7b): a held {library}/.sync-cycle.lock flock —
+    what a concurrent `tiro sync --now` in ANOTHER process holds — skips
+    the cycle UNRECORDED (the holder owns the state); released, the next
+    cycle proceeds, and sequential same-process cycles stay fine (the lock
+    is per-cycle acquire/release)."""
+    fcntl = pytest.importorskip("fcntl")
+    cfg, _backend = plain_synced
+    with open(cfg.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = _sync(cfg)
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg)["last_cycle"] is None  # unrecorded
+    assert _sync(cfg).result == "ok"
+    assert _sync(cfg).result == "ok"
+
+
+def test_bootstrap_and_repair_refuse_while_library_flock_held(
+        tmp_path, plain_synced):
+    """The flock wiring covers all three entry points: bootstrap and repair
+    refuse (skipped_lock, unrecorded) while another process holds the
+    library lock."""
+    fcntl = pytest.importorskip("fcntl")
+    cfg, _backend = plain_synced
+    with open(cfg.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = asyncio.run(engine.repair(cfg, adapter_for_config(cfg)))
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg)["last_cycle"] is None  # unrecorded
+
+    cfg_boot = _second_library(tmp_path, "lib-flock-boot")
+    _sync_cfg(cfg_boot, tmp_path / "flock-boot-backend", encrypt="off")
+    with open(cfg_boot.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = asyncio.run(
+            bootstrap(cfg_boot, adapter_for_config(cfg_boot)))
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg_boot)["last_cycle"] is None
+
+
+def test_bootstrap_in_process_skip_is_unrecorded(tmp_path, seeded_backend):
+    """D-S5-7c: bootstrap's in-process-_CYCLE_LOCK skip returns UNRECORDED
+    (last_cycle untouched — sync_cycle's own "we don't own the state"
+    semantics); a normal bootstrap afterwards records its report before
+    releasing the lock."""
+    _cfg_a, backend, _manifests = seeded_backend
+    cfg_c = _join(tmp_path, backend)
+    assert engine._CYCLE_LOCK.acquire(blocking=False)
+    try:
+        report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    finally:
+        engine._CYCLE_LOCK.release()
+    assert report.result == "skipped_lock"
+    assert "another cycle" in report.reason
+    assert read_sync_state(cfg_c)["last_cycle"] is None  # untouched
+
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    assert report.result == "ok"
+    recorded = read_sync_state(cfg_c)["last_cycle"]
+    assert recorded["result"] == "ok"
+    assert recorded["finished_at"]
+
+
+def test_repair_in_process_skip_is_unrecorded(plain_synced):
+    """D-S5-7c, repair leg: same unrecorded in-process skip; a normal
+    repair afterwards records."""
+    cfg, _backend = plain_synced
+    adapter = adapter_for_config(cfg)
+    assert engine._CYCLE_LOCK.acquire(blocking=False)
+    try:
+        report = asyncio.run(engine.repair(cfg, adapter))
+    finally:
+        engine._CYCLE_LOCK.release()
+    assert report.result == "skipped_lock"
+    assert read_sync_state(cfg)["last_cycle"] is None  # untouched
+
+    report = asyncio.run(engine.repair(cfg, adapter))
+    assert report.result == "ok"
+    assert read_sync_state(cfg)["last_cycle"]["result"] == "ok"
+
+
 def test_cli_argv_shape_parses_to_expected_dests(monkeypatch):
     """S6.4 review #1: pin the REAL argv shape `tiro sync --now
     --accept-mass-delete` through the REAL parser (main() builds it inline
