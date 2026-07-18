@@ -8,6 +8,7 @@ story; the physical two-laptops-plus-a-phone matrix is OWNER-ONLY and is
 never simulated here.
 """
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,7 +20,10 @@ from tests.test_sync_setup_flows import (
     _sync_cfg,
     _titles,
 )
+from tiro.doctor import fix as doctor_fix
+from tiro.doctor import scan as doctor_scan
 from tiro.sync import engine
+from tiro.sync.adapters.base import LOCK_KEY, make_lock_payload
 from tiro.sync.engine import (
     adapter_for_config,
     bootstrap,
@@ -274,3 +278,122 @@ def test_bootstrap_tail_segment_object_missing_quarantines_after_snapshot(
     assert report.result == "needs_attention"
     assert _titles(cfg_c) == {"Alpha", "Beta"}
     assert any("unusable" in w for w in report.warnings)
+
+
+# --- S6.2: stale-lock drills + doctor's sync section -------------------------
+
+
+STALE_DEVICE = "01STALEDEVICEELSEWHERE0000"
+
+
+def _write_lock(backend, *, age_s, ttl_s=120, device_id=STALE_DEVICE):
+    """Write a real-shape lock payload (make_lock_payload's exact field
+    names, tz-aware UTC) aged `age_s` seconds into the past."""
+    path = backend / LOCK_KEY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(make_lock_payload(
+        device_id, ttl_s,
+        now=datetime.now(UTC) - timedelta(seconds=age_s)))
+    return path
+
+
+@pytest.fixture
+def plain_synced(tmp_path, initialized_library):
+    """(cfg, backend): plaintext filesystem backend + one ingested article,
+    sync enabled, NO cycle run yet (the first cycle auto-inits format.json)."""
+    backend = tmp_path / "lock-backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg.sync_enabled = True
+    _ingest(cfg, title="Locked Out", body="# Locked\n\nBody.",
+            url="https://example.com/locked")
+    return cfg, backend
+
+
+def test_stale_lock_is_stolen_by_next_cycle(plain_synced):
+    """FROZEN spec §6.1 behavior pinned at the ENGINE level: a long-dead
+    lock (age 3600s, ttl 120s) never wedges sync — the next cycle steals it,
+    completes, and pushes."""
+    cfg, backend = plain_synced
+    _write_lock(backend, age_s=3600, ttl_s=120)
+
+    report = _sync(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_ops > 0
+    # The stolen lock was re-minted as ours and released on cycle exit.
+    assert not (backend / LOCK_KEY).exists()
+
+
+def test_live_lock_skips_cycle(plain_synced):
+    """A FRESH foreign lock (age 5s < ttl 120s) is honored: the cycle skips
+    and the lock file is left exactly as it was."""
+    from tiro.sync.adapters.base import lock_owner
+
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+
+    report = _sync(cfg)
+
+    assert report.result == "skipped_lock"
+    assert lock_path.exists()
+    assert lock_owner(lock_path.read_bytes()) == STALE_DEVICE
+
+
+def test_doctor_reports_and_fixes_stale_lock(plain_synced):
+    """Doctor's sync section reports a stale lock; --fix clears ONLY a
+    stale one — a live lock survives fix untouched."""
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "ok"
+    assert report["sync"]["stale_lock"] is True
+
+    fixed = doctor_fix(cfg)
+    assert fixed["sync_stale_lock_cleared"] is True
+    assert not lock_path.exists()
+
+    # A LIVE lock is NEVER deleted by --fix.
+    lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+    fixed = doctor_fix(cfg)
+    assert fixed["sync_stale_lock_cleared"] is False
+    assert lock_path.exists()
+
+
+def test_doctor_sync_section_offline_safe(tmp_path, initialized_library):
+    """The sync section can NEVER break doctor: an unconfigured library
+    reports configured=False (no probe at all), and a configured-but-absent
+    backend degrades gracefully — scan() never raises. (The filesystem
+    adapter treats a missing dir as an empty listing, so a nonexistent
+    sync_path legitimately reports "ok"; a network backend would report
+    "unreachable" — both are acceptable shapes here.)"""
+    report = doctor_scan(initialized_library)
+    assert report["sync"]["configured"] is False
+    assert report["sync"]["backend"] is None
+    assert report["sync"]["stale_lock"] is False
+
+    cfg = _sync_cfg(initialized_library, tmp_path / "nope" / "gone",
+                    encrypt="off")
+    cfg.sync_enabled = True
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] in ("ok", "unreachable")
+    assert report["sync"]["stale_lock"] is False
+
+
+def test_doctor_exit_code_neutral_on_sync_findings(plain_synced):
+    """FROZEN: sync findings are operational states, not library-structural
+    inconsistencies — a stale lock changes NEITHER structurally_consistent
+    NOR clean (compared with and without the lock present)."""
+    cfg, backend = plain_synced
+
+    baseline = doctor_scan(cfg)
+    assert baseline["structurally_consistent"] is True
+
+    _write_lock(backend, age_s=3600, ttl_s=120)
+    with_lock = doctor_scan(cfg)
+
+    assert with_lock["sync"]["stale_lock"] is True
+    assert with_lock["structurally_consistent"] is True
+    assert with_lock["clean"] == baseline["clean"]

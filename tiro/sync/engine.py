@@ -505,6 +505,54 @@ async def _get_or_none(adapter, key: str) -> bytes | None:
         return None
 
 
+async def read_lock_info(adapter) -> dict | None:
+    """Read the backend advisory lock's payload (S6.2 doctor probe).
+
+    None when no lock is held; the parsed JSON payload dict otherwise;
+    {"unparseable": True} for a garbage payload (which lock_is_stale then
+    classifies as stale — base.lock_is_expired's garbage-counts-as-expired
+    semantics, so a corrupt lock is clearable, never wedging)."""
+    from tiro.sync.adapters.base import LOCK_KEY
+
+    raw = await _get_or_none(adapter, LOCK_KEY)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {"unparseable": True}
+    if not isinstance(data, dict):
+        return {"unparseable": True}
+    return data
+
+
+def lock_is_stale(info: dict, now=None) -> bool:
+    """Is a read_lock_info() payload past its TTL? Delegates to
+    base.lock_is_expired via a JSON round-trip — ONE source of truth for the
+    expiry math (never fork it); unparseable/missing fields = stale, same as
+    the adapters' own steal path."""
+    from tiro.sync.adapters.base import lock_is_expired
+
+    return lock_is_expired(json.dumps(info).encode("utf-8"), now=now)
+
+
+async def clear_stale_lock(config: TiroConfig, adapter) -> bool:
+    """Delete the backend lock IFF it is STALE (doctor --fix, S6.2 FROZEN
+    semantics: a live lock is NEVER deleted — this re-reads and re-checks
+    right before the delete, so a scan-time finding that went live in the
+    meantime is left alone). Returns True only when a lock was cleared."""
+    from tiro.sync.adapters.base import LOCK_KEY
+
+    info = await read_lock_info(adapter)
+    if info is None or not lock_is_stale(info):
+        return False
+    await adapter.delete(LOCK_KEY)
+    logger.warning(
+        "Cleared STALE sync backend lock (held by device %s)",
+        info.get("device_id", "<unknown>"))
+    return True
+
+
 def update_remote_wall(config: TiroConfig, device_id: str,
                        last_wall_ms: int) -> None:
     """UPDATE-only wall-clock tracker for a REMOTE device's registry row.

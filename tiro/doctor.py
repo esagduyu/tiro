@@ -242,6 +242,65 @@ def scan(config: TiroConfig) -> dict:
         # orphaned_markdown above).
         "conflict_files": list_conflict_files(config),
     }
+    # BYO sync section (S6.2): REPORT-ONLY operational states — quarantine/
+    # stale-lock/conflict census are not library-structural inconsistencies,
+    # so this sub-dict must never enter structurally_consistent/clean below
+    # (both enumerate their keys explicitly) nor doctor's exit code. Built
+    # inside a guard that can NEVER break doctor; the backend probe runs only
+    # when sync is configured AND enabled, and an unreachable backend
+    # degrades to "unreachable" — doctor keeps working fully offline.
+    try:
+        import asyncio
+
+        from tiro.sync.engine import (
+            adapter_for_config,
+            load_sync_status,
+            lock_is_stale,
+            read_lock_info,
+        )
+
+        status = load_sync_status(config)
+        last_cycle = status.get("last_cycle") or {}
+        sync_section = {
+            "configured": status["configured"],
+            "backend": None,
+            "needs_attention": (
+                last_cycle.get("reason")
+                if last_cycle.get("result") == "needs_attention" else None
+            ),
+            "stale_lock": False,
+            "conflict_files": len(report["conflict_files"]),
+            "cycle_warnings": list(last_cycle.get("warnings") or []),
+        }
+        if status["configured"] and config.sync_enabled:
+
+            async def _probe():
+                adapter = adapter_for_config(config)
+                try:
+                    return await read_lock_info(adapter)
+                finally:
+                    try:
+                        await adapter.aclose()
+                    except Exception:  # never let close mask the read
+                        pass
+
+            try:
+                info = asyncio.run(_probe())
+            except Exception as e:
+                logger.warning("doctor: sync backend unreachable: %s", e)
+                sync_section["backend"] = "unreachable"
+            else:
+                sync_section["backend"] = "ok"
+                if info is not None:
+                    sync_section["stale_lock"] = lock_is_stale(info)
+        report["sync"] = sync_section
+    except Exception as e:  # belt: a sync bug must never break doctor
+        logger.warning("doctor: sync section unavailable: %s", e)
+        report["sync"] = {
+            "configured": bool(config.sync_path or config.sync_s3_bucket
+                               or config.sync_webdav_url),
+            "error": str(e)[:200],
+        }
     structural_keys = (
         "orphaned_markdown", "missing_markdown", "orphaned_vectors",
         "vector_missing", "vector_unmarked", "vector_failed",
@@ -550,6 +609,36 @@ def fix(config: TiroConfig) -> dict:
         )
     )
     report["annotations_reconcile"] = ann_result
+
+    # (h) sync stale-lock clearing (S6.2): the ONLY sync mutation doctor may
+    # ever perform. clear_stale_lock re-reads and re-checks staleness right
+    # before deleting, so a lock that went LIVE between scan and fix is left
+    # alone (a live lock is NEVER deleted). Guarded so sync problems can
+    # never break doctor; exit-code behavior is untouched either way.
+    report["sync_stale_lock_cleared"] = False
+    try:
+        sync_info = report.get("sync") or {}
+        if (sync_info.get("configured") and config.sync_enabled
+                and sync_info.get("stale_lock")):
+            import asyncio
+
+            from tiro.sync.engine import adapter_for_config, clear_stale_lock
+
+            async def _clear():
+                adapter = adapter_for_config(config)
+                try:
+                    return await clear_stale_lock(config, adapter)
+                finally:
+                    try:
+                        await adapter.aclose()
+                    except Exception:
+                        pass
+
+            if asyncio.run(_clear()):
+                report["sync_stale_lock_cleared"] = True
+                actions.append("cleared stale sync backend lock")
+    except Exception as e:
+        logger.warning("doctor: could not clear stale sync lock: %s", e)
 
     report["actions"] = actions
     return report

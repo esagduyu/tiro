@@ -817,6 +817,25 @@ def cmd_doctor(args):
                   "(preserved losing versions — review and delete when done)")
             for name in report["conflict_files"]:
                 print(f"  - {name}")
+        # BYO sync section (S6.2): report-only — these lines never set
+        # housekeeping_found and never affect the exit code below.
+        sync_info = report.get("sync") or {}
+        if sync_info.get("configured"):
+            if sync_info.get("error"):
+                print(f"sync: status unavailable ({sync_info['error']})")
+            else:
+                if sync_info.get("needs_attention"):
+                    print("sync: last cycle needs attention — "
+                          f"{sync_info['needs_attention']}")
+                if sync_info.get("stale_lock"):
+                    print("sync: STALE backend lock present — "
+                          "run `tiro doctor --fix` to clear it")
+                if sync_info.get("backend") == "unreachable":
+                    print("sync: backend unreachable — sync findings "
+                          "limited to local state")
+                if sync_info.get("conflict_files"):
+                    print(f"sync: {sync_info['conflict_files']} conflict "
+                          "file(s) pending review (listed above)")
         if housekeeping_found:
             print("(housekeeping findings above are cleaned by --fix but do not fail this check)")
         if report["clean"]:
