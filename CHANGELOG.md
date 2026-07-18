@@ -7,9 +7,9 @@ day the release was tagged.
 
 ## [Unreleased]
 
-_Nothing yet — 0.8.0 and 0.9.0 below await their owner tags._
+_Nothing yet._
 
-## [0.9.0] — `sync-beta` (Phase 7a: BYO multi-device sync + the absorbed Phase 2b) — TAG PENDING (owner action)
+## [0.9.0] — `sync-beta` (Phase 7a: BYO multi-device sync + the absorbed Phase 2b) — 2026-07-18
 
 Multi-device sync where the user owns the storage: state-diff capture against
 a shadow manifest, LWW + both-versions-kept conflicts (no CRDT), age
@@ -190,7 +190,7 @@ that run.
   property-oracle byte-honesty fix (the harness had read conflict notes
   lossily, masking a real failure class).
 
-## [0.8.0] — `agents-beta` (Phase 6: Agent runtime) — TAG PENDING (owner action)
+## [0.8.0] — `agents-beta` (Phase 6: Agent runtime) — 2026-07-18
 
 Every AI feature now executes as a recorded, replayable agent run; personas
 and the ContradictionDetector build on the frozen kernel contract.
