@@ -1,10 +1,10 @@
 # Project Tiro — Product Roadmap
 
 Review date: 2026-05-25
-Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03); 2026-07-04 (v0.2.0 tagged; Decisions #7–8: AI-layer plan, subscription-CLI backends, LLM wiki; Phase 1 foundation milestone expanded; Phase 1b added); 2026-07-10 (Phases 4 & 5 shipped; frontend design pass merged; iOS v1.0 feature-complete)
-Status (2026-07-11): Phases 0 through 5 are **complete and shipped** — 0.2.0 (security & integrity), 0.3.0 (Phase 1, library integrity), 0.3.5 (Phase 1b W1, library wiki), 0.4.0 (Phase 2, highlights & notes), **`v0.5.0` (Phase 3, private remote access + mobile PWA)**, **`v0.6.0` (Phase 4, RSS + imports)**, and **`v0.7.0` (Phase 5, installable desktop app)**. Two additional bodies of work shipped alongside: the **"Codex" frontend design pass** (merged) and the **native iOS v1.0 client** (SwiftUI thin client in the separate local repo `~/repos/tiro-ios`, tag `v0.1.0-tf1`; TestFlight-pending — see `tiro-ios/docs/TESTFLIGHT.md`).
+Updated: 2026-05-26 (strategic decisions: pricing, license, Obsidian sync, X connector); 2026-07-04 (Phase 0 marked complete; Decision 0 strategy inputs recorded 2026-07-03); 2026-07-04 (v0.2.0 tagged; Decisions #7–8: AI-layer plan, subscription-CLI backends, LLM wiki; Phase 1 foundation milestone expanded; Phase 1b added); 2026-07-10 (Phases 4 & 5 shipped; frontend design pass merged; iOS v1.0 feature-complete); 2026-07-18 (Phases 6 & 7a shipped: v0.8.0 + v0.9.0 tagged + released; v1.0.0 gate GREEN)
+Status (2026-07-18): Phases 0 through 7a are **complete and shipped** — the entire v1.0 ladder is on `main`: **`v0.8.0` agents-beta** (Phase 6, agent runtime) and **`v0.9.0` sync-beta** (Phase 7a, BYO multi-device sync) were tagged + released 2026-07-18. Earlier releases: — 0.2.0 (security & integrity), 0.3.0 (Phase 1, library integrity), 0.3.5 (Phase 1b W1, library wiki), 0.4.0 (Phase 2, highlights & notes), **`v0.5.0` (Phase 3, private remote access + mobile PWA)**, **`v0.6.0` (Phase 4, RSS + imports)**, and **`v0.7.0` (Phase 5, installable desktop app)**. Two additional bodies of work shipped alongside: the **"Codex" frontend design pass** (merged) and the **native iOS v1.0 client** (SwiftUI thin client in the separate local repo `~/repos/tiro-ios`, tag `v0.1.0-tf1`; TestFlight-pending — see `tiro-ios/docs/TESTFLIGHT.md`).
 
-**⟶ THE v1.0 CAMPAIGN IS UNDERWAY (see "Path to v1.0" immediately below).** 1.0 has been redefined (owner-ratified 2026-07-10) as **the local-complete product = 0.7 + Phase 6 (agent runtime, 0.8) + Phase 7a (BYO sync, 0.9)**; Tiro Cloud (7b) is re-slotted to a **post-1.0 (1.x) business launch**. As of 2026-07-11, **Phase 6 K1+K2** (runtime kernel + all four AI features migrated) and **Phase 7a S1** (local reconcile engine, absorbed Phase 2b) are both **MERGED to `main` (unreleased)** — 1277 Python + 165 node tests. Phase 2b remains absorbed into Phase 7a (Decision #9). Read the "Path to v1.0" section next, then "Decisions Made" #0 and #7–#9. Origin: hackathon top-30 (out of ~500).
+**⟶ THE v1.0 CAMPAIGN IS CODE-COMPLETE (2026-07-18).** 1.0 = **the local-complete product = 0.7 + Phase 6 (0.8, shipped) + Phase 7a (0.9, shipped)** (owner-ratified 2026-07-10); Tiro Cloud (7b) is a **post-1.0 (1.x) business launch**. `main` carries the whole ladder at **1915 Python + 165 node tests, 0 warnings**, migration chain 1..18. **The v1.0.0 go/no-go gate is GREEN** (S2 property suite + S5 multi-device suite). Remaining before the v1.0.0 tag: the owner's physical acceptance matrix, a version-bump commit, and the tag itself. Phase 2b remains absorbed into Phase 7a (Decision #9). Origin: hackathon top-30 (out of ~500).
 
 ## Path to v1.0
 
@@ -21,18 +21,18 @@ Status (2026-07-11): Phases 0 through 5 are **complete and shipped** — 0.2.0 (
 |---|---|---|---|---|
 | K1 | Runtime kernel (contract/context/traces/`agent_runs`) + MetadataExtractor | 014 | `2026-07-10-agents-k1-k2-plan.md` | ✅ merged |
 | K2 | Migrate 3 features + `/agents` UI + replay + evals | — | (same) | ✅ merged |
-| K3 | Personas + structural sandbox + suggestions | 017 | `2026-07-10-agents-k3-plan.md` | 📋 planned |
-| K4 | ContradictionDetector (owner-priority agent) → **0.8.0** | — | `2026-07-11-agents-k4-contradiction-plan.md` | 📋 planned |
+| K3 | Personas + structural sandbox + suggestions | 017 | `2026-07-10-agents-k3-plan.md` | ✅ merged |
+| K4 | ContradictionDetector (owner-priority agent) → **0.8.0** | — | `2026-07-11-agents-k4-contradiction-plan.md` | ✅ merged → **v0.8.0 tagged 2026-07-18** |
 | S1 | Local reconcile engine (Obsidian bidi; absorbed 2b) | 015 | `2026-07-10-sync-s1-reconcile-plan.md` | ✅ merged |
-| S2 | Pure merge core (**½ of the 1.0 gate: property suite**) | 016 | `2026-07-10-sync-s2-merge-core-plan.md` | 🔶 1/9, paused |
-| S3 | Blob format, age crypto, snapshot/journal | — | `2026-07-11-sync-s3-format-crypto-plan.md` | 📋 planned |
-| S4 | Storage adapters (filesystem/S3/WebDAV) + conformance | — | `2026-07-11-sync-s4-adapters-plan.md` | 📋 planned |
-| S5 | Engine loop + `/settings/sync` (**½ of the 1.0 gate: multi-device suite**) | 018 | `2026-07-11-sync-s5-engine-plan.md` | 📋 planned |
-| S6 | Hardening + acceptance drills → **0.9.0** | — | `2026-07-11-sync-s6-hardening-plan.md` | 📋 planned |
+| S2 | Pure merge core (**½ of the 1.0 gate: property suite**) | 016 | `2026-07-10-sync-s2-merge-core-plan.md` | ✅ merged, property gate GREEN |
+| S3 | Blob format, age crypto, snapshot/journal | — | `2026-07-11-sync-s3-format-crypto-plan.md` | ✅ merged |
+| S4 | Storage adapters (filesystem/S3/WebDAV) + conformance | — | `2026-07-11-sync-s4-adapters-plan.md` | ✅ merged |
+| S5 | Engine loop + `/settings/sync` (**½ of the 1.0 gate: multi-device suite**) | 018 | `2026-07-11-sync-s5-engine-plan.md` | ✅ merged, multi-device gate GREEN |
+| S6 | Hardening + acceptance drills → **0.9.0** | — | `2026-07-11-sync-s6-hardening-plan.md` | ✅ merged → **v0.9.0 tagged 2026-07-18** |
 
-**The v1.0.0 go/no-go gate (hard, never shaved):** S2's hypothesis property suite AND S5's multi-device integration suite both green. If not, ship **0.9.0-beta** with sync behind explicit opt-in and let 1.0 slip — a subtly-wrong merge engine loses user data and violates principle 4. **Version tags are owner-only** (0.8.0 on K4, 0.9.0 on S6, v1.0.0 on the combined gate). **Scope cuts (post-1.0, decided):** R5 roster agents incl. ImportanceScorer, P6 plugin API, code signing/notarization, all of 7b.
+**The v1.0.0 go/no-go gate (hard, never shaved): ✅ MET 2026-07-18** — S2's hypothesis property suite AND S5's multi-device integration suite both green on merged `main` (coordinator-re-verified 3× random-seed). The rule as it stood: If not, ship **0.9.0-beta** with sync behind explicit opt-in and let 1.0 slip — a subtly-wrong merge engine loses user data and violates principle 4. **Version tags are owner-only** (0.8.0 on K4, 0.9.0 on S6, v1.0.0 on the combined gate). **Scope cuts (post-1.0, decided):** R5 roster agents incl. ImportanceScorer, P6 plugin API, code signing/notarization, all of 7b.
 
-**Owner-review items carried into 1.0** (detail in the decision log): (1) ratify the agent-trace backup posture — traces excluded from `tiro backup`, `agent_runs` rows survive via the DB copy (recommend accept, same as vectors/audio); (2) S1's Obsidian-rename footgun — a rename outside Tiro reads as delete+re-ingest, dropping that article's annotations (documented in README; rename-aware reconcile is S2+ scope); (3) real-device/physical acceptance for S6 (2 laptops + phone) is owner-only, never agent-simulated; (4) carried pre-1.0 owner items from the desktop runbook (signing, ghcr first push) remain in `docs/RUNBOOK-desktop.md`.
+**Owner-review items carried into 1.0 — RATIFIED by owner 2026-07-18** (detail in the decision log; kept for the record): (1) ratify the agent-trace backup posture — traces excluded from `tiro backup`, `agent_runs` rows survive via the DB copy (recommend accept, same as vectors/audio); (2) S1's Obsidian-rename footgun — a rename outside Tiro reads as delete+re-ingest, dropping that article's annotations (documented in README; rename-aware reconcile is S2+ scope); (3) real-device/physical acceptance for S6 (2 laptops + phone) is owner-only, never agent-simulated; (4) carried pre-1.0 owner items from the desktop runbook (signing, ghcr first push) remain in `docs/RUNBOOK-desktop.md`.
 
 ## How To Use This Document
 
@@ -941,7 +941,7 @@ This phase deliberately follows highlights and RSS because both are daily-return
 
 ## Phase 6 — Agent Runtime
 
-**Status: 🔶 IN PROGRESS — K1+K2 MERGED to `main` (unreleased) 2026-07-11; K3+K4 planned.** See the "Path to v1.0" section near the top for the milestone ladder + plan index. The kernel design is frozen (Decision #9); K1 (contract/context/traces/`agent_runs`, migration 014) and K2 (all four AI features migrated behind golden gates, `/agents` page, replay, evals) are done. Remaining: K3 (personas + structural sandbox, migration 017) and K4 (ContradictionDetector), which close out **0.8.0**. Where this section's original sketch conflicts with the frozen kernel spec (`docs/plans/2026-07-06-agent-runtime-spec.md`) or the banked K3/K4 plans, those win.
+**Status: ✅ COMPLETE — shipped and tagged `v0.8.0` (2026-07-18).** K1 (kernel, migration 014), K2 (all four AI features migrated behind golden gates, `/agents` page, replay, evals), K3 (personas + structural sandbox + suggestions, migration 017), and K4 (ContradictionDetector + on-ingest hooks) are all merged; CLAUDE.md's Phase 6 conventions bullets are current where details drifted. Where this section's original sketch conflicts with the frozen kernel spec (`docs/plans/2026-07-06-agent-runtime-spec.md`) or the banked K3/K4 plans, those win.
 
 **Release target:** `0.8 agent-runtime-beta`
 **Relative complexity:** XL
@@ -1057,7 +1057,7 @@ Crucially, this phase is *sixth*, not earlier, because the right abstractions fo
 
 ## Phase 7a — BYO Cloud Sync (free, open)
 
-**Status: 🔶 IN PROGRESS — S1 MERGED to `main` (unreleased) 2026-07-11; S2 started, S3–S6 planned.** See the "Path to v1.0" section near the top for the milestone ladder + plan index. S1 (the local reconcile engine, absorbed Phase 2b — migration 015) is done; S2 (pure merge core, migration 016) is 1/9 tasks in and paused. Remaining S2–S6 close out **0.9.0**. The full design is frozen (Decision #9, spec `docs/plans/2026-07-06-sync-engine-spec.md`) with the deltas recorded below (no CRDT — LWW + conflict files; state-diff capture; audio excluded; Argon2id→X25519 age identity). S2's property suite + S5's multi-device suite are the v1.0.0 go/no-go gate. Where this section conflicts with that spec or the banked S2–S6 plans, those win.
+**Status: ✅ COMPLETE — shipped and tagged `v0.9.0` (2026-07-18).** S1–S6 all merged (migrations 015/016/018); the v1.0.0 gate (S2 property suite + S5 multi-device suite) is GREEN. The owner's physical acceptance matrix (2 laptops + phone) remains the final pre-v1.0.0 verification; CLAUDE.md's sync conventions bullets are current where details drifted. The full design is frozen (Decision #9, spec `docs/plans/2026-07-06-sync-engine-spec.md`) with the deltas recorded below (no CRDT — LWW + conflict files; state-diff capture; audio excluded; Argon2id→X25519 age identity). S2's property suite + S5's multi-device suite are the v1.0.0 go/no-go gate. Where this section conflicts with that spec or the banked S2–S6 plans, those win.
 
 **Release target:** `0.9 sync-beta`
 **Relative complexity:** L

@@ -44,7 +44,7 @@ The original hackathon submission is preserved, frozen, at [esagduyu/project-tir
 
 Everything since the hackathon builds on the 0.2.0 hardening release. The releases after it — 0.3 (library integrity), 0.3.5 (library wiki), 0.4 (highlights & notes), 0.5 (remote access & mobile), 0.6 (RSS & imports), 0.7 (installable desktop app) — are covered feature-by-feature below and release-by-release in [CHANGELOG.md](CHANGELOG.md).
 
-**In development (on `main`, unreleased):** the road to **1.0 — the fully local, fully owned product** — is a local **agent runtime** (inspectable, replayable AI agents over your library; → 0.8) and **bring-your-own-cloud sync** (multi-device sync where you own the storage, and Obsidian as a co-equal editor; → 0.9). BYO sync is now feature-complete on `main` (0.9.0 `sync-beta`, release pending — the physical multi-device acceptance run is still ahead of it); the runtime kernel landed earlier. See [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)'s "Path to v1.0" for the full plan and [`VISION.md`](VISION.md) for the five principles the whole product is judged against. Tiro Cloud (optional paid hosted convenience) is a post-1.0 track — a user who never pays gets every feature.
+**Latest releases (2026-07-18):** **`v0.8.0` agents-beta** — a local agent runtime: every AI feature runs as a recorded, replayable agent run with file-based traces, plus community-shareable personas in a structural sandbox (suggest-only writes) and a ContradictionDetector that flags new saves challenging articles you trusted. **`v0.9.0` sync-beta** — bring-your-own-cloud multi-device sync: your own filesystem/S3/WebDAV storage, age encryption with a recovery code, conflict-preserving merges (nothing is ever silently dropped), and Obsidian as a co-equal editor of the library. Together these complete the **road to 1.0 — the fully local, fully owned product**; the v1.0.0 tag awaits only final multi-device acceptance on physical hardware. See [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)'s "Path to v1.0" and [`VISION.md`](VISION.md) for the five principles the product is judged against. Tiro Cloud (optional paid hosted convenience) is a post-1.0 track — a user who never pays gets every feature.
 
 The hackathon build proved the product; it did not try to be safe to run anywhere but a trusted localhost. The 0.2.0 release ("Phase 0 — Security & Integrity") was a ground-up hardening pass — seven milestones, ~80 commits, each reviewed before landing — to make Tiro something you can trust with your reading life:
 
@@ -78,7 +78,7 @@ The hackathon build proved the product; it did not try to be safe to run anywher
 Pick the path that fits how you want to run Tiro. All of them reach the same web app at `http://localhost:8000`; the first launch always sets a password.
 
 1. **Desktop app (macOS, beta)** — a double-clickable `.app` that bundles the server; no terminal, no Python. Download it from the [GitHub Releases](https://github.com/esagduyu/tiro/releases) page.
-   > **Unsigned beta.** The 0.7.0 build is not yet code-signed, so macOS Gatekeeper refuses it on first open — right-click the app → **Open** → **Open** to run it. Signing + notarization land in a later release. See [`desktop/README.md`](desktop/README.md) for the build recipe.
+   > **Unsigned beta.** The current desktop build (frozen at 0.7.0 — a re-freeze at the current version is on the maintainer runbook) is not yet code-signed, so macOS Gatekeeper refuses it on first open — right-click the app → **Open** → **Open** to run it. Signing + notarization land in a later release. See [`desktop/README.md`](desktop/README.md) for the build recipe.
 
 2. **`uvx` / `uv tool` (CLI users)** — run the latest published release without cloning:
    ```bash
@@ -194,7 +194,7 @@ Uncomment `TIRO_ANTHROPIC_API_KEY` / `TIRO_OPENAI_API_KEY` in `deploy/docker/doc
 docker compose pull && docker compose up -d
 ```
 
-For hands-off updates, point [Watchtower](https://containrrr.dev/watchtower/) at the container: it watches the mutable tag and pulls + restarts when a new image is pushed. (Tiro ships no auto-updater of its own for the container — mutable tags + Watchtower is the documented self-hoster update path.) If you'd rather pin a version and update on your own schedule, change the image ref in `docker-compose.yml` from `:latest` to a specific tag like `:0.7.0`.
+For hands-off updates, point [Watchtower](https://containrrr.dev/watchtower/) at the container: it watches the mutable tag and pulls + restarts when a new image is pushed. (Tiro ships no auto-updater of its own for the container — mutable tags + Watchtower is the documented self-hoster update path.) If you'd rather pin a version and update on your own schedule, change the image ref in `docker-compose.yml` from `:latest` to a specific tag like `:0.9.0`.
 
 > **Maintainer note (publishing the image):** `.github/workflows/docker.yml` publishes `ghcr.io/esagduyu/tiro` and derives its `X.Y.Z` / `X.Y` / `latest` tags from the git ref via `docker/metadata-action`'s `type=semver` rule. That rule only produces version tags when the workflow runs **on a tag ref** (`v0.7.0`). A `workflow_dispatch` run must therefore be launched **from the `v0.7.0` tag** (select it as the ref in the Actions "Run workflow" dropdown) — dispatched from a branch it yields no semver tags and no usable image. The normal path (`git push origin v0.7.0`) fires the `push: tags: ["v*"]` trigger automatically; `workflow_dispatch` exists only for the owner's supervised first push. Full first-push runbook: `docs/RUNBOOK-desktop.md`.
 
@@ -865,7 +865,7 @@ tiro/
 
 ## Testing
 
-`uv run pytest` runs the Python test suite (`tests/` — 1176 tests at 0.7.0, kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), `triage-pill.spec.js` (pill + inbox zero), and `design-pass.spec.js` (icon/chrome verification matrix across viewports and themes) — see `playwright-tests/README.md` for how to run them.
+`uv run pytest` runs the Python test suite (`tests/` — 1915 tests at 0.9.0 (+34 docker-gated sync-backend conformance tests), kept at zero warnings). The frontend's pure JS cores (`tiro/frontend/static/js/core.js`, `annotate.js`, `sw-routing.js`, `save-queue.js`, `swipe.js`, `undo.js`) plus the Chrome extension's `extension/lib.js` have their own suite: `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs`, enforced in CI alongside ruff and pytest. End-to-end browser specs live under `playwright-tests/` (Playwright) — `phase0.spec.js` (first-run setup, login, save, delete), `annotations.spec.js` (highlight/note flows), `telemetry.spec.js` (reading-session tracking), `save-queue.spec.js` (offline save queue), `snooze-ui.spec.js` (snooze menu/sheet), `swipe-triage.spec.js` (gesture + undo), `triage-pill.spec.js` (pill + inbox zero), and `design-pass.spec.js` (icon/chrome verification matrix across viewports and themes) — see `playwright-tests/README.md` for how to run them.
 
 ---
 
@@ -875,7 +875,7 @@ tiro/
 
 Underneath the phases, Tiro is three components growing together: a **reader** you think in (highlights, notes, a personal context layer that compounds), an **agentic layer** that learns your taste and works your library (digests, the knowledge graph, and eventually inspectable local agents), and an **inbox-zero management layer** that surfaces what's worth your time — on your phone too.
 
-The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the current 0.7.0 to a 1.0 with an optional hosted tier. Headlines:
+The full plan lives in [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) — ten self-contained phases from the hackathon build to a 1.0 with an optional hosted tier — everything through 0.9.0 is shipped. Headlines:
 
 - **Phase 1 — Local library integrity (0.3):** source merge/rename, author-level VIP, saved inbox views, backup/restore snapshots, full export/import round-trip.
 - **Phase 1b — Library Wiki (0.3.5):** on-demand, cited synthesis pages over entities and tags — the MVP wave (W1) shipped; scheduled sync, lint, and cross-page context follow in later waves.
