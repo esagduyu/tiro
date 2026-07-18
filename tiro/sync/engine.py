@@ -1168,6 +1168,22 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 device_id, _ = get_or_create_device(config)
                 clock = HLCClock(device_id)
                 clock_state: dict = {}
+                # Spec §6.3: the S1 reconcile pass runs FIRST — before the
+                # PULL, not just before the push diff (S5.9 gate fix,
+                # scenario 4). Pull-side merge decisions compare remote ops
+                # against the local DB census: _apply_article_tombstone
+                # judges delete-vs-edit on articles.body_hash, and an
+                # external file edit not yet reconciled reads as
+                # "unchanged", so a remote tombstone would blind-delete the
+                # edited file — edit-wins retention (spec §4) violated on
+                # the ONLY real body-edit path (bodies have no route).
+                # Running the census first also keeps the auto-bootstrap
+                # gate below honest: external files make a "supposedly
+                # empty" library non-empty before the zero-article check.
+                # _push's own reconcile stays — cheap when nothing drifted,
+                # and it covers edits landing mid-cycle.
+                from tiro.sync.reconcile import reconcile_library
+                await asyncio.to_thread(reconcile_library, config)
                 # Empty-library auto-bootstrap (D-S5-3): a fresh device
                 # pointed at a populated backend materializes the latest
                 # snapshot BEFORE the pull — the covers-derived watermarks
