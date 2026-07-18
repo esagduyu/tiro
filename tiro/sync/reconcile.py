@@ -91,6 +91,8 @@ def list_conflict_files(config: TiroConfig) -> list[str]:
 
 def body_hash_of_file(path: Path) -> str | None:
     """sha256 of the markdown body (frontmatter stripped); None if unreadable."""
+    # frontmatter.load reads in text mode: the hash is in newline-TRANSLATED
+    # space, deliberately (D-S6-5 — see manifest._read_text's comment).
     try:
         return content_hash(frontmatter.load(str(path)).content)
     except Exception as e:

@@ -773,7 +773,12 @@ def cmd_doctor(args):
         fix_report = fix(config)
         post = scan(config)
         report = {**post, "actions": fix_report["actions"],
-                  "reembed_failures": fix_report["reembed_failures"]}
+                  "reembed_failures": fix_report["reembed_failures"],
+                  # scan() has no sync_stale_lock_cleared key (fix-only
+                  # outcome), so the post-fix merge must carry it over or
+                  # --fix --json silently drops the flag (S6.2-fix Nit 5).
+                  "sync_stale_lock_cleared":
+                      fix_report.get("sync_stale_lock_cleared", False)}
     else:
         report = scan(config)
 
@@ -817,6 +822,32 @@ def cmd_doctor(args):
                   "(preserved losing versions — review and delete when done)")
             for name in report["conflict_files"]:
                 print(f"  - {name}")
+        # BYO sync section (S6.2): report-only — these lines never set
+        # housekeeping_found and never affect the exit code below.
+        sync_info = report.get("sync") or {}
+        if sync_info.get("configured"):
+            if sync_info.get("error"):
+                print(f"sync: status unavailable ({sync_info['error']})")
+            else:
+                if sync_info.get("needs_attention"):
+                    print("sync: last cycle needs attention — "
+                          f"{sync_info['needs_attention']}")
+                if sync_info.get("stale_lock"):
+                    print("sync: STALE backend lock present — "
+                          "run `tiro doctor --fix` to clear it")
+                if sync_info.get("backend") == "unreachable":
+                    print("sync: backend unreachable — sync findings "
+                          "limited to local state")
+                if sync_info.get("backend") == "misconfigured":
+                    print("sync: backend misconfigured — check the sync "
+                          "settings (`tiro sync setup`)")
+                for warning in sync_info.get("cycle_warnings") or []:
+                    print(f"sync: last-cycle warning — {warning}")
+                for warning in sync_info.get("clock_skew") or []:
+                    print(f"sync: {warning}")
+                if sync_info.get("conflict_files"):
+                    print(f"sync: {sync_info['conflict_files']} conflict "
+                          "file(s) pending review (listed above)")
         if housekeeping_found:
             print("(housekeeping findings above are cleaned by --fix but do not fail this check)")
         if report["clean"]:
@@ -907,6 +938,7 @@ def cmd_sync(args):
     from tiro.sync.engine import (
         SyncConfigError,
         adapter_for_config,
+        load_sync_status,
         read_sync_state,
         repair,
         resolve_encryption,
@@ -994,6 +1026,15 @@ def cmd_sync(args):
               f"{last.get('finished_at') or '?'} — "
               f"applied {last.get('applied', 0)}, "
               f"pushed {last.get('pushed_ops', 0)}")
+        # Non-skew last-cycle warnings (S6.6, D-S6-7): a blocked compaction
+        # (corrupt latest snapshot) etc. must be visible from status, not
+        # only from --now's live report. "clock skew:" lines are skipped —
+        # they ride load_sync_status's deduped warnings below (mirroring
+        # doctor's S6.3-fix clock_skew/cycle_warnings split).
+        for warning in last.get("warnings") or []:
+            if isinstance(warning, str) and warning.startswith("clock skew:"):
+                continue
+            print(f"  warning: {warning}")
     else:
         print("Last cycle: never")
     for row in state["devices"]:
@@ -1001,6 +1042,10 @@ def cmd_sync(args):
                  else (row["name"] or row["device_id"]))
         print(f"  {label}: seq {row['last_seq'] or 0}, "
               f"last seen {row['last_seen'] or 'never'}")
+    # Clock-skew warnings (S6.3): live ahead-check + persisted last-cycle
+    # skew lines, already deduped by load_sync_status.
+    for warning in load_sync_status(config)["warnings"]:
+        print(f"⚠ {warning}")
 
 
 def _sync_setup(config):
@@ -1112,7 +1157,13 @@ def _sync_setup(config):
         # (adapter_for_config -> get_or_create_device): a local-only ULID,
         # reused on any later retry — so "Nothing was changed" on the
         # abort paths below refers to config.yaml + the backend, not to
-        # that row.
+        # that row. The library pin moves the same way (S6.5-fix finding
+        # 3, accepted): a successful verify_passphrase/init_backend/
+        # plaintext-join re-pins BEFORE the persist step, so an abort
+        # after that point leaves the pin already pointed at this backend
+        # — harmless (it self-heals by simply re-running setup, which
+        # re-pins again), which is why the post-verify abort messages
+        # below say "Config not persisted", not "Nothing was changed".
         try:
             adapter = adapter_for_config(config)
         except SyncConfigError as e:
@@ -1150,10 +1201,31 @@ def _sync_setup(config):
                         typed = input(
                             "Type UNENCRYPTED to join it anyway: ").strip()
                         if typed != "UNENCRYPTED":
-                            print("Aborted. Nothing was changed.")
+                            print("Aborted. Config not persisted.")
                             return
                         updates["sync_encrypt"] = yaml_quote("off")
                         config.sync_encrypt = "off"
+                    # Joining a plaintext backend is still the RE-PAIR
+                    # ceremony (S6.5-fix review HIGH, D-S6-9):
+                    # verify_passphrase's plaintext leg returns "" and
+                    # overwrites the library pin — without this a
+                    # deliberately re-pointed plaintext user loops on the
+                    # D-S6-2 pin mismatch forever (bootstrap refuses a
+                    # non-empty library; repair itself opens the backend
+                    # and trips the same mismatch first).
+                    try:
+                        joined = await verify_passphrase(config, adapter, "")
+                    except SyncFormatError as e:
+                        print(f"Cannot join this backend: {e}")
+                        print("Nothing was changed.")
+                        return
+                    if joined is None:
+                        # format.json vanished between the probe above and
+                        # the verify — a backend changing underneath the
+                        # ceremony is a refusal, never a half-join.
+                        print("Backend changed while setting up. "
+                              "Nothing was changed.")
+                        return
                 elif fmt_exists:
                     # Backend is ENCRYPTED: verify the passphrase.
                     pw = getpass.getpass("Sync passphrase: ")
@@ -1215,7 +1287,11 @@ def _sync_setup(config):
                     updates["sync_identity"] = secret
                     config.sync_identity = secret
             except KeyboardInterrupt:
-                print("\nAborted. Nothing was changed.")
+                # "Config not persisted", not "Nothing was changed": by
+                # here the device row and (after a successful verify) the
+                # library pin may already have moved — see the step-3
+                # comment above.
+                print("\nAborted. Config not persisted.")
                 return
 
             # 6. Persist — the point of no return for this ceremony.

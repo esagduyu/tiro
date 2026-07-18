@@ -1,0 +1,1671 @@
+"""Sync S6.1: corrupted-snapshot recovery drills — bootstrap must fall
+back newest->oldest across backend snapshots, and refuse CLEANLY (plain
+result="error" pointing at `tiro sync repair`, library untouched) when
+snapshots exist but none is usable.
+
+These drills are the machine-verifiable half of the Phase 7a acceptance
+story; the physical two-laptops-plus-a-phone matrix is OWNER-ONLY and is
+never simulated here.
+"""
+import asyncio
+from datetime import UTC, datetime, timedelta
+
+import frontmatter
+import pytest
+
+from tests.test_reconcile import _ingest
+from tests.test_sync_cli import Args
+from tests.test_sync_multidevice import _q
+from tests.test_sync_setup_flows import (
+    WEAK_KDF,
+    _count,
+    _second_library,
+    _sync_cfg,
+    _titles,
+)
+from tiro.anchors import content_hash
+from tiro.annotations import append_highlight, read_annotations, sidecar_stem
+from tiro.cli import cmd_sync
+from tiro.database import get_connection
+from tiro.doctor import fix as doctor_fix
+from tiro.doctor import scan as doctor_scan
+from tiro.lifecycle import delete_article
+from tiro.sync import engine
+from tiro.sync.adapters.base import LOCK_KEY, make_lock_payload
+from tiro.sync.engine import (
+    adapter_for_config,
+    bootstrap,
+    codec_for_config,
+    get_or_create_device,
+    init_backend,
+    read_sync_state,
+    sync_cycle,
+    verify_passphrase,
+)
+
+PASSPHRASE = "drill-passphrase"
+
+CORRUPTION = b"\x00corrupted beyond hope"
+
+
+@pytest.fixture(autouse=True)
+def _fast_settle(monkeypatch):
+    """The S1 two-poll settle sleep is pure wall-clock cost here — every
+    file in these drills is complete before any cycle runs."""
+    import tiro.sync.reconcile as rec
+
+    monkeypatch.setattr(rec, "SETTLE_SECONDS", 0.0)
+
+
+def _sync(cfg, **kw):
+    return asyncio.run(sync_cycle(cfg, **kw))
+
+
+@pytest.fixture
+def seeded_backend(tmp_path, initialized_library):
+    """(cfg_a, backend, manifests): device A + an encrypted backend holding
+    TWO snapshots and one tail journal segment.
+
+    Snapshot #1 (articles Alpha+Beta) is auto-created by A's first cycle,
+    which also GCs its own segment; cycle 2 pushes a tail segment carrying
+    Gamma (should_snapshot thresholds not met — no second snapshot).
+    Snapshot #2 (all three articles) is then uploaded DIRECTLY via
+    engine._upload_local_snapshot — a forced _compact would GC snapshot #1
+    (plan_gc: latest-dominates), and these drills need both on the backend.
+    `manifests` is ULID-sorted: manifests[-1] is the newest.
+    """
+    backend = tmp_path / "backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="on")
+    cfg_a.sync_enabled = True
+    recovery = asyncio.run(
+        init_backend(cfg_a, adapter_for_config(cfg_a), PASSPHRASE,
+                     kdf_params=WEAK_KDF))
+    cfg_a.sync_identity = recovery
+
+    _ingest(cfg_a, title="Alpha", body="# Alpha\n\nBody one.",
+            url="https://example.com/alpha")
+    _ingest(cfg_a, title="Beta", body="# Beta\n\nBody two.",
+            url="https://example.com/beta")
+    report = _sync(cfg_a)  # pushes seq 1, auto-snapshots, GCs segment 1
+    assert report.result == "ok"
+    assert len(list(backend.glob("snapshots/*/manifest.age"))) == 1
+
+    _ingest(cfg_a, title="Gamma", body="# Gamma\n\nBody three.",
+            url="https://example.com/gamma")
+    report = _sync(cfg_a)  # pushes the tail segment; no second snapshot
+    assert report.result == "ok"
+
+    device_id, _name = get_or_create_device(cfg_a)
+    state = read_sync_state(cfg_a)
+    covers = {device_id: (state["self"] or {}).get("last_seq") or 0,
+              **state["watermarks"]}
+    asyncio.run(engine._upload_local_snapshot(
+        cfg_a, adapter_for_config(cfg_a), codec_for_config(cfg_a),
+        device_id, covers))
+
+    manifests = sorted(backend.glob("snapshots/*/manifest.age"))
+    assert len(manifests) == 2  # ULID-sorted: [-1] is snapshot #2
+    return cfg_a, backend, manifests
+
+
+def _join(tmp_path, backend, name="lib-joiner"):
+    """Fresh empty joining library pointed at the backend, passphrase
+    verified (the multidevice-suite recipe)."""
+    cfg = _second_library(tmp_path, name)
+    _sync_cfg(cfg, backend, encrypt="on")
+    cfg.sync_enabled = True
+    identity = asyncio.run(
+        verify_passphrase(cfg, adapter_for_config(cfg), PASSPHRASE))
+    cfg.sync_identity = identity
+    return cfg
+
+
+def test_bootstrap_falls_back_to_older_snapshot(tmp_path, seeded_backend):
+    """Newest manifest corrupted -> bootstrap silently (well, warned-ly)
+    falls back to the older snapshot, and the pull folds the tail journal
+    segment in: the joining device still converges to all three articles."""
+    _cfg_a, backend, manifests = seeded_backend
+    manifests[-1].write_bytes(CORRUPTION)
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "ok"
+    assert _titles(cfg_c) == {"Alpha", "Beta", "Gamma"}
+    assert any("unusable" in w for w in report.warnings)
+
+
+def test_bootstrap_all_snapshots_corrupt_refuses_cleanly(
+        tmp_path, seeded_backend):
+    """Every manifest corrupted -> a plain error whose reason points at
+    `tiro sync repair`, and the joining library is left EMPTY — no
+    half-materialization (rows or files)."""
+    _cfg_a, backend, manifests = seeded_backend
+    for manifest in manifests:
+        manifest.write_bytes(CORRUPTION)
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "error"
+    assert "repair" in report.reason.lower()
+    assert _count(cfg_c) == 0
+    assert list(cfg_c.articles_dir.glob("*.md")) == []
+
+
+def test_bootstrap_missing_shared_object_refuses_cleanly(
+        tmp_path, seeded_backend):
+    """Every object gone (the clean deterministic form of "referenced
+    object missing" for every snapshot) -> both candidates fail the
+    fetch-everything phase, same clean refusal, library untouched."""
+    _cfg_a, backend, _manifests = seeded_backend
+    objects = list(backend.glob("objects/*/*.age"))
+    assert objects
+    for obj in objects:
+        obj.unlink()
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "error"
+    assert "repair" in report.reason.lower()
+    assert _count(cfg_c) == 0
+    assert list(cfg_c.articles_dir.glob("*.md")) == []
+
+
+def test_bootstrap_falls_back_on_parse_failure(tmp_path, seeded_backend):
+    """Decision #1(a)'s PARSE-failure leg, pinned distinctly from the
+    decrypt-failure leg: the newest manifest DECRYPTS fine (real codec)
+    but is not a snapshot doc -> parse_snapshot raises -> bootstrap falls
+    back to the older snapshot and the tail pull still converges to all
+    three titles."""
+    from tiro.sync.snapshot import encode_snapshot
+
+    cfg_a, backend, manifests = seeded_backend
+    codec = codec_for_config(cfg_a)
+    manifests[-1].write_bytes(
+        encode_snapshot("this is not a snapshot doc", codec))
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "ok"
+    assert _titles(cfg_c) == {"Alpha", "Beta", "Gamma"}
+    assert any("unusable" in w for w in report.warnings)
+
+
+def test_fallback_bootstrap_with_truncated_journal_refuses(
+        tmp_path, seeded_backend):
+    """S6.1-fix review Major 1, field case (a): newest manifest corrupt AND
+    every journal segment beyond the OLDER snapshot's covers fully GC'd.
+    The fallback materializes the older snapshot, but the pull must then
+    detect that A's device doc reports a journal head the listing cannot
+    reach — needs_attention (truncated/GC'd + repair pointer), NEVER a
+    silently-stale "ok"."""
+    from tiro.sync.snapshot import decode_snapshot, parse_journal_key
+
+    cfg_a, backend, manifests = seeded_backend
+    codec = codec_for_config(cfg_a)
+    older_covers = decode_snapshot(manifests[0].read_bytes(), codec).covers
+    manifests[-1].write_bytes(CORRUPTION)
+    deleted = 0
+    for seg in backend.glob("journal/*/*.age"):
+        dev, seq = parse_journal_key(seg.relative_to(backend).as_posix())
+        if seq > older_covers.get(dev, 0):
+            seg.unlink()
+            deleted += 1
+    assert deleted  # the Gamma tail segment was present, and is now gone
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason
+    assert "GC'd" in report.reason
+    assert "repair" in report.reason
+    # Honest partial: the older snapshot's two articles DID materialize;
+    # what must never happen is an "ok" that hides the missing tail.
+    assert _titles(cfg_c) == {"Alpha", "Beta"}
+
+
+def test_steady_state_truncated_segment_refuses(tmp_path, seeded_backend):
+    """S6.1-fix review Major 1, field case (b): two converged devices; A
+    pushes a new segment B has not pulled; that segment file is then lost
+    from the backend while A's device doc still reports it. B's next cycle
+    must be needs_attention (truncated), not an ok that silently strands B
+    behind A's journal head forever."""
+    from tiro.sync.snapshot import journal_key
+
+    cfg_a, backend, _manifests = seeded_backend
+    cfg_b = _join(tmp_path, backend, name="lib-b")
+    report = asyncio.run(bootstrap(cfg_b, adapter_for_config(cfg_b)))
+    assert report.result == "ok"
+    assert _titles(cfg_b) == {"Alpha", "Beta", "Gamma"}
+
+    _ingest(cfg_a, title="Delta", body="# Delta\n\nBody four.",
+            url="https://example.com/delta")
+    report = _sync(cfg_a)
+    assert report.result == "ok"
+    dev_a, _name = get_or_create_device(cfg_a)
+    head = (read_sync_state(cfg_a)["self"] or {}).get("last_seq") or 0
+    seg = backend / journal_key(dev_a, head)
+    assert seg.exists()
+    seg.unlink()
+
+    report = _sync(cfg_b)
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason
+    assert "repair" in report.reason
+    assert "Delta" not in _titles(cfg_b)
+
+
+def test_bootstrap_tail_segment_object_missing_quarantines_after_snapshot(
+        tmp_path, seeded_backend):
+    """Honest-partial pin: delete exactly the object(s) snapshot #2 needs
+    beyond snapshot #1 — i.e. Gamma's body, which the tail journal segment
+    references by the same content address. Snapshot #2 then fails its
+    fetch phase (fallback), snapshot #1 materializes fully, and the PULL
+    quarantines on the tail segment's missing object: needs_attention with
+    exactly the older snapshot's two articles applied — the same honest
+    incremental semantics as a normal cycle quarantine."""
+    from tiro.sync.snapshot import decode_snapshot, object_key
+
+    cfg_a, backend, manifests = seeded_backend
+    codec = codec_for_config(cfg_a)
+    older_doc = decode_snapshot(manifests[0].read_bytes(), codec)
+    newest_doc = decode_snapshot(manifests[-1].read_bytes(), codec)
+    tail_addrs = (set(newest_doc.objects.values())
+                  - set(older_doc.objects.values()))
+    assert tail_addrs  # Gamma's body object, content-addressed
+    for addr in tail_addrs:
+        (backend / object_key(addr)).unlink()
+
+    cfg_c = _join(tmp_path, backend)
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+
+    assert report.result == "needs_attention"
+    assert _titles(cfg_c) == {"Alpha", "Beta"}
+    assert any("unusable" in w for w in report.warnings)
+
+
+# --- S6.2: stale-lock drills + doctor's sync section -------------------------
+
+
+STALE_DEVICE = "01STALEDEVICEELSEWHERE0000"
+
+
+def _write_lock(backend, *, age_s, ttl_s=120, device_id=STALE_DEVICE):
+    """Write a real-shape lock payload (make_lock_payload's exact field
+    names, tz-aware UTC) aged `age_s` seconds into the past."""
+    path = backend / LOCK_KEY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(make_lock_payload(
+        device_id, ttl_s,
+        now=datetime.now(UTC) - timedelta(seconds=age_s)))
+    return path
+
+
+@pytest.fixture
+def plain_synced(tmp_path, initialized_library):
+    """(cfg, backend): plaintext filesystem backend + one ingested article,
+    sync enabled, NO cycle run yet (the first cycle auto-inits format.json)."""
+    backend = tmp_path / "lock-backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg.sync_enabled = True
+    _ingest(cfg, title="Locked Out", body="# Locked\n\nBody.",
+            url="https://example.com/locked")
+    return cfg, backend
+
+
+def test_stale_lock_is_stolen_by_next_cycle(plain_synced):
+    """FROZEN spec §6.1 behavior pinned at the ENGINE level: a long-dead
+    lock (age 3600s, ttl 120s) never wedges sync — the next cycle steals it,
+    completes, and pushes."""
+    cfg, backend = plain_synced
+    _write_lock(backend, age_s=3600, ttl_s=120)
+
+    report = _sync(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_ops > 0
+    # The stolen lock was re-minted as ours and released on cycle exit.
+    assert not (backend / LOCK_KEY).exists()
+
+
+def test_live_lock_skips_cycle(plain_synced):
+    """A FRESH foreign lock (age 5s < ttl 120s) is honored: the cycle skips
+    and the lock file is left exactly as it was."""
+    from tiro.sync.adapters.base import lock_owner
+
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+
+    report = _sync(cfg)
+
+    assert report.result == "skipped_lock"
+    assert lock_path.exists()
+    assert lock_owner(lock_path.read_bytes()) == STALE_DEVICE
+
+
+def test_doctor_reports_and_fixes_stale_lock(plain_synced):
+    """Doctor's sync section reports a stale lock; --fix clears ONLY a
+    stale one — a live lock survives fix untouched."""
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "ok"
+    assert report["sync"]["stale_lock"] is True
+
+    fixed = doctor_fix(cfg)
+    assert fixed["sync_stale_lock_cleared"] is True
+    assert not lock_path.exists()
+
+    # A LIVE lock is NEVER deleted by --fix.
+    lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+    fixed = doctor_fix(cfg)
+    assert fixed["sync_stale_lock_cleared"] is False
+    assert lock_path.exists()
+
+
+def test_doctor_sync_section_offline_safe(tmp_path, initialized_library):
+    """The sync section can NEVER break doctor: an unconfigured library
+    reports configured=False (no probe at all), and a configured-but-absent
+    backend degrades gracefully — scan() never raises. (The filesystem
+    adapter treats a missing dir as an empty listing, so a nonexistent
+    sync_path legitimately reports "ok"; a network backend would report
+    "unreachable" — both are acceptable shapes here.)"""
+    report = doctor_scan(initialized_library)
+    assert report["sync"]["configured"] is False
+    assert report["sync"]["backend"] is None
+    assert report["sync"]["stale_lock"] is False
+
+    cfg = _sync_cfg(initialized_library, tmp_path / "nope" / "gone",
+                    encrypt="off")
+    cfg.sync_enabled = True
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] in ("ok", "unreachable")
+    assert report["sync"]["stale_lock"] is False
+
+
+def test_doctor_exit_code_neutral_on_sync_findings(plain_synced):
+    """FROZEN: sync findings are operational states, not library-structural
+    inconsistencies — a stale lock changes NEITHER structurally_consistent
+    NOR clean (compared with and without the lock present)."""
+    cfg, backend = plain_synced
+
+    baseline = doctor_scan(cfg)
+    assert baseline["structurally_consistent"] is True
+    # S6.2-fix Nit 7: pin the baseline CLEAN outright — the fixture is a
+    # fresh library with one normal ingest (no housekeeping residue), so
+    # clean must be True; without this pin the equality below could pass
+    # vacuously with clean=False on both sides.
+    assert baseline["clean"] is True
+
+    _write_lock(backend, age_s=3600, ttl_s=120)
+    with_lock = doctor_scan(cfg)
+
+    assert with_lock["sync"]["stale_lock"] is True
+    assert with_lock["structurally_consistent"] is True
+    assert with_lock["clean"] is True
+    assert with_lock["clean"] == baseline["clean"]
+
+
+def _sync_state_rows(cfg):
+    from tiro.database import get_connection
+
+    conn = get_connection(cfg.db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM sync_state").fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def test_doctor_scan_never_mints_device_identity(plain_synced):
+    """S6.2-fix review Major 1: scan() is a pure status probe — on a
+    configured+enabled but NEVER-cycled library it must not INSERT the
+    is_self=1 device-identity row into sync_state as a side effect of
+    building its backend adapter."""
+    cfg, _backend = plain_synced
+    assert _sync_state_rows(cfg) == 0  # never cycled: no identity yet
+
+    report = doctor_scan(cfg)
+
+    assert report["sync"]["backend"] == "ok"  # the probe really ran
+    assert _sync_state_rows(cfg) == 0  # ...and minted nothing
+
+
+def test_clear_stale_lock_live_vs_stale_direct(plain_synced):
+    """clear_stale_lock's own re-read/re-check, pinned directly (S6.2-fix
+    Minor 4): a LIVE lock returns False and survives byte-intact; a stale
+    one returns True and is deleted. The explicit device_id also pins the
+    read-only adapter path (no identity mint)."""
+    cfg, backend = plain_synced
+    adapter = adapter_for_config(cfg, device_id="test-probe")
+    try:
+        lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+        live_bytes = lock_path.read_bytes()
+        assert asyncio.run(engine.clear_stale_lock(cfg, adapter)) is False
+        assert lock_path.exists()
+        assert lock_path.read_bytes() == live_bytes
+
+        lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+        assert asyncio.run(engine.clear_stale_lock(cfg, adapter)) is True
+        assert not lock_path.exists()
+    finally:
+        asyncio.run(adapter.aclose())
+    assert _sync_state_rows(cfg) == 0
+
+
+def test_doctor_probe_network_error_reports_unreachable(
+        plain_synced, monkeypatch):
+    """S6.2-fix Minor 3: a backend whose read path raises (network down)
+    degrades the section to backend="unreachable" — scan() never raises
+    and never claims a stale lock it could not read."""
+    cfg, _backend = plain_synced
+
+    async def _down(self, key):
+        raise ConnectionError("network down")
+
+    monkeypatch.setattr(engine.AuditedAdapter, "get", _down)
+
+    report = doctor_scan(cfg)
+
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "unreachable"
+    assert report["sync"]["stale_lock"] is False
+
+
+def test_doctor_sync_section_degrades_on_internal_error(
+        plain_synced, monkeypatch, capsys):
+    """S6.2-fix Minor 3, belt branch: a bug anywhere in the section builder
+    (here: load_sync_status raising) degrades report["sync"] to the
+    {"configured", "error"} shape while scan() still returns the FULL
+    report — and cmd_doctor's text output prints that shape instead of
+    crashing on missing keys."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+
+    def _boom(config):
+        raise RuntimeError("sync status exploded")
+
+    monkeypatch.setattr(engine, "load_sync_status", _boom)
+
+    report = doctor_scan(cfg)
+    assert set(report["sync"]) == {"configured", "error"}
+    assert report["sync"]["configured"] is True
+    assert "sync status exploded" in report["sync"]["error"]
+    # The rest of the report survived the sync-section failure.
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is True
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: status unavailable" in out
+    assert "sync status exploded" in out
+
+
+def test_doctor_probe_misconfigured_distinct_from_unreachable(
+        plain_synced, capsys):
+    """S6.2-fix Nit 6: SyncConfigError means the local config failed
+    validation BEFORE any backend contact — reported as "misconfigured",
+    never mislabeled "unreachable" — and cmd_doctor prints a matching
+    pointer at the sync settings."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+    cfg.sync_encrypt = "bogus"  # resolve_encryption refuses unknown values
+
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "misconfigured"
+    assert report["sync"]["stale_lock"] is False
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: backend misconfigured" in out
+
+
+def test_cli_doctor_fix_json_carries_sync_lock_flag(plain_synced, capsys):
+    """S6.2-fix Nit 5: `tiro doctor --fix --json` merges the fix-only
+    sync_stale_lock_cleared flag into the printed post-fix report (scan()
+    alone never produces that key)."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=True, json=True,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["sync_stale_lock_cleared"] is True
+    assert not lock_path.exists()
+
+
+def test_cli_doctor_prints_cycle_warnings(plain_synced, monkeypatch, capsys):
+    """S6.2-fix Nit 7: last-cycle warnings surfaced by the sync section are
+    PRINTED by cmd_doctor (report-only, muted "sync:" prefix) — S6's later
+    engine warnings will ride the same lines."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+
+    def _status(config):
+        return {"configured": True, "enabled": True, "dot": "ok",
+                "last_cycle": {"result": "ok",
+                               "warnings": ["snapshot 01FAKE unusable"]},
+                "last_synced_at": None, "device_name": None, "devices": []}
+
+    monkeypatch.setattr(engine, "load_sync_status", _status)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: last-cycle warning — snapshot 01FAKE unusable" in out
+
+
+# --- S6.3: clock-skew warnings (>24h, spec §10 / D-S6-1) ---------------------
+
+
+def _skewed_hlc_factory(offset_ms):
+    """engine.HLCClock stand-in whose wall clock runs offset_ms off the real
+    one — the honest seam: HLCClock already accepts a now_ms time source, so
+    no journal-side patching is needed."""
+    import time
+
+    from tiro.sync.journal import HLCClock
+
+    def _factory(device):
+        return HLCClock(
+            device, now_ms=lambda: time.time_ns() // 1_000_000 + offset_ms)
+
+    return _factory
+
+
+def _skews(warnings):
+    return [w for w in warnings if w.startswith("clock skew:")]
+
+
+def test_clock_skew_constant_frozen():
+    """FROZEN: the >24h threshold is spec §10 — never tune it casually."""
+    assert engine.CLOCK_SKEW_WARN_HOURS == 24
+
+
+def test_status_live_ahead_check(initialized_library):
+    """Prong B unit: a registry row whose last_wall_ms sits ~30h in the
+    future warns (naming the device); ~1h ahead stays silent."""
+    import time
+
+    from tiro.sync.engine import load_sync_status, upsert_remote_device
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+
+    upsert_remote_device(cfg, "01SKEWFASTLAPTOP0000000000",
+                         name="fast-laptop",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+    warnings = load_sync_status(cfg)["warnings"]
+    assert len(warnings) == 1
+    assert "fast-laptop" in warnings[0]
+    assert "clock" in warnings[0]
+    assert "ahead" in warnings[0]
+
+    # ~1h of skew is normal life (timezones don't matter — HLC wall stamps
+    # are UTC epoch ms — but drift/suspend jitter must never warn).
+    upsert_remote_device(cfg, "01SKEWFASTLAPTOP0000000000",
+                         last_wall_ms=now_ms + 1 * 3600 * 1000)
+    assert load_sync_status(cfg)["warnings"] == []
+
+
+@pytest.fixture
+def skew_rig(tmp_path, initialized_library):
+    """(cfg_a, cfg_b, backend): plaintext two-device rig. A pushed one
+    normal-clock cycle (auto-snapshot on first cycle covers it); B joined
+    via the empty-library auto-bootstrap and completed one SUCCESSFUL
+    cycle — the prev-success baseline the behind-check needs."""
+    backend = tmp_path / "skew-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Alpha", body="# Alpha\n\nBody one.",
+            url="https://example.com/alpha")
+    assert _sync(cfg_a).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-skew-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+    cfg_b.sync_enabled = True
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    assert _titles(cfg_b) == {"Alpha"}
+    return cfg_a, cfg_b, backend
+
+
+def test_pull_warns_on_remote_clock_ahead(skew_rig, monkeypatch):
+    """Prong A ahead e2e: A pushes ops stamped ~30h in the future; B's next
+    pull warns (one line, naming A), the warning persists into
+    load_sync_status via last_cycle AND the live registry check — deduped
+    to a single line — and doctor's sync section carries it report-only."""
+    from tiro.sync.engine import load_sync_status
+
+    cfg_a, cfg_b, _backend = skew_rig
+    _, name_a = get_or_create_device(cfg_a)
+
+    _ingest(cfg_a, title="Beta", body="# Beta\n\nBody two.",
+            url="https://example.com/beta")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "HLCClock",
+                  _skewed_hlc_factory(30 * 3600 * 1000))
+        assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    skews = _skews(report.warnings)
+    assert len(skews) == 1
+    assert name_a in skews[0]
+    assert "ahead" in skews[0]
+
+    status = load_sync_status(cfg_b)
+    skews = _skews(status["warnings"])
+    assert len(skews) == 1  # prong A + prong B deduped by device label
+    assert name_a in skews[0]
+    assert "ahead" in skews[0]
+
+    # Doctor's sync section carries it (report-only, like the rest of the
+    # section — exit-code neutrality is pinned by the S6.2 drills; the
+    # structural keys aren't asserted here because the joined library
+    # shares the process-global test vectorstore with A's).
+    scan = doctor_scan(cfg_b)
+    skews = _skews(scan["sync"]["clock_skew"])
+    assert len(skews) == 1
+    assert name_a in skews[0]
+
+
+def test_pull_warns_on_remote_clock_behind(skew_rig, tmp_path, monkeypatch):
+    """Prong A behind e2e: B has a previous SUCCESSFUL cycle, so a segment
+    new to this pull whose newest stamp predates that cycle by >24h proves
+    the remote clock is behind. A fresh device C joining afterwards
+    (bootstrap/catch-up, no previous success) pulls the SAME old-stamped
+    ops with NO behind warning — offline-all-weekend can never false-fire."""
+    from tiro.sync.engine import load_sync_status
+
+    cfg_a, cfg_b, backend = skew_rig
+    _, name_a = get_or_create_device(cfg_a)
+
+    # Drain B's journal into A first (a normal-clock cycle): each cycle's
+    # fresh HLC clock observes every pulled stamp and tick() never
+    # regresses, so a backdated wall clock only actually mints old stamps
+    # when the pull observed nothing newer — which is exactly the dangerous
+    # LWW case this warning exists for (a behind device writing without
+    # having seen others' recent ops).
+    assert _sync(cfg_a).result == "ok"
+
+    _ingest(cfg_a, title="Gamma", body="# Gamma\n\nBody three.",
+            url="https://example.com/gamma")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "HLCClock",
+                  _skewed_hlc_factory(-30 * 3600 * 1000))
+        assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b)
+    assert report.result == "ok"
+    skews = _skews(report.warnings)
+    assert len(skews) == 1
+    assert name_a in skews[0]
+    assert "behind" in skews[0]
+    # A behind clock leaves no future last_wall_ms, so status carries the
+    # persisted cycle warning (folded, not the live prong-B check).
+    assert _skews(load_sync_status(cfg_b)["warnings"]) == skews
+    assert doctor_scan(cfg_b)["sync"]["clock_skew"] == skews
+
+    cfg_c = _second_library(tmp_path, "lib-skew-c")
+    _sync_cfg(cfg_c, backend, encrypt="off")
+    cfg_c.sync_enabled = True
+    report_c = _sync(cfg_c)
+    assert report_c.result == "ok"
+    assert _titles(cfg_c) >= {"Alpha", "Gamma"}
+    assert _skews(report_c.warnings) == []
+
+
+def test_skew_no_double_report_across_surfaces(initialized_library):
+    """S6.3 review #1: a persisted prong-A line must appear ONCE per
+    surface — doctor carries it under clock_skew and EXCLUDES it from
+    cycle_warnings; non-skew cycle warnings stay in cycle_warnings only."""
+    from tiro.doctor import scan
+    from tiro.sync.engine import CycleReport, _record_cycle, load_sync_status
+
+    cfg = initialized_library
+    cfg.sync_path = str(cfg.library / "unused-backend")  # configured=True
+    get_or_create_device(cfg)
+    report = CycleReport()
+    report.result = "ok"
+    report.finished_at = "2026-07-17T00:00:00Z"
+    skew_line = ("clock skew: device 'fast-laptop' is ~30h ahead of this "
+                 "device's clock — last-write-wins merges may misorder "
+                 "until fixed")
+    report.warnings = [skew_line, "compaction skipped: transient"]
+    _record_cycle(cfg, report)
+
+    status = load_sync_status(cfg)
+    assert status["warnings"].count(skew_line) == 1
+
+    section = scan(cfg)["sync"]
+    assert skew_line in section["clock_skew"]
+    assert skew_line not in section["cycle_warnings"]
+    assert "compaction skipped: transient" in section["cycle_warnings"]
+
+
+def test_skew_shared_name_never_suppresses(initialized_library):
+    """S6.3 review #3: two devices sharing a NAME must not dedupe each
+    other's warnings — a live-ahead line for one 'MacBook' plus a persisted
+    line for the other 'MacBook' both survive."""
+    import time
+
+    from tiro.sync.engine import (
+        CycleReport,
+        _record_cycle,
+        load_sync_status,
+        upsert_remote_device,
+    )
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+    upsert_remote_device(cfg, "01SKEWTWINAAAAAAAAAAAAAAAA", name="MacBook",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+    upsert_remote_device(cfg, "01SKEWTWINBBBBBBBBBBBBBBBB", name="MacBook",
+                         last_wall_ms=now_ms)
+    report = CycleReport()
+    report.result = "ok"
+    report.finished_at = "2026-07-17T00:00:00Z"
+    persisted = ("clock skew: device 'MacBook' is ~30h behind this "
+                 "device's clock — last-write-wins merges may misorder "
+                 "until fixed")
+    report.warnings = [persisted]
+    _record_cycle(cfg, report)
+
+    warnings = load_sync_status(cfg)["warnings"]
+    # One live ahead line + the persisted behind line: both present.
+    assert len(warnings) == 2
+    assert any("ahead" in w for w in warnings)
+    assert persisted in warnings
+
+
+def test_status_survives_garbage_last_wall_ms(initialized_library):
+    """S6.3 review #4: one hand-edited garbage last_wall_ms row degrades to
+    a skipped row, not a lost prong-B pass for every other device."""
+    import time
+
+    from tiro.database import get_connection
+    from tiro.sync.engine import load_sync_status, upsert_remote_device
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+    upsert_remote_device(cfg, "01SKEWGARBAGEROW0000000000", name="broken")
+    conn = get_connection(cfg.db_path)
+    try:
+        conn.execute(
+            "UPDATE sync_state SET last_wall_ms = 'not-a-number' "
+            "WHERE device_id = ?", ("01SKEWGARBAGEROW0000000000",))
+        conn.commit()
+    finally:
+        conn.close()
+    upsert_remote_device(cfg, "01SKEWHEALTHYROW0000000000", name="healthy",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+
+    warnings = load_sync_status(cfg)["warnings"]
+    assert len(warnings) == 1
+    assert "healthy" in warnings[0]
+
+
+# --- S6.4: mass-delete guard e2e extras --------------------------------------
+#
+# S5's multidevice scenario 8 pins the basic article-guard trip + acceptance;
+# these drills add what it did NOT: trip persistence across cycles, the real
+# CLI acceptance path, and the annotations-guard equivalent (spec §4). The
+# one-shot-across-segments semantic is already pinned at the pull-unit level
+# (test_sync_engine.py::test_pull_mass_delete_acceptance_is_one_shot with
+# hand-seeded segments); drill 4 re-pins it END-TO-END across the two guard
+# KINDS (article RowDels then highlight LineDels, both from real device
+# cycles' diffs).
+
+
+GUARD_WORDS = ["alpha", "bravo", "charlie", "delta", "echo"]
+
+MARKED_BODY = "# Marked\n\nalpha bravo charlie delta echo close the loop.\n"
+
+
+@pytest.fixture
+def guard_rig(tmp_path, initialized_library):
+    """(cfg_a, cfg_b): encrypted two-device rig, no data yet — A initialized
+    the backend, B passphrase-joined but has not cycled (its first _sync
+    auto-bootstraps once A's first cycle has made a snapshot)."""
+    backend = tmp_path / "guard-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="on")
+    cfg_a.sync_enabled = True
+    recovery = asyncio.run(
+        init_backend(cfg_a, adapter_for_config(cfg_a), PASSPHRASE,
+                     kdf_params=WEAK_KDF))
+    cfg_a.sync_identity = recovery
+    cfg_b = _join(tmp_path, backend, name="lib-guard-b")
+    return cfg_a, cfg_b
+
+
+def _hl_count(cfg):
+    return _q(cfg, "SELECT COUNT(*) AS n FROM highlights")[0]["n"]
+
+
+def _highlight_words(cfg, article_id, words):
+    """Create one highlight per word via the real M2.1 sidecar-first path,
+    positions computed against the WRITTEN file body (multidevice #5's
+    recipe). No note_markdown — a synced delete preserves non-empty notes as
+    conflict files, which would blur these drills' sidecar assertions."""
+    row = _q(cfg, "SELECT * FROM articles WHERE id = ?", article_id)[0]
+    body = frontmatter.load(
+        str(cfg.articles_dir / row["markdown_path"])).content
+    conn = get_connection(cfg.db_path)
+    try:
+        for word in words:
+            start = body.index(word)
+            append_highlight(
+                conn=conn, config=cfg, article=row, quote=word,
+                prefix=body[max(0, start - 8):start],
+                suffix=body[start + len(word):start + len(word) + 8],
+                position_start=start, position_end=start + len(word),
+                content_hash=content_hash(body), color="yellow")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _wipe_annotation_sidecars(cfg, expected: int):
+    """Empty every annotations sidecar IN PLACE. Files stay PRESENT, so the
+    S1 annotations mass-delete guard (which fires on a MISSING dir / missing
+    files for >1 stem) does not trip the wiping device's own reconcile:
+    files-win empties its rows and the manifest diff pushes one LineDel per
+    vanished line. (Deleting the files instead would wedge the wiping device
+    behind its own S1 guard — this is the least-contrived honest route to a
+    mass highlight-delete diff.)"""
+    sidecars = sorted((cfg.library / "annotations").glob("*.jsonl"))
+    assert len(sidecars) == expected
+    for path in sidecars:
+        path.write_text("")
+
+
+def _trip_article_guard(cfg_a, cfg_b, n=12):
+    """A ingests n articles, both devices converge, A deletes ALL n and
+    pushes — B's next pull now faces a guarded segment (n RowDels > the
+    max(10, 20%) threshold)."""
+    arts = [_ingest(cfg_a, title=f"Guard {i:02d}",
+                    url=f"https://example.com/guard-{i}") for i in range(n)]
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"  # auto-bootstrap (D-S5-3)
+    assert _count(cfg_b) == n
+    for art in arts:
+        delete_article(cfg_a, art["id"])
+    assert _count(cfg_a) == 0
+    assert _sync(cfg_a).result == "ok"
+
+
+def test_guard_state_persists_across_cycles(guard_rig):
+    """A tripped guard NEVER self-clears: every un-accepted cycle re-trips
+    (watermark held, nothing applied) until an explicit acceptance — the trip
+    is re-derived from the un-advanced watermark each cycle, not a sticky
+    flag someone could lose."""
+    cfg_a, cfg_b = guard_rig
+    _trip_article_guard(cfg_a, cfg_b)
+
+    first = _sync(cfg_b)
+    assert first.result == "needs_attention"
+    assert first.reason == "mass_delete_guard"
+    assert first.guard
+    assert _count(cfg_b) == 12  # nothing applied
+
+    second = _sync(cfg_b)  # NO acceptance — must re-trip, not self-clear
+    assert second.result == "needs_attention"
+    assert second.reason == "mass_delete_guard"
+    assert second.guard
+    assert _count(cfg_b) == 12  # still nothing applied
+
+    accepted = _sync(cfg_b, accept_mass_delete=True)
+    assert accepted.result == "ok"
+    assert accepted.guard is None  # acceptance consumed cleanly
+    assert _count(cfg_b) == 0
+
+
+def test_cli_accept_mass_delete_clears_trip(guard_rig, capsys):
+    """The FROZEN CLI shape end-to-end: `tiro sync --now` surfaces the trip
+    (GUARDED + reason), `tiro sync --now --accept-mass-delete` clears it —
+    through the real cmd_sync, not the engine kwarg directly."""
+    cfg_a, cfg_b = guard_rig
+    _trip_article_guard(cfg_a, cfg_b)
+
+    cmd_sync(Args(cfg_b, now=True))
+    out = capsys.readouterr().out
+    assert "needs_attention" in out
+    assert "GUARDED" in out
+    assert "mass_delete_guard" in out
+    assert _count(cfg_b) == 12
+
+    cmd_sync(Args(cfg_b, now=True, accept_mass_delete=True))
+    out = capsys.readouterr().out
+    assert "Sync: ok" in out
+    assert "GUARDED" not in out
+    assert _count(cfg_b) == 0
+
+
+def test_annotations_mass_delete_guard_equivalent(guard_rig):
+    """Spec §4's "annotations-guard equivalent": a pulled diff deleting >
+    max(10, 20%) of local HIGHLIGHTS halts the merge exactly like the
+    article guard — rows AND sidecar lines survive the trip; acceptance
+    applies the wipe (rows gone, sidecars emptied)."""
+    cfg_a, cfg_b = guard_rig
+    arts = [_ingest(cfg_a, title=f"Marked {i}", body=MARKED_BODY,
+                    url=f"https://example.com/marked-{i}") for i in range(3)]
+    for art in arts:
+        _highlight_words(cfg_a, art["id"], GUARD_WORDS)
+    assert _hl_count(cfg_a) == 15
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"
+    assert _hl_count(cfg_b) == 15
+
+    _wipe_annotation_sidecars(cfg_a, expected=3)
+    report_a = _sync(cfg_a)
+    # A's own wipe is A's own edit: the pull-side guard does not apply, the
+    # S1 reconcile guard stays quiet (files present), rows empty files-win.
+    assert report_a.result == "ok"
+    assert _hl_count(cfg_a) == 0
+
+    tripped = _sync(cfg_b)
+    assert tripped.result == "needs_attention"
+    assert tripped.reason == "mass_delete_guard"
+    # Exact-count message (S6.4 review nit): pins that ALL 15 LineDels
+    # crossed the wire and were counted against B's 15 local highlights.
+    assert "15 highlight deletions vs 15 local highlights" in tripped.guard
+    assert _hl_count(cfg_b) == 15  # rows survive the trip
+    b_sidecars = sorted((cfg_b.library / "annotations").glob("*.jsonl"))
+    assert len(b_sidecars) == 3
+    assert all(p.read_text() for p in b_sidecars)  # lines survive too
+    for art in _q(cfg_b, "SELECT markdown_path FROM articles"):
+        assert len(read_annotations(cfg_b, sidecar_stem(art))) == 5
+
+    accepted = _sync(cfg_b, accept_mass_delete=True)
+    assert accepted.result == "ok"
+    assert accepted.guard is None
+    assert _hl_count(cfg_b) == 0
+    for path in b_sidecars:
+        assert path.read_text() == ""  # emptied, not orphaned
+
+
+def test_guard_acceptance_is_one_shot_across_segments(guard_rig):
+    """One-shot acceptance END-TO-END across the two guard KINDS: A's two
+    cycles push one article-mass-delete segment then one highlight-mass-
+    delete segment; B's accepted run consumes the acceptance on the FIRST
+    trip (articles applied) and re-trips on the second (highlights held); a
+    second accepted run clears it."""
+    cfg_a, cfg_b = guard_rig
+    bulk = [_ingest(cfg_a, title=f"Bulk {i:02d}",
+                    url=f"https://example.com/bulk-{i}") for i in range(12)]
+    marked = [_ingest(cfg_a, title=f"Marked {i}", body=MARKED_BODY,
+                      url=f"https://example.com/marked-{i}") for i in range(3)]
+    for art in marked:
+        _highlight_words(cfg_a, art["id"], GUARD_WORDS)
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"
+    assert _count(cfg_b) == 15
+    assert _hl_count(cfg_b) == 15
+
+    # Guarded segment #1: 12 article deletions (> max(10, ceil(0.2*15))).
+    for art in bulk:
+        delete_article(cfg_a, art["id"])
+    assert _sync(cfg_a).result == "ok"
+    # Guarded segment #2: 15 highlight deletions (> max(10, ceil(0.2*15))).
+    _wipe_annotation_sidecars(cfg_a, expected=3)
+    assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b, accept_mass_delete=True)
+    assert report.result == "needs_attention"
+    assert report.reason == "mass_delete_guard"
+    assert "highlight" in report.guard  # the SECOND, un-accepted trip
+    assert _count(cfg_b) == 3     # first trip consumed the acceptance, applied
+    assert _hl_count(cfg_b) == 15  # second trip held its segment
+
+    report2 = _sync(cfg_b, accept_mass_delete=True)
+    assert report2.result == "ok"
+    assert report2.guard is None
+    assert _hl_count(cfg_b) == 0
+    assert _count(cfg_b) == 3
+
+
+# --- S6.5: library_id pin (D-S6-2), per-library flock (D-S6-3),
+# record-before-release (D-S5-7c) ---------------------------------------------
+
+
+def _format_library_id(backend):
+    from tiro.sync.crypto import parse_format_json
+
+    return parse_format_json((backend / "format.json").read_text()).library_id
+
+
+@pytest.fixture
+def pin_rig(tmp_path, initialized_library):
+    """(cfg, backend_x, backend_y): PLAINTEXT device synced against X (pin
+    set by its first cycle), plus a SECOND initialized plaintext backend Y
+    holding a different library's data — the exact cross-merge hole the
+    library pin exists to close (encrypted backends were already protected
+    by the age-recipient check)."""
+    backend_x = tmp_path / "pin-backend-x"
+    cfg = _sync_cfg(initialized_library, backend_x, encrypt="off")
+    cfg.sync_enabled = True
+    _ingest(cfg, title="Mine", body="# Mine\n\nBody.",
+            url="https://example.com/mine")
+    assert _sync(cfg).result == "ok"
+
+    backend_y = tmp_path / "pin-backend-y"
+    cfg_other = _second_library(tmp_path, "lib-pin-other")
+    _sync_cfg(cfg_other, backend_y, encrypt="off")
+    cfg_other.sync_enabled = True
+    _ingest(cfg_other, title="Theirs", body="# Theirs\n\nBody.",
+            url="https://example.com/theirs")
+    # Seed Y with its journal segment INTACT (no auto-snapshot + own-segment
+    # GC): the re-pair drill later pulls Y's history through a plain cycle,
+    # which needs the segment — a GC'd journal would (correctly) refuse as
+    # truncated, but that's not what these drills pin. The REALISTIC flow
+    # (naturally-compacted backends, truncation refusal, repair, epoch
+    # re-push) is pinned by
+    # test_library_pin_repair_chain_against_compacted_backend below.
+    with pytest.MonkeyPatch.context() as m:
+        async def _no_compact(*args, **kwargs):
+            return None
+
+        m.setattr(engine, "_maybe_compact", _no_compact)
+        assert _sync(cfg_other).result == "ok"
+    return cfg, backend_x, backend_y
+
+
+def test_library_pin_set_and_idempotent(pin_rig):
+    """The first cycle pins format.json's library_id (first-cycle trust —
+    also the 0.8-era upgrade path); the same backend keeps working across
+    cycles with the pin unchanged."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, backend_x, _backend_y = pin_rig
+    assert get_library_pin(cfg) == _format_library_id(backend_x)
+    assert _sync(cfg).result == "ok"
+    assert _sync(cfg).result == "ok"
+    assert get_library_pin(cfg) == _format_library_id(backend_x)
+
+
+def test_library_pin_blocks_repointed_backend(pin_rig):
+    """D-S6-2, the plaintext leg: re-pointing sync_path at a DIFFERENT
+    initialized backend refuses needs_attention — reason names BOTH ids and
+    the setup remedy — with NOTHING applied locally and nothing pushed."""
+    cfg, backend_x, backend_y = pin_rig
+    id_x = _format_library_id(backend_x)
+    id_y = _format_library_id(backend_y)
+    before = _titles(cfg)
+    dev, _name = get_or_create_device(cfg)
+
+    cfg.sync_path = str(backend_y)
+    report = _sync(cfg)
+
+    assert report.result == "needs_attention"
+    assert id_x in report.reason and id_y in report.reason
+    assert "setup" in report.reason
+    assert _titles(cfg) == before  # nothing applied
+    assert not list((backend_y / "journal" / dev).glob("*"))  # nothing pushed
+    # The refusal never self-clears: a second cycle re-trips identically.
+    assert _sync(cfg).result == "needs_attention"
+    assert _titles(cfg) == before
+
+
+def test_library_pin_repair_via_setup_ceremony(pin_rig):
+    """A successful verify_passphrase IS the `tiro sync setup` re-pair
+    ceremony: the pin moves to Y, and cycles against Y then succeed —
+    merging the two libraries is now the user's declared intent."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, _backend_x, backend_y = pin_rig
+    cfg.sync_path = str(backend_y)
+    assert _sync(cfg).result == "needs_attention"
+
+    adapter = adapter_for_config(cfg)
+    try:
+        # Plaintext backend: "" = success-no-identity (never None).
+        assert asyncio.run(verify_passphrase(cfg, adapter, "")) == ""
+    finally:
+        asyncio.run(adapter.aclose())
+    assert get_library_pin(cfg) == _format_library_id(backend_y)
+
+    report = _sync(cfg)
+    assert report.result == "ok"
+    assert _titles(cfg) >= {"Mine", "Theirs"}
+
+
+def test_auto_init_refused_when_library_pinned(pin_rig, tmp_path):
+    """S6.5-fix finding 4: plaintext auto-init is FIRST-EVER-sync only. A
+    PINNED library whose sync_path lands on an empty, uninitialized dir
+    (unmounted drive, typo, half-copied folder) refuses needs_attention
+    instead of minting a fresh backend — silently auto-initing would orphan
+    the pinned backend and fork the sync history. The explicit ceremonies
+    (init_backend/verify_passphrase) remain the deliberate re-point path."""
+    from tiro.sync.manifest import get_library_pin
+
+    cfg, backend_x, _backend_y = pin_rig
+    pin = get_library_pin(cfg)
+    before = _titles(cfg)
+    empty_dir = tmp_path / "empty-foreign-dir"
+    empty_dir.mkdir()
+    cfg.sync_path = str(empty_dir)
+
+    report = _sync(cfg)
+
+    assert report.result == "needs_attention"
+    assert pin in report.reason
+    assert "uninitialized" in report.reason and "setup" in report.reason
+    assert not (empty_dir / "format.json").exists()  # nothing initialized
+    assert _titles(cfg) == before                    # library untouched
+    assert get_library_pin(cfg) == pin               # pin unchanged
+    # Pointing back at the pinned backend self-heals without ceremony.
+    cfg.sync_path = str(backend_x)
+    assert _sync(cfg).result == "ok"
+
+
+def test_library_pin_survives_repair_and_clear_shadow(pin_rig):
+    """Repair keeps format.json, so the pin stays valid: cycles pass after
+    a repair on the same backend. The repair-epoch reset (clear_shadow)
+    preserves the libinfo row directly, and the pin is invisible to the
+    differ (no libinfo shadow entry)."""
+    from tiro.sync.manifest import clear_shadow, get_library_pin, load_shadow
+
+    cfg, backend_x, _backend_y = pin_rig
+    pin = get_library_pin(cfg)
+    assert pin == _format_library_id(backend_x)
+    assert all(kind != "libinfo" for (kind, _uid) in load_shadow(cfg).entries)
+
+    report = asyncio.run(engine.repair(cfg, adapter_for_config(cfg)))
+    assert report.result == "ok"
+    assert get_library_pin(cfg) == pin
+
+    clear_shadow(cfg)  # the epoch reset other devices run after a repair
+    assert get_library_pin(cfg) == pin
+    assert _sync(cfg).result == "ok"
+
+
+def test_library_pin_repair_chain_against_compacted_backend(
+        tmp_path, initialized_library, capsys, monkeypatch):
+    """The REALISTIC re-pair chain (S6.5-fix finding 2, D-S6-9): real
+    backends are compacted from cycle 1, so a re-paired NON-empty library's
+    first cycle hits the S6.1-fix truncation refusal — and the field remedy
+    is `tiro sync repair` from the re-paired device, after which the other
+    device detects the repair epoch and re-pushes.
+
+    Pinned HONESTLY, including the gap the chain exposes (described in the
+    S6.5-fix commit body): the merge completes on the RE-PAIRED device (A
+    ends with the union), but B never converges through cycles alone — A's
+    pre-repair content reached Y only inside the repair SNAPSHOT, snapshot
+    content is never journaled, and a non-empty library never reads
+    snapshots, so B stays at its own subset while reporting ok. B's
+    convergence path is the truncation message's other arm (re-bootstrap
+    from an empty library), proven by fresh library C at the end — which
+    also proves the union is fully recoverable from Y (no data loss)."""
+    from tests.test_sync_cli import _write_config_yaml
+    from tiro.sync.manifest import get_library_pin
+
+    def _journal_files(backend):
+        d = backend / "journal"
+        return [p for p in d.rglob("*") if p.is_file()] if d.exists() else []
+
+    # Library A against backend X — compacted NATURALLY (the first cycle
+    # snapshots immediately and GCs its own acked segment).
+    backend_x = tmp_path / "chain-x"
+    cfg_a = _sync_cfg(initialized_library, backend_x, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Mine", body="# Mine\n\nBody.",
+            url="https://example.com/chain-mine")
+    assert _sync(cfg_a).result == "ok"
+    assert _journal_files(backend_x) == []  # compacted from cycle 1
+
+    # Library B established backend Y — also naturally compacted.
+    backend_y = tmp_path / "chain-y"
+    cfg_b = _second_library(tmp_path, "lib-chain-b")
+    _sync_cfg(cfg_b, backend_y, encrypt="off")
+    cfg_b.sync_enabled = True
+    _ingest(cfg_b, title="Theirs", body="# Theirs\n\nBody.",
+            url="https://example.com/chain-theirs")
+    assert _sync(cfg_b).result == "ok"
+    assert _journal_files(backend_y) == []  # compacted from cycle 1
+
+    # Re-pair A onto Y through the REAL setup ceremony (finding 1's path).
+    _write_config_yaml(cfg_a, tmp_path)
+    cfg_a.sync_encrypt = "auto"  # setup re-collects it
+    answers = iter(["filesystem", str(backend_y), ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(
+        "getpass.getpass",
+        lambda *a: pytest.fail("plaintext join must never prompt getpass"))
+    cmd_sync(Args(cfg_a, sync_cmd="setup"))
+    assert "Setup complete" in capsys.readouterr().out
+    assert get_library_pin(cfg_a) == _format_library_id(backend_y)
+
+    # A's first cycle against Y: the PIN passes (the ceremony re-pinned),
+    # the repair-epoch reset fires first (A has history, its own device doc
+    # is absent on Y), and then the S6.1-fix reachability check refuses —
+    # B's device doc reports seq 1 but the segment was GC'd and A's
+    # watermark for B is 0. Nothing applied, nothing pushed.
+    report = _sync(cfg_a)
+    assert report.result == "needs_attention"
+    assert "truncated" in report.reason and "repair" in report.reason
+    assert "library mismatch" not in report.reason  # the pin itself passed
+    assert "repair epoch detected — full re-diff/re-push" in report.warnings
+    assert _titles(cfg_a) == {"Mine"}
+    assert _journal_files(backend_y) == []
+
+    # The field remedy: `tiro sync repair` from the re-paired device — Y is
+    # wiped and re-seeded from A's local library; format.json (and so the
+    # pin) is kept.
+    adapter = adapter_for_config(cfg_a)
+    try:
+        assert asyncio.run(engine.repair(cfg_a, adapter)).result == "ok"
+    finally:
+        asyncio.run(adapter.aclose())
+    assert get_library_pin(cfg_a) == _format_library_id(backend_y)
+
+    # B detects the repair epoch and re-pushes its full local state.
+    rb = _sync(cfg_b)
+    assert rb.result == "ok"
+    assert "repair epoch detected — full re-diff/re-push" in rb.warnings
+    assert rb.pushed_ops > 0
+
+    # A pulls B's re-push: the merge completes ON THE RE-PAIRED DEVICE.
+    ra = _sync(cfg_a)
+    assert ra.result == "ok"
+    assert ra.applied > 0
+    assert _titles(cfg_a) == {"Mine", "Theirs"}
+
+    # Stable state (cycles on both until quiescent): A keeps the union; B
+    # HONESTLY pinned at its own subset while reporting ok — the exposed
+    # gap (see docstring; commit body has the full account).
+    for _ in range(2):
+        ra, rb = _sync(cfg_a), _sync(cfg_b)
+        assert ra.result == "ok" and rb.result == "ok"
+    assert ra.pushed_ops == 0 and ra.applied == 0
+    assert rb.pushed_ops == 0 and rb.applied == 0
+    assert _titles(cfg_a) == {"Mine", "Theirs"}
+    assert _titles(cfg_b) == {"Theirs"}
+
+    # No data loss: the union IS fully recoverable from Y — a fresh empty
+    # library bootstrapping from it (the message's other arm) gets both.
+    cfg_c = _second_library(tmp_path, "lib-chain-c")
+    _sync_cfg(cfg_c, backend_y, encrypt="off")
+    cfg_c.sync_enabled = True
+    report_c = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    assert report_c.result == "ok"
+    assert _titles(cfg_c) == {"Mine", "Theirs"}
+
+
+def test_library_flock_blocks_second_process(plain_synced):
+    """D-S6-3 (fixes D-S5-7b): a held {library}/.sync-cycle.lock flock —
+    what a concurrent `tiro sync --now` in ANOTHER process holds — skips
+    the cycle UNRECORDED (the holder owns the state); released, the next
+    cycle proceeds, and sequential same-process cycles stay fine (the lock
+    is per-cycle acquire/release)."""
+    fcntl = pytest.importorskip("fcntl")
+    cfg, _backend = plain_synced
+    with open(cfg.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = _sync(cfg)
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg)["last_cycle"] is None  # unrecorded
+    assert _sync(cfg).result == "ok"
+    assert _sync(cfg).result == "ok"
+
+
+def test_bootstrap_and_repair_refuse_while_library_flock_held(
+        tmp_path, plain_synced):
+    """The flock wiring covers all three entry points: bootstrap and repair
+    refuse (skipped_lock, unrecorded) while another process holds the
+    library lock."""
+    fcntl = pytest.importorskip("fcntl")
+    cfg, _backend = plain_synced
+    with open(cfg.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = asyncio.run(engine.repair(cfg, adapter_for_config(cfg)))
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg)["last_cycle"] is None  # unrecorded
+
+    cfg_boot = _second_library(tmp_path, "lib-flock-boot")
+    _sync_cfg(cfg_boot, tmp_path / "flock-boot-backend", encrypt="off")
+    with open(cfg_boot.library / ".sync-cycle.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = asyncio.run(
+            bootstrap(cfg_boot, adapter_for_config(cfg_boot)))
+        assert report.result == "skipped_lock"
+        assert "another tiro process" in report.reason
+        assert read_sync_state(cfg_boot)["last_cycle"] is None
+
+
+def test_bootstrap_in_process_skip_is_unrecorded(tmp_path, seeded_backend):
+    """D-S5-7c: bootstrap's in-process-_CYCLE_LOCK skip returns UNRECORDED
+    (last_cycle untouched — sync_cycle's own "we don't own the state"
+    semantics); a normal bootstrap afterwards records its report before
+    releasing the lock."""
+    _cfg_a, backend, _manifests = seeded_backend
+    cfg_c = _join(tmp_path, backend)
+    assert engine._CYCLE_LOCK.acquire(blocking=False)
+    try:
+        report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    finally:
+        engine._CYCLE_LOCK.release()
+    assert report.result == "skipped_lock"
+    assert "another cycle" in report.reason
+    assert read_sync_state(cfg_c)["last_cycle"] is None  # untouched
+
+    report = asyncio.run(bootstrap(cfg_c, adapter_for_config(cfg_c)))
+    assert report.result == "ok"
+    recorded = read_sync_state(cfg_c)["last_cycle"]
+    assert recorded["result"] == "ok"
+    assert recorded["finished_at"]
+
+
+def test_repair_in_process_skip_is_unrecorded(plain_synced):
+    """D-S5-7c, repair leg: same unrecorded in-process skip; a normal
+    repair afterwards records."""
+    cfg, _backend = plain_synced
+    adapter = adapter_for_config(cfg)
+    assert engine._CYCLE_LOCK.acquire(blocking=False)
+    try:
+        report = asyncio.run(engine.repair(cfg, adapter))
+    finally:
+        engine._CYCLE_LOCK.release()
+    assert report.result == "skipped_lock"
+    assert read_sync_state(cfg)["last_cycle"] is None  # untouched
+
+    report = asyncio.run(engine.repair(cfg, adapter))
+    assert report.result == "ok"
+    assert read_sync_state(cfg)["last_cycle"]["result"] == "ok"
+
+
+def test_cli_argv_shape_parses_to_expected_dests(monkeypatch):
+    """S6.4 review #1: pin the REAL argv shape `tiro sync --now
+    --accept-mass-delete` through the REAL parser (main() builds it inline
+    with a bare parse_args()) — the hand-rolled Args stand-ins elsewhere
+    verify dispatch behavior but would stay green through a flag rename
+    that breaks the shipped CLI. cmd_sync is intercepted so nothing runs."""
+    import tiro.cli as cli
+
+    captured: dict = {}
+
+    def _capture(args):
+        captured["args"] = args
+
+    monkeypatch.setattr(cli, "cmd_sync", _capture)
+    monkeypatch.setattr(
+        "sys.argv", ["tiro", "sync", "--now", "--accept-mass-delete"])
+    cli.main()
+    args = captured["args"]
+    assert args.command == "sync"
+    assert args.now is True
+    assert args.accept_mass_delete is True
+    assert args.status is False
+    assert args.sync_cmd is None
+
+    # The subcommand forms parse too (setup/repair ride sync_cmd).
+    monkeypatch.setattr("sys.argv", ["tiro", "sync", "repair"])
+    cli.main()
+    assert captured["args"].sync_cmd == "repair"
+
+
+# --- S6.6: mid-cycle advisory-lock renewal (D-S6-4; fixes D-S5-7a) -----------
+
+
+def _renewer_rig(tmp_path):
+    """(lock_path, adapter, renewer): bare filesystem adapter (no config —
+    built-in audit no-ops) + a renewer that believes it holds the lock."""
+    from tiro.sync.adapters.filesystem import FilesystemAdapter
+
+    backend = tmp_path / "renew-backend"
+    (backend / "locks").mkdir(parents=True, exist_ok=True)
+    adapter = FilesystemAdapter(backend, device_id="dev-renewer")
+    renewer = engine._LockRenewer(adapter, "dev-renewer", held=True)
+    return backend / LOCK_KEY, adapter, renewer
+
+
+def test_lock_renewer_no_op_before_interval_and_when_not_held(tmp_path):
+    """tick() is a no-op before LOCK_TTL_S/3 has elapsed, and ALWAYS a
+    no-op when the lock isn't held (lockless cycle) — no read, no put."""
+    lock_path, adapter, renewer = _renewer_rig(tmp_path)
+    payload = make_lock_payload("dev-renewer", engine.LOCK_TTL_S)
+    lock_path.write_bytes(payload)
+
+    asyncio.run(renewer.tick())  # timer fresh from construction
+    assert lock_path.read_bytes() == payload  # byte-untouched
+
+    idle = engine._LockRenewer(adapter, "dev-renewer", held=False)
+    idle._last -= engine.LOCK_TTL_S  # interval elapsed — but not held
+    asyncio.run(idle.tick())
+    assert lock_path.read_bytes() == payload
+    assert idle.stolen is False
+
+
+def test_lock_renewer_renews_own_lock_and_resets_timer(tmp_path):
+    """After the interval, a lock still owned by us is re-put with a FRESH
+    acquired_at, and the timer resets (the very next tick no-ops again)."""
+    import json
+
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    old_stamp = datetime.now(UTC) - timedelta(seconds=100)
+    lock_path.write_bytes(make_lock_payload(
+        "dev-renewer", engine.LOCK_TTL_S, now=old_stamp))
+    renewer._last -= engine.LOCK_TTL_S / 3  # interval elapsed
+
+    asyncio.run(renewer.tick())
+
+    data = json.loads(lock_path.read_bytes())
+    assert data["device_id"] == "dev-renewer"
+    assert data["ttl_s"] == engine.LOCK_TTL_S
+    acquired = datetime.fromisoformat(data["acquired_at"])
+    assert acquired > old_stamp + timedelta(seconds=50)  # advanced
+    assert renewer.stolen is False
+    refreshed = lock_path.read_bytes()
+    asyncio.run(renewer.tick())  # timer reset: immediate re-tick no-ops
+    assert lock_path.read_bytes() == refreshed
+
+
+def test_lock_renewer_stops_when_lock_owned_by_another_device(tmp_path):
+    """A lock now owned by ANOTHER device is NEVER clobbered: no put,
+    renewer marked stolen, and renewal stays off for the rest of the cycle
+    even across further elapsed intervals."""
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    foreign = make_lock_payload(STALE_DEVICE, engine.LOCK_TTL_S)
+    lock_path.write_bytes(foreign)
+    renewer._last -= engine.LOCK_TTL_S
+
+    asyncio.run(renewer.tick())
+
+    assert renewer.stolen is True
+    assert lock_path.read_bytes() == foreign  # never clobbered
+    # Permanently stopped for this cycle — even a lock that reads as ours
+    # again is left alone once stolen.
+    ours = make_lock_payload("dev-renewer", engine.LOCK_TTL_S,
+                             now=datetime.now(UTC) - timedelta(seconds=100))
+    lock_path.write_bytes(ours)
+    renewer._last -= engine.LOCK_TTL_S
+    asyncio.run(renewer.tick())
+    assert lock_path.read_bytes() == ours  # no re-put
+
+
+def test_lock_renewer_vanished_lock_marks_stolen(tmp_path):
+    """A lock file that VANISHED mid-cycle gets the same stolen handling:
+    nothing re-minted, renewal off for the rest of the cycle."""
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    renewer._last -= engine.LOCK_TTL_S
+
+    asyncio.run(renewer.tick())
+
+    assert renewer.stolen is True
+    assert not lock_path.exists()  # nothing re-minted
+    asyncio.run(renewer.tick())  # subsequent ticks stay no-ops
+    assert not lock_path.exists()
+
+
+def test_lock_renewer_wired_into_push_and_snapshot_upload(
+        tmp_path, initialized_library, monkeypatch):
+    """Wiring smoke (D-S6-4): a real cycle pushing several articles ticks
+    the renewer in BOTH long-upload loops — once per object in _push and
+    once per address in _upload_snapshot (the first cycle against an empty
+    backend always snapshots, covering the compaction path)."""
+    calls = {"n": 0}
+    orig = engine._LockRenewer.tick
+
+    async def counting_tick(self):
+        calls["n"] += 1
+        return await orig(self)
+
+    monkeypatch.setattr(engine._LockRenewer, "tick", counting_tick)
+
+    backend = tmp_path / "renew-wiring-backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg.sync_enabled = True
+    for i in range(3):
+        _ingest(cfg, title=f"Renew {i}", body=f"# Renew {i}\n\nBody {i}.",
+                url=f"https://example.com/renew-{i}")
+
+    report = _sync(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_objects >= 3      # _push's objects loop ran
+    assert list(backend.glob("snapshots/*/*"))  # snapshot uploaded too
+    # One tick per _push object + one per snapshot address: strictly more
+    # ticks than push objects proves the _upload_snapshot loop is wired,
+    # not just _push's.
+    assert calls["n"] > report.pushed_objects
+
+
+# --- S6.6: corrupt LATEST snapshot blocks compaction LOUDLY (D-S6-7) ---------
+
+
+def test_corrupt_latest_snapshot_surfaces_compaction_blockage(
+        seeded_backend, capsys):
+    """D-S6-7 (S5 flag): a corrupt/undecryptable LATEST snapshot used to
+    raise into _maybe_compact's catch-all as a generic "compaction skipped"
+    every cycle forever. Now the warning is DISTINCT — names the snapshot,
+    says compaction is blocked, points at `tiro sync repair` — the cycle
+    stays "ok" (contract unchanged), and the warning is visible in doctor's
+    sync section AND `tiro sync` status output."""
+    cfg_a, _backend, manifests = seeded_backend
+    manifests[-1].write_bytes(CORRUPTION)
+
+    report = _sync(cfg_a)
+
+    assert report.result == "ok"  # compaction blockage never fails a cycle
+    blocked = [w for w in report.warnings if "compaction blocked" in w]
+    assert len(blocked) == 1
+    assert "corrupt" in blocked[0]
+    assert "latest snapshot" in blocked[0]
+    assert "tiro sync repair" in blocked[0]
+    # NOT the generic catch-all shape it used to drown in.
+    assert not any(w.startswith("compaction skipped:")
+                   for w in report.warnings)
+
+    # Doctor's sync section carries it in cycle_warnings (S6.2/S6.3 path).
+    section = doctor_scan(cfg_a)["sync"]
+    assert any("compaction blocked" in w for w in section["cycle_warnings"])
+
+    # And `tiro sync` (status branch, no network) prints it.
+    cmd_sync(Args(cfg_a))
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "compaction blocked" in out
+    assert "tiro sync repair" in out
+
+
+# --- S6.6: newline-posture pin (D-S6-5; closes the D-S5-4 flag) --------------
+
+
+def test_crlf_external_edit_converges_lf_without_conflict(
+        tmp_path, initialized_library):
+    """PINS D-S6-5's ACCEPTED posture (closing the D-S5-4 flag): file-space
+    hashes stay in newline-TRANSLATED space (read_text universal newlines)
+    — self-consistent and convergent; switching spaces would phantom-
+    conflict every CRLF file at upgrade. Accepted consequence, pinned here:
+    an externally-edited CRLF article that round-trips through sync apply
+    is rewritten LF on the RECEIVING side (the editing device's own file
+    keeps its CRLF bytes — S1 never rewrites an externally-owned file);
+    NO conflict is minted anywhere and convergence is STABLE (no
+    ping-pong)."""
+    backend = tmp_path / "crlf-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Alpha", body="# Alpha\n\nBody one.",
+            url="https://example.com/crlf-alpha")
+    assert _sync(cfg_a).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-crlf-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+    cfg_b.sync_enabled = True
+    assert _sync(cfg_b).result == "ok"  # auto-bootstrap (D-S5-3)
+    assert _titles(cfg_b) == {"Alpha"}
+
+    # External CRLF edit on A: a Windows-flavored editor changes the body
+    # AND rewrites the whole file with \r\n endings.
+    path_a = next(p for p in cfg_a.articles_dir.glob("*.md")
+                  if not p.name.startswith("."))
+    text = path_a.read_text(encoding="utf-8")
+    assert "\r" not in text
+    edited = text.replace("Body one.", "Body edited externally.")
+    assert edited != text
+    path_a.write_bytes(edited.replace("\n", "\r\n").encode("utf-8"))
+
+    assert _sync(cfg_a).result == "ok"  # cycle's own reconcile censuses it
+    rb = _sync(cfg_b)
+    assert rb.result == "ok"
+    assert rb.applied > 0
+
+    # (1) bodies equal modulo newline translation: A keeps CRLF bytes on
+    # disk, B's applied copy is written LF.
+    assert b"\r\n" in path_a.read_bytes()
+    path_b = next(p for p in cfg_b.articles_dir.glob("*.md")
+                  if not p.name.startswith("."))
+    assert b"\r" not in path_b.read_bytes()
+    body_a = frontmatter.load(str(path_a)).content  # translated read
+    body_b = frontmatter.load(str(path_b)).content
+    assert "Body edited externally." in body_b
+    assert body_a == body_b
+
+    # (2) NO conflict file minted on either side.
+    for cfg in (cfg_a, cfg_b):
+        assert not list(cfg.library.rglob("*conflict*"))
+
+    # (3) convergence is STABLE — a further cycle pair moves nothing (the
+    # translated-space hash is what both sides agree on; no ping-pong).
+    ra2, rb2 = _sync(cfg_a), _sync(cfg_b)
+    assert ra2.result == "ok" and rb2.result == "ok"
+    assert ra2.pushed_ops == 0 and ra2.applied == 0
+    assert rb2.pushed_ops == 0 and rb2.applied == 0
+    assert b"\r\n" in path_a.read_bytes()  # A's file still untouched

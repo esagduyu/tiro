@@ -593,14 +593,60 @@ def _source_for(conn, meta: dict) -> int:
 # hard gate): the original pairwise blockquote-append was order-DEPENDENT —
 # folding three notes as F(F(a,b),c) vs F(F(b,c),a) nested the conflict
 # blockquotes differently, and the positional local/remote device label made
-# even the two-note case byte-diverge across arrival orders. Merged notes are
-# now a CANONICAL form — winner head + a sorted SET of conflict blocks, each
-# quoting a loser's head VERBATIM under a content-derived "[conflict {day}]"
-# header — so any fold order over the same set of lines produces identical
-# bytes (test_apply_order_independent_across_devices), re-delivery never
-# grows the note (idempotence), and every non-empty note appears verbatim as
-# a substring of the merged note (test_merge_jsonl_never_loses_a_note — the
-# old "> "-per-line quoting broke verbatim substring for multi-line notes).
+# even the two-note case byte-diverge across arrival orders.
+#
+# ATOM MODEL (S6.5d, decision D-S6-11 — closes the order-dependence family
+# the property gate kept falsifying, counterexamples #4-#7): a merged note
+# is a CANONICAL function of its ATOM SET. The atoms of a note text are its
+# decomposed head (when non-blank) plus every conflict-block BODY (non-
+# blank) — a pure function of the bytes (_note_atoms). Merging unions the
+# two sides' atom sets; the LWW winner's head stays the head (the line
+# total order is total — counterexample #5), and every OTHER atom in the
+# union is minted as a conflict block under ONE FIXED, DATELESS header
+# "> [conflict]", assembled sorted by body (headers are uniform, so body
+# order and block-byte order coincide). Why nothing weaker converges: no
+# block metadata that is not derivable from the note-TEXT set can be
+# order-independent —
+#   - the previous content-derived "[conflict {day}]" header stamped the
+#     LOSER line's updated_at day, but the same body can arrive via
+#     different loser-line versions, and WHICH loser mints the block is
+#     fold-history-shaped (counterexample #7: 'línea única' minted as both
+#     "[conflict 2026-07-01]" and "[conflict unknown-date]" in one fold
+#     order, once in the other);
+#   - the winner-head block filter compared against the CURRENT fold's
+#     winner head — an INTERMEDIATE winner in a multi-fold tree, which
+#     varies with grouping (counterexamples #4/#6's blank-head shapes).
+# Dateless headers + atom reassembly make merged bytes = f(final winner
+# head, atom union) — both fold-invariant — so any fold order over the same
+# set of lines produces identical bytes
+# (test_apply_order_independent_across_devices) and re-delivery never grows
+# the note (idempotence, via the nothing-new early return in _merge_notes).
+# That early return is gated on the winner's note ALREADY being in
+# canonical form (_assemble_note round-trips its bytes; S6.5e, D-S6-12):
+# a NON-canonical winner note — legacy dated blocks, legacy block ordering,
+# any stale form — re-mints canonically at its FIRST fold, even one that
+# adds no new atom. The S6.5d grandfathering (keep legacy bytes until a
+# GENUINE merge) was proven divergent by adversarial review: fold orders
+# where every pairing hit the early return kept the legacy dated bytes,
+# while orders where the other lines genuine-merged first minted the
+# dateless twin, which then outranked the legacy form at _note_rank's
+# full-note tiebreak (']' > ' ') — two distinct final byte-forms. The cost
+# is a bounded one-time byte migration per legacy line at its first
+# post-upgrade fold, instead of a permanent divergence class. A note that
+# never enters any fold keeps its exact bytes (merge is the only writer —
+# no background rewriter). The all-blank exception stays exact: an atomless
+# union keeps the winner's bytes verbatim (blank ranks are total per
+# counterexample #5). No-note-loss contract (narrowed CONSCIOUSLY, S6.5e /
+# D-S6-12): a note containing NO conflict-header-shaped line still appears
+# verbatim as a contiguous substring of the merged note
+# (test_merge_jsonl_never_loses_a_note — the old "> "-per-line quoting
+# broke that for multi-line notes); a note that DOES contain header-shaped
+# lines (legacy merged sidecar lines, raw user notes quoting a header) is
+# preserved per-ATOM — every decomposed content piece survives verbatim,
+# but pieces reorder and can interleave with foreign atoms on reassembly.
+# The full-note-contiguous claim was already false for header-bearing
+# notes pre-S6.5d (decomposition separates the pieces); the extended
+# property strategy merely made it visible.
 
 
 def _line_sort_key(line: dict) -> tuple:
@@ -621,7 +667,15 @@ def _note_rank(note) -> tuple:
     is blank, in which case nothing is ever blockified), restoring the
     canonical head+sorted-block-set form's grouping independence."""
     if note is None or not str(note).strip():
-        return (0, "", "")
+        # Blanks still order deterministically AMONG THEMSELVES by
+        # canonical form (third hypothesis-found divergence, 2026-07-17,
+        # S6.5 gate run): collapsing every blank shape (None / "" / "   ")
+        # to one identical rank made _line_key non-total — two lines
+        # differing only in blank representation compared EQUAL, and
+        # _lww_pick's >= broke the tie by argument position, flipping the
+        # winner (and its preserved bytes) with fold order. Blank-loses
+        # semantics are unchanged: rank 0 still sits below every real note.
+        return (0, "", canonical_json(note))
     # Rank by the DECOMPOSED HEAD, not the mutated full note (second
     # hypothesis-found divergence, 2026-07-17): folds mutate notes by
     # accruing conflict blocks, and a rebind fold can leave a real note
@@ -654,29 +708,34 @@ def _lww_pick(a: dict, b: dict) -> tuple[dict, dict]:
     return (a, b) if _line_key(a) >= _line_key(b) else (b, a)
 
 
-# A conflict block header is a FULL line: "> [conflict 2026-07-10]" (loser's
-# updated_at day) or "> [conflict unknown-date]". The day is CONTENT-derived
-# (never a positional local/remote device label) so the same set of merged
-# lines produces byte-identical notes on every device regardless of which
-# side each line arrived from. Markdown lazy continuation renders the raw
-# note lines that follow as part of the same blockquote.
+# A conflict block header is a FULL line. Freshly minted blocks use the
+# FIXED, DATELESS "> [conflict]" (D-S6-11: any date would be LOSER-line
+# metadata, which is not derivable from the note-text set — counterexample
+# #7); the legacy dated forms "> [conflict 2026-07-10]" / "> [conflict
+# unknown-date]" are still PARSED for decomposition, since field sidecars
+# contain them (re-minted canonically at first touch — section comment
+# above). Markdown lazy continuation renders the raw note lines
+# that follow as part of the same blockquote.
 _CONFLICT_HEADER_RE = re.compile(
-    r"(?m)^> \[conflict (?:\d{4}-\d{2}-\d{2}|unknown-date)\]$")
+    r"(?m)^> \[conflict(?: (?:\d{4}-\d{2}-\d{2}|unknown-date))?\]$")
 
 
-def _conflict_block(text: str, when: str | None) -> str:
-    day = (when or "")[:10] or "unknown-date"
-    return f"> [conflict {day}]\n{text}"
+def _conflict_block(text: str) -> str:
+    return f"> [conflict]\n{text}"
 
 
 def _decompose_note(note: str | None) -> tuple[str, list[str]]:
     """Split a merged note into (head, conflict blocks). Inverse of the
-    assembly in _merge_notes: blocks start at header lines and non-final
+    assembly in _assemble_note: blocks start at header lines and non-final
     segments carry exactly one trailing "\\n\\n" separator (stripped here, so
     block bodies with their own trailing newlines round-trip byte-exactly).
     A note with no header lines is all head. A RAW user note containing a
     literal header line decomposes deterministically (same bytes, same split
-    on every device) — convergence holds; only its visual grouping shifts."""
+    on every device) — convergence holds, but the note's survival contract
+    narrows to per-ATOM (D-S6-12): each decomposed content piece survives
+    merges verbatim, while the pieces reorder and can interleave with
+    foreign atoms on reassembly — the full note is NOT guaranteed to stay
+    a contiguous substring."""
     if not note:
         return "", []
     starts = [m.start() for m in _CONFLICT_HEADER_RE.finditer(note)]
@@ -703,29 +762,73 @@ def _block_body(block: str) -> str:
     return body
 
 
-def _merge_notes(winner: dict, loser: dict) -> str | None:
-    """Canonical note merge: winner's head stays the head; the loser's head
-    (when non-blank and different) joins the conflict-block SET, and the
-    union is reassembled sorted. Set semantics make the result independent
-    of fold order and stable under re-delivery (a block already present is
-    never appended twice).
+def _note_atoms(note: str | None) -> tuple[str, set[str]]:
+    """(head, atom set) of a note text — a pure function of the bytes.
+    Atoms are the decomposed head (when non-blank) plus every conflict-
+    block BODY (non-blank). Atoms never contain a full-line conflict
+    header themselves (_decompose_note splits at every header line), so
+    decomposing a reassembled note yields exactly the atoms it was built
+    from — the round-trip that makes the fold's atom union associative."""
+    head, blocks = _decompose_note(note)
+    atoms = {b for b in (_block_body(blk) for blk in blocks) if b.strip()}
+    if head.strip():
+        atoms.add(head)
+    return head, atoms
 
-    Blocks whose body EQUALS the winner's head are dropped (second
-    hypothesis-found divergence, 2026-07-17): a rebind fold can blockify a
-    note under a blank-head winner before the line carrying that same text
-    as its real head arrives — without the filter, one fold order ends
-    with head+self-quoting block while the other ends with the plain head.
-    The text is never lost: it IS the head."""
+
+def _assemble_note(head: str, atoms: set[str]) -> str | None:
+    """THE canonical byte form of a note: the head (when non-blank — a
+    blank head contributes NO bytes, counterexample #6) followed by one
+    dateless "> [conflict]" block per remaining atom, sorted by body
+    (headers are uniform, so body order and block-byte order coincide).
+    Returns None when nothing assembles (blank head, no atoms). This is
+    the single assembly used BOTH to build merged notes and to test
+    whether an existing note is already canonical (_merge_notes' gated
+    early return) — one function, so "is canonical" and "assemble" can
+    never drift apart (D-S6-12)."""
+    blocks = [_conflict_block(a) for a in sorted(atoms) if a != head]
+    parts = ([head] if head.strip() else []) + blocks
+    return "\n\n".join(parts) if parts else None
+
+
+def _merge_notes(winner: dict, loser: dict) -> str | None:
+    """Atom-based canonical note merge (D-S6-11 + D-S6-12, section comment
+    above): the merged note is a pure function of (winner head, atom
+    union), assembled by _assemble_note.
+
+    - The LWW winner's head stays the head; a BLANK head (None/empty/
+      whitespace) contributes NO bytes (counterexample #6's rule —
+      whitespace is not content, and which blank shape happens to be the
+      winner's note is fold-order-shaped).
+    - Every atom in atoms(winner) ∪ atoms(loser) EXCEPT one equal to the
+      winner's head is minted as a dateless "> [conflict]" block; blocks
+      assemble sorted by body. The head-equality filter is safe because
+      the FINAL winner's head is fold-invariant (max head over the equal-
+      core group — _note_rank ranks by decomposed head), and the filtered
+      text is never lost: it IS the head (counterexample #4).
+    - All-blank exception: an atomless union keeps the winner's bytes
+      verbatim — blank shapes rank totally among themselves
+      (counterexample #5), so the kept bytes are fold-invariant.
+    - Nothing-new early return, gated on CANONICAL form (S6.5e review
+      Blocker, D-S6-12): when the loser contributes no new atom AND the
+      winner's note already round-trips through _assemble_note byte-
+      exactly, the winner's note returns verbatim (idempotence /
+      re-delivery byte-stability). A NON-canonical winner note (legacy
+      dated blocks, legacy ordering, any stale form) re-mints in
+      canonical dateless form at FIRST TOUCH, even when nothing new
+      arrives — an ungated early return kept legacy bytes on some fold
+      orders while other orders minted the dateless twin, a permanent
+      divergence class (reviewer-constructed kernel, pinned in
+      test_sync_merge_jsonl.py / test_sync_properties.py)."""
     w_note = winner.get("note_markdown")
-    wh, wb = _decompose_note(w_note)
-    lh, lb = _decompose_note(loser.get("note_markdown"))
-    blocks = {b for b in (set(wb) | set(lb)) if _block_body(b) != wh}
-    if lh.strip() and lh != wh:
-        blocks.add(_conflict_block(lh, loser.get("updated_at")))
-    if blocks == set(wb):
-        return w_note  # nothing new — keep the winner's bytes untouched
-    parts = ([wh] if wh else []) + sorted(blocks)
-    return "\n\n".join(parts) if parts else w_note
+    wh, w_atoms = _note_atoms(w_note)
+    _lh, l_atoms = _note_atoms(loser.get("note_markdown"))
+    union = w_atoms | l_atoms
+    if not union:
+        return w_note  # all blank — keep the winner's bytes untouched
+    if l_atoms <= w_atoms and _assemble_note(wh, w_atoms) == w_note:
+        return w_note  # nothing new AND already canonical
+    return _assemble_note(wh, union)
 
 
 def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
@@ -733,10 +836,10 @@ def merge_jsonl(lines_a: list[dict], lines_b: list[dict], *,
     """FROZEN core signature. Per-uid set union; same-uid clash resolves
     LWW-whole-line on updated_at (_line_key total order), and a losing
     note_markdown that differs is preserved in the winning note as a
-    "[conflict {date}]" block — never silently dropped (spec §4). Pure,
+    dateless "> [conflict]" block — never silently dropped (spec §4). Pure,
     deterministic, commutative AND order-independent across arbitrary fold
-    groupings (canonical head+sorted-block-set note form; see the section
-    comment above). label_a/label_b are retained for signature stability but
+    groupings (atom-based canonical note form; see the section comment
+    above). label_a/label_b are retained for signature stability but
     are no longer embedded in conflict blocks — a positional label ("local"
     vs a device id for the SAME line, depending on arrival order) is exactly
     what byte-level convergence cannot contain."""

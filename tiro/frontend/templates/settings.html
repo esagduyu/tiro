@@ -1413,7 +1413,10 @@
         html += '</div>';
 
         var detail = escapeHtml(d.backend) + ' — ' +
-            (d.enabled ? 'every ' + String(Number(d.interval_s) || 0) + 's' : 'paused');
+            (!d.enabled ? 'paused'
+                : (Number(d.interval_s) || 0) > 0
+                    ? 'every ' + String(Number(d.interval_s)) + 's'
+                    : 'manual only');
         if (d.encrypt_resolved === true) detail += ' — encrypted';
         html += '<div class="status-detail">' + detail + '</div>';
 
@@ -1423,11 +1426,28 @@
         var cycle = d.last_cycle || {};
         if (cycle.reason) {
             // Same warning color as the token-reveal caution text above.
-            html += '<div class="status-detail" style="color: var(--tiro-rate-dislike);">Needs attention: ' + escapeHtml(String(cycle.reason)) + '</div>';
+            // S6 UI pass: --tiro-rate-dislike computes to muted GREY in both
+            // themes (the S5.8 comment assumed red) — use the LAN banner's
+            // established warning color so the line is visually a warning.
+            html += '<div class="status-detail" style="color: var(--tiro-tier-must-read);">Needs attention: ' + escapeHtml(String(cycle.reason)) + '</div>';
         }
         if (Array.isArray(cycle.warnings)) {
             cycle.warnings.forEach(function(w) {
-                html += '<div class="status-detail muted">' + escapeHtml(String(w)) + '</div>';
+                // Clock-skew lines are skipped here (S6.3 review #1): the
+                // server folds them into d.warnings, rendered warning-colored
+                // below — printing both would double-show the same line.
+                if (String(w).indexOf('clock skew:') === 0) return;
+                // Warning-colored, not muted (whole-branch review m3):
+                // doctor and `tiro sync` present these same last-cycle
+                // lines as warnings — the card now matches.
+                html += '<div class="status-detail" style="color: var(--tiro-tier-must-read);">Warning: ' + escapeHtml(String(w)) + '</div>';
+            });
+        }
+        // Clock-skew warnings (S6.3): live status warnings, warning-colored
+        // like the needs-attention line above (not muted — actionable).
+        if (Array.isArray(d.warnings)) {
+            d.warnings.forEach(function(w) {
+                html += '<div class="status-detail" style="color: var(--tiro-tier-must-read);">Warning: ' + escapeHtml(String(w)) + '</div>';
             });
         }
 
