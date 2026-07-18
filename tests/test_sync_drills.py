@@ -1002,7 +1002,9 @@ def test_annotations_mass_delete_guard_equivalent(guard_rig):
     tripped = _sync(cfg_b)
     assert tripped.result == "needs_attention"
     assert tripped.reason == "mass_delete_guard"
-    assert "highlight" in tripped.guard  # the annotations leg, not articles
+    # Exact-count message (S6.4 review nit): pins that ALL 15 LineDels
+    # crossed the wire and were counted against B's 15 local highlights.
+    assert "15 highlight deletions vs 15 local highlights" in tripped.guard
     assert _hl_count(cfg_b) == 15  # rows survive the trip
     b_sidecars = sorted((cfg_b.library / "annotations").glob("*.jsonl"))
     assert len(b_sidecars) == 3
@@ -1056,3 +1058,33 @@ def test_guard_acceptance_is_one_shot_across_segments(guard_rig):
     assert report2.guard is None
     assert _hl_count(cfg_b) == 0
     assert _count(cfg_b) == 3
+
+
+def test_cli_argv_shape_parses_to_expected_dests(monkeypatch):
+    """S6.4 review #1: pin the REAL argv shape `tiro sync --now
+    --accept-mass-delete` through the REAL parser (main() builds it inline
+    with a bare parse_args()) — the hand-rolled Args stand-ins elsewhere
+    verify dispatch behavior but would stay green through a flag rename
+    that breaks the shipped CLI. cmd_sync is intercepted so nothing runs."""
+    import tiro.cli as cli
+
+    captured: dict = {}
+
+    def _capture(args):
+        captured["args"] = args
+
+    monkeypatch.setattr(cli, "cmd_sync", _capture)
+    monkeypatch.setattr(
+        "sys.argv", ["tiro", "sync", "--now", "--accept-mass-delete"])
+    cli.main()
+    args = captured["args"]
+    assert args.command == "sync"
+    assert args.now is True
+    assert args.accept_mass_delete is True
+    assert args.status is False
+    assert args.sync_cmd is None
+
+    # The subcommand forms parse too (setup/repair ride sync_cmd).
+    monkeypatch.setattr("sys.argv", ["tiro", "sync", "repair"])
+    cli.main()
+    assert captured["args"].sync_cmd == "repair"
