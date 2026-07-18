@@ -411,7 +411,8 @@ class AuditedAdapter:
         await self.inner.aclose()
 
 
-def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
+def adapter_for_config(config: TiroConfig, *,
+                       device_id: str | None = None) -> AuditedAdapter:
     """Build the configured storage adapter, audit-wrapped.
 
     Inner adapters are deliberately constructed WITHOUT a config (their
@@ -422,6 +423,12 @@ def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
     side-effect-free — a status probe against a misconfigured library must
     never mint a device identity (S5.2 review Major #1). Heavy adapter
     imports (boto3/httpx) also happen only after validation passes.
+
+    An explicit `device_id` skips get_or_create_device entirely (S6.2-fix
+    review Major 1): report-only callers (doctor's probe) must never mint
+    the is_self=1 identity row as a side effect of a status read — they
+    pass a SELECT-only (or sentinel) id instead. Validation behavior is
+    identical either way.
     """
 
     def _field(value: str) -> str:
@@ -450,7 +457,8 @@ def adapter_for_config(config: TiroConfig) -> AuditedAdapter:
     else:
         raise SyncConfigError(f"unknown sync_backend: {backend!r}")
 
-    device_id, _name = get_or_create_device(config)
+    if device_id is None:
+        device_id, _name = get_or_create_device(config)
     if backend == "filesystem":
         from pathlib import Path
 
@@ -537,10 +545,17 @@ def lock_is_stale(info: dict, now=None) -> bool:
 
 
 async def clear_stale_lock(config: TiroConfig, adapter) -> bool:
-    """Delete the backend lock IFF it is STALE (doctor --fix, S6.2 FROZEN
-    semantics: a live lock is NEVER deleted — this re-reads and re-checks
-    right before the delete, so a scan-time finding that went live in the
-    meantime is left alone). Returns True only when a lock was cleared."""
+    """Delete the backend lock IFF it reads as STALE (doctor --fix, S6.2).
+
+    Re-reads and re-checks staleness right before the delete, so a
+    scan-time finding that has since been released or renewed is normally
+    left alone. That check is best-effort, not atomic: the adapter
+    contract has no compare-and-swap primitive, so a lock freshly acquired
+    BETWEEN the re-read and the delete CAN still be deleted. This residual
+    window is accepted — it is the same window the adapters' own spec §6.1
+    steal path carries, and the lock is advisory (it only reduces wasted
+    work; losing it risks a redundant concurrent cycle, never data).
+    Returns True only when a lock was cleared."""
     from tiro.sync.adapters.base import LOCK_KEY
 
     info = await read_lock_info(adapter)

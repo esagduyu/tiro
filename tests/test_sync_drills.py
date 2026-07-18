@@ -390,10 +390,190 @@ def test_doctor_exit_code_neutral_on_sync_findings(plain_synced):
 
     baseline = doctor_scan(cfg)
     assert baseline["structurally_consistent"] is True
+    # S6.2-fix Nit 7: pin the baseline CLEAN outright — the fixture is a
+    # fresh library with one normal ingest (no housekeeping residue), so
+    # clean must be True; without this pin the equality below could pass
+    # vacuously with clean=False on both sides.
+    assert baseline["clean"] is True
 
     _write_lock(backend, age_s=3600, ttl_s=120)
     with_lock = doctor_scan(cfg)
 
     assert with_lock["sync"]["stale_lock"] is True
     assert with_lock["structurally_consistent"] is True
+    assert with_lock["clean"] is True
     assert with_lock["clean"] == baseline["clean"]
+
+
+def _sync_state_rows(cfg):
+    from tiro.database import get_connection
+
+    conn = get_connection(cfg.db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM sync_state").fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def test_doctor_scan_never_mints_device_identity(plain_synced):
+    """S6.2-fix review Major 1: scan() is a pure status probe — on a
+    configured+enabled but NEVER-cycled library it must not INSERT the
+    is_self=1 device-identity row into sync_state as a side effect of
+    building its backend adapter."""
+    cfg, _backend = plain_synced
+    assert _sync_state_rows(cfg) == 0  # never cycled: no identity yet
+
+    report = doctor_scan(cfg)
+
+    assert report["sync"]["backend"] == "ok"  # the probe really ran
+    assert _sync_state_rows(cfg) == 0  # ...and minted nothing
+
+
+def test_clear_stale_lock_live_vs_stale_direct(plain_synced):
+    """clear_stale_lock's own re-read/re-check, pinned directly (S6.2-fix
+    Minor 4): a LIVE lock returns False and survives byte-intact; a stale
+    one returns True and is deleted. The explicit device_id also pins the
+    read-only adapter path (no identity mint)."""
+    cfg, backend = plain_synced
+    adapter = adapter_for_config(cfg, device_id="test-probe")
+    try:
+        lock_path = _write_lock(backend, age_s=5, ttl_s=120)
+        live_bytes = lock_path.read_bytes()
+        assert asyncio.run(engine.clear_stale_lock(cfg, adapter)) is False
+        assert lock_path.exists()
+        assert lock_path.read_bytes() == live_bytes
+
+        lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+        assert asyncio.run(engine.clear_stale_lock(cfg, adapter)) is True
+        assert not lock_path.exists()
+    finally:
+        asyncio.run(adapter.aclose())
+    assert _sync_state_rows(cfg) == 0
+
+
+def test_doctor_probe_network_error_reports_unreachable(
+        plain_synced, monkeypatch):
+    """S6.2-fix Minor 3: a backend whose read path raises (network down)
+    degrades the section to backend="unreachable" — scan() never raises
+    and never claims a stale lock it could not read."""
+    cfg, _backend = plain_synced
+
+    async def _down(self, key):
+        raise ConnectionError("network down")
+
+    monkeypatch.setattr(engine.AuditedAdapter, "get", _down)
+
+    report = doctor_scan(cfg)
+
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "unreachable"
+    assert report["sync"]["stale_lock"] is False
+
+
+def test_doctor_sync_section_degrades_on_internal_error(
+        plain_synced, monkeypatch, capsys):
+    """S6.2-fix Minor 3, belt branch: a bug anywhere in the section builder
+    (here: load_sync_status raising) degrades report["sync"] to the
+    {"configured", "error"} shape while scan() still returns the FULL
+    report — and cmd_doctor's text output prints that shape instead of
+    crashing on missing keys."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+
+    def _boom(config):
+        raise RuntimeError("sync status exploded")
+
+    monkeypatch.setattr(engine, "load_sync_status", _boom)
+
+    report = doctor_scan(cfg)
+    assert set(report["sync"]) == {"configured", "error"}
+    assert report["sync"]["configured"] is True
+    assert "sync status exploded" in report["sync"]["error"]
+    # The rest of the report survived the sync-section failure.
+    assert report["structurally_consistent"] is True
+    assert report["clean"] is True
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: status unavailable" in out
+    assert "sync status exploded" in out
+
+
+def test_doctor_probe_misconfigured_distinct_from_unreachable(
+        plain_synced, capsys):
+    """S6.2-fix Nit 6: SyncConfigError means the local config failed
+    validation BEFORE any backend contact — reported as "misconfigured",
+    never mislabeled "unreachable" — and cmd_doctor prints a matching
+    pointer at the sync settings."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+    cfg.sync_encrypt = "bogus"  # resolve_encryption refuses unknown values
+
+    report = doctor_scan(cfg)
+    assert report["sync"]["configured"] is True
+    assert report["sync"]["backend"] == "misconfigured"
+    assert report["sync"]["stale_lock"] is False
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: backend misconfigured" in out
+
+
+def test_cli_doctor_fix_json_carries_sync_lock_flag(plain_synced, capsys):
+    """S6.2-fix Nit 5: `tiro doctor --fix --json` merges the fix-only
+    sync_stale_lock_cleared flag into the printed post-fix report (scan()
+    alone never produces that key)."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, backend = plain_synced
+    lock_path = _write_lock(backend, age_s=3600, ttl_s=120)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=True, json=True,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["sync_stale_lock_cleared"] is True
+    assert not lock_path.exists()
+
+
+def test_cli_doctor_prints_cycle_warnings(plain_synced, monkeypatch, capsys):
+    """S6.2-fix Nit 7: last-cycle warnings surfaced by the sync section are
+    PRINTED by cmd_doctor (report-only, muted "sync:" prefix) — S6's later
+    engine warnings will ride the same lines."""
+    from types import SimpleNamespace
+
+    from tiro import cli
+
+    cfg, _backend = plain_synced
+
+    def _status(config):
+        return {"configured": True, "enabled": True, "dot": "ok",
+                "last_cycle": {"result": "ok",
+                               "warnings": ["snapshot 01FAKE unusable"]},
+                "last_synced_at": None, "device_name": None, "devices": []}
+
+    monkeypatch.setattr(engine, "load_sync_status", _status)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_doctor(SimpleNamespace(config="unused", fix=False, json=False,
+                                       _config_override=cfg))
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "sync: last-cycle warning — snapshot 01FAKE unusable" in out

@@ -27,6 +27,22 @@ from tiro.wiki import _RESERVED_FILENAMES, reconcile_wiki_index
 logger = logging.getLogger(__name__)
 
 
+def _sync_probe_adapter(config: TiroConfig):
+    """Backend adapter for doctor's sync probe WITHOUT minting a device
+    identity (S6.2-fix review Major 1): scan() is a pure status probe and
+    must never INSERT the is_self=1 sync_state row as a side effect, so
+    the device id is read SELECT-only via read_sync_state; a never-cycled
+    library (no self row yet) gets a sentinel id — the probe is a GET +
+    expiry check (and, under --fix, a delete) to which the adapter's own
+    device_id is irrelevant. fix()'s clear-stale-lock path shares this for
+    the same reason."""
+    from tiro.sync.engine import adapter_for_config, read_sync_state
+
+    self_row = read_sync_state(config)["self"]
+    device_id = (self_row or {}).get("device_id") or "doctor-probe"
+    return adapter_for_config(config, device_id=device_id)
+
+
 def scan(config: TiroConfig) -> dict:
     """Walk all four stores in both directions; return the discrepancy report."""
     conn = get_connection(config.db_path)
@@ -253,7 +269,7 @@ def scan(config: TiroConfig) -> dict:
         import asyncio
 
         from tiro.sync.engine import (
-            adapter_for_config,
+            SyncConfigError,
             load_sync_status,
             lock_is_stale,
             read_lock_info,
@@ -275,7 +291,7 @@ def scan(config: TiroConfig) -> dict:
         if status["configured"] and config.sync_enabled:
 
             async def _probe():
-                adapter = adapter_for_config(config)
+                adapter = _sync_probe_adapter(config)
                 try:
                     return await read_lock_info(adapter)
                 finally:
@@ -286,6 +302,12 @@ def scan(config: TiroConfig) -> dict:
 
             try:
                 info = asyncio.run(_probe())
+            except SyncConfigError as e:
+                # Distinct from "unreachable" (S6.2-fix Nit 6): the backend
+                # was never even contacted — the local sync config itself
+                # failed validation.
+                logger.warning("doctor: sync misconfigured: %s", e)
+                sync_section["backend"] = "misconfigured"
             except Exception as e:
                 logger.warning("doctor: sync backend unreachable: %s", e)
                 sync_section["backend"] = "unreachable"
@@ -612,9 +634,11 @@ def fix(config: TiroConfig) -> dict:
 
     # (h) sync stale-lock clearing (S6.2): the ONLY sync mutation doctor may
     # ever perform. clear_stale_lock re-reads and re-checks staleness right
-    # before deleting, so a lock that went LIVE between scan and fix is left
-    # alone (a live lock is NEVER deleted). Guarded so sync problems can
-    # never break doctor; exit-code behavior is untouched either way.
+    # before deleting, so a lock that went LIVE between scan and fix is
+    # normally left alone (see its docstring for the residual non-CAS race
+    # window — same as the adapters' §6.1 steal path). Guarded so sync
+    # problems can never break doctor; exit-code behavior is untouched
+    # either way.
     report["sync_stale_lock_cleared"] = False
     try:
         sync_info = report.get("sync") or {}
@@ -622,10 +646,10 @@ def fix(config: TiroConfig) -> dict:
                 and sync_info.get("stale_lock")):
             import asyncio
 
-            from tiro.sync.engine import adapter_for_config, clear_stale_lock
+            from tiro.sync.engine import clear_stale_lock
 
             async def _clear():
-                adapter = adapter_for_config(config)
+                adapter = _sync_probe_adapter(config)
                 try:
                     return await clear_stale_lock(config, adapter)
                 finally:

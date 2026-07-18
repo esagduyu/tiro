@@ -773,7 +773,12 @@ def cmd_doctor(args):
         fix_report = fix(config)
         post = scan(config)
         report = {**post, "actions": fix_report["actions"],
-                  "reembed_failures": fix_report["reembed_failures"]}
+                  "reembed_failures": fix_report["reembed_failures"],
+                  # scan() has no sync_stale_lock_cleared key (fix-only
+                  # outcome), so the post-fix merge must carry it over or
+                  # --fix --json silently drops the flag (S6.2-fix Nit 5).
+                  "sync_stale_lock_cleared":
+                      fix_report.get("sync_stale_lock_cleared", False)}
     else:
         report = scan(config)
 
@@ -833,6 +838,11 @@ def cmd_doctor(args):
                 if sync_info.get("backend") == "unreachable":
                     print("sync: backend unreachable — sync findings "
                           "limited to local state")
+                if sync_info.get("backend") == "misconfigured":
+                    print("sync: backend misconfigured — check the sync "
+                          "settings (`tiro sync setup`)")
+                for warning in sync_info.get("cycle_warnings") or []:
+                    print(f"sync: last-cycle warning — {warning}")
                 if sync_info.get("conflict_files"):
                     print(f"sync: {sync_info['conflict_files']} conflict "
                           "file(s) pending review (listed above)")
