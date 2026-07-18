@@ -26,7 +26,28 @@ from tiro.sync.journal import (
     ops_from_jsonl,
     ops_to_jsonl,
 )
-from tiro.sync.merge import merge_jsonl
+from tiro.sync.merge import _CONFLICT_HEADER_RE, _note_atoms, merge_jsonl
+
+
+def _assert_note_survives(note: str, haystack: str, where: str) -> None:
+    """No-note-loss oracle, narrowed CONSCIOUSLY (S6.5e review Finding 3,
+    D-S6-12): for a note containing NO conflict-header-shaped line, the
+    full note must survive as a contiguous verbatim substring (the original
+    assertion, unchanged). For a note that DOES contain header-shaped lines
+    (legacy merged sidecar lines, or a raw user note quoting a header), the
+    contract is per-ATOM: every decomposed content piece survives verbatim,
+    but pieces reorder and can interleave with foreign atoms on reassembly.
+    The full-note-contiguous claim was ALREADY false for header-bearing
+    notes pre-S6.5d (_decompose_note separates the pieces); Finding 2's
+    strategy extension merely made the gap reachable. Branch selection is
+    written off _CONFLICT_HEADER_RE itself so the contract stays legible."""
+    if _CONFLICT_HEADER_RE.search(note):
+        _head, atoms = _note_atoms(note)
+        for atom in atoms:
+            assert atom in haystack, \
+                f"lost atom {atom!r} of header-bearing note {note!r} ({where})"
+    else:
+        assert note in haystack, f"lost note {note!r} ({where})"
 
 # --- profiles -------------------------------------------------------------------
 
@@ -91,7 +112,18 @@ st_ts = st.integers(min_value=0, max_value=10 * 24 * 3600).map(
 st_note = st.one_of(
     st.none(),
     st.text(min_size=1, max_size=40),
-    st.sampled_from(["   ", "línea única", "line1\nline2", "> already quoted"]),
+    st.sampled_from([
+        "   ", "línea única", "line1\nline2", "> already quoted",
+        # S6.5e review Finding 2: the legacy/header regime. st.text can
+        # essentially never emit a "> [conflict...]"-shaped line, so the
+        # grandfathering divergence (review Blocker, D-S6-12) lived
+        # entirely outside the gate's reach. These samples put merged-form
+        # and header-bearing notes in every merge/apply property's path:
+        "y\n\n> [conflict 2026-07-01]\nx",   # legacy dated merged note
+        "y\n\n> [conflict]\nx",              # fresh canonical merged note
+        "> [conflict]",                      # header-only, atomless
+        "thought\n> [conflict]\nquoting",    # user note embedding a header
+    ]),
 )
 
 
@@ -257,15 +289,17 @@ def test_merge_jsonl_associative_on_line_sets(a, b, c):
         "updated_at": "2026-07-02T00:00:00Z"}],
 )
 def test_merge_jsonl_never_loses_a_note(a, b):
-    """THE trust property: every non-empty note body present in either
-    input appears verbatim inside some output line's note_markdown."""
+    """THE trust property: every non-empty note present in either input
+    survives into the output — contiguous-verbatim for header-free notes,
+    per-atom for header-bearing ones (contract narrowed CONSCIOUSLY,
+    S6.5e / D-S6-12 — see _assert_note_survives)."""
     merged = merge_jsonl(a, b)
     haystack = "\n".join((ln.get("note_markdown") or "") for ln in merged)
     for src in (a, b):
         for ln in src:
             note = ln.get("note_markdown")
             if note and note.strip():
-                assert note in haystack, f"lost note {note!r}"
+                _assert_note_survives(note, haystack, "merge_jsonl")
 
 
 # --- apply-level properties (SQLite-backed mini libraries) ---------------------------
@@ -539,6 +573,31 @@ def _ex_line(note, updated, color="yellow"):
              device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
              line=_ex_line("línea única", None))],
 ))
+@example(pair=(
+    # Pinned S6.5e review-Blocker kernel (adversarially CONSTRUCTED, not
+    # hypothesis-found — the pre-Finding-2 strategy could never emit a
+    # header-shaped note): deva carries A, a LEGACY merged sidecar line
+    # ("y\n\n> [conflict 2026-07-01]\nx", atoms {x,y}); devb carries C
+    # ("x" @ 07-01) then B ("y" @ 07-02 — same core/updated_at as A, the
+    # natural post-upgrade state since old-code merges took the winner's
+    # core). Pre-fix, the apply order that folded A in via nothing-new
+    # pairings kept the legacy dated bytes while the other order minted
+    # the dateless twin from (B,C) first — which outranked the legacy
+    # form at _note_rank's full-note tiebreak (']' > ' ') — two final
+    # byte-forms. Fixed by gating the nothing-new early return on the
+    # winner's note being CANONICAL already (D-S6-12): legacy forms
+    # re-mint dateless at first touch.
+    [LinePut(op_id="01OPLINE00000000000000000K", hlc=HLC(1, 0, "deva"),
+             device="deva", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("y\n\n> [conflict 2026-07-01]\nx",
+                           "2026-07-02T00:00:00Z"))],
+    [LinePut(op_id="01OPLINE00000000000000000L", hlc=HLC(1, 0, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("x", "2026-07-01T00:00:00Z")),
+     LinePut(op_id="01OPLINE00000000000000000M", hlc=HLC(1, 1, "devb"),
+             device="devb", uid=HL_UIDS[0], article_uid=ART_UIDS[0],
+             line=_ex_line("y", "2026-07-02T00:00:00Z"))],
+))
 def test_apply_order_independent_across_devices(pair):
     """Two devices' batches applied in either order converge (spec §9's
     commutativity across op reorderings per device pair). Libraries start
@@ -580,8 +639,11 @@ def test_apply_order_independent_across_devices(pair):
 def test_apply_never_loses_note_text(ops):
     """No-note-loss at APPLY level (tombstone+resurrect matrix included):
     every note in a line_put that is not superseded by a NEWER line_put of
-    the same uid appears in the library afterwards — in a sidecar line, a
-    notes row, or a conflict note file."""
+    the same uid survives into the library afterwards — in a sidecar line,
+    a notes row, or a conflict note file. Same consciously narrowed
+    contract as the merge-level sibling (S6.5e / D-S6-12): contiguous-
+    verbatim for header-free notes, per-atom for header-bearing ones
+    (_assert_note_survives)."""
     from tiro.sync.merge import apply_ops
 
     with tempfile.TemporaryDirectory() as td:
@@ -615,7 +677,7 @@ def test_apply_never_loses_note_text(ops):
         for op in latest.values():
             note = op.line.get("note_markdown")
             if note and note.strip():
-                assert note in haystack, f"lost note {note!r} (uid {op.uid})"
+                _assert_note_survives(note, haystack, f"apply, uid {op.uid}")
 
 
 def test_diff_apply_roundtrip(tmp_path):

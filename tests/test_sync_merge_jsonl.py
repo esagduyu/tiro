@@ -1,4 +1,5 @@
 """Sync S2: per-uid JSONL merge (spec §4 row 4) + line op application."""
+import itertools
 import json
 
 import pytest
@@ -126,20 +127,70 @@ class TestMergeJsonl:
         assert twice["note_markdown"] == once["note_markdown"]
         assert twice["note_markdown"].count("[conflict") == 1
 
-    def test_legacy_dated_blocks_survive_nothing_new_folds(self):
-        """S6.5d grandfathering pin: a winner note carrying LEGACY dated
-        conflict blocks (pre-D-S6-11 field sidecars contain them) keeps its
-        bytes VERBATIM through any fold that adds no new atom — the
-        nothing-new early return, recomputed in atom terms."""
+    def test_legacy_dated_note_remints_canonically_at_first_touch(self):
+        """S6.5e first-touch pin (D-S6-12, REPLACES the S6.5d grandfathering
+        pin, which pinned a proven-divergent behavior — review Blocker): a
+        winner note carrying LEGACY dated conflict blocks re-mints in the
+        canonical dateless form at its FIRST fold, even one that adds no
+        new atom, bodies preserved verbatim and sorted. Keeping legacy
+        bytes through nothing-new folds let fold ORDER decide whether the
+        dated or the dateless twin survived — a permanent divergence."""
         legacy = ("winner head\n\n> [conflict 2026-07-01]\nold alpha\n\n"
                   "> [conflict unknown-date]\nold beta")
+        canonical = ("winner head\n\n> [conflict]\nold alpha\n\n"
+                     "> [conflict]\nold beta")
         winner = _line(note=legacy, updated="2026-07-11T00:00:00Z")
-        # Loser contributes atoms the winner already carries (a block body
-        # and the head itself):
+        # Losers contribute NO new atom (a block body, the head, nothing):
         for stale_note in (None, "old alpha", "winner head", "old beta"):
             loser = _line(note=stale_note, updated="2026-07-10T00:00:00Z")
             (merged,) = merge_jsonl([winner], [loser])
-            assert merged["note_markdown"] == legacy
+            assert merged["note_markdown"] == canonical
+        # From the canonical form onwards the early return holds bytes:
+        minted = _line(note=canonical, updated="2026-07-11T00:00:00Z")
+        (again,) = merge_jsonl([minted],
+                               [_line(note=None, updated="2026-07-10T00:00:00Z")])
+        assert again["note_markdown"] == canonical
+
+    def test_untouched_legacy_note_keeps_exact_bytes(self):
+        """The guarantee that STILL holds after D-S6-12: a legacy dated
+        note in a sidecar that never enters any fold keeps its exact bytes
+        — merge is the only writer (no background rewriter). Two no-fold
+        paths through merge_jsonl: no same-uid partner at all, and an
+        identical twin (skipped before _merge_notes ever runs)."""
+        legacy = ("winner head\n\n> [conflict 2026-07-01]\nold alpha\n\n"
+                  "> [conflict unknown-date]\nold beta")
+        ln = _line(note=legacy, updated="2026-07-11T00:00:00Z")
+        (solo,) = merge_jsonl([ln], [])
+        assert solo["note_markdown"] == legacy
+        (twin,) = merge_jsonl([ln], [dict(ln)])
+        assert twin["note_markdown"] == legacy
+
+    def test_reviewer_kernel_all_fold_orders_converge(self):
+        """S6.5e review Blocker kernel, pinned exactly (D-S6-12): same uid,
+        three line versions —
+          A: legacy merged sidecar line "y\\n\\n> [conflict 2026-07-01]\\nx"
+             @ 07-02 (atoms {x,y}, head y)
+          B: "y" @ 07-02 (same core/updated_at as A — the natural
+             post-upgrade state, since old-code merges took the winner's
+             core)
+          C: "x" @ 07-01
+        Pre-fix: fold orders where every pairing hit the nothing-new early
+        return kept A's legacy bytes, while orders where (B,C) genuine-
+        merged first minted the dateless twin "y\\n\\n> [conflict]\\nx" —
+        which then OUTRANKED the legacy form at _note_rank's full-note
+        tiebreak (']' > ' ') and survived. Two final byte-forms. Post-fix
+        every fold order over {A,B,C} converges byte-identically."""
+        a = _line(note="y\n\n> [conflict 2026-07-01]\nx",
+                  updated="2026-07-02T00:00:00Z")
+        b = _line(note="y", updated="2026-07-02T00:00:00Z")
+        c = _line(note="x", updated="2026-07-01T00:00:00Z")
+        results = set()
+        for p, q, r in itertools.permutations((a, b, c)):
+            (left,) = merge_jsonl(merge_jsonl([p], [q]), [r])
+            (right,) = merge_jsonl([p], merge_jsonl([q], [r]))
+            results.add(left["note_markdown"])
+            results.add(right["note_markdown"])
+        assert results == {"y\n\n> [conflict]\nx"}
 
     def test_genuine_merge_remints_legacy_blocks_dateless(self):
         """S6.5d one-way migration pin: the first fold that genuinely
