@@ -10,9 +10,12 @@ never simulated here.
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import frontmatter
 import pytest
 
 from tests.test_reconcile import _ingest
+from tests.test_sync_cli import Args
+from tests.test_sync_multidevice import _q
 from tests.test_sync_setup_flows import (
     WEAK_KDF,
     _count,
@@ -20,8 +23,13 @@ from tests.test_sync_setup_flows import (
     _sync_cfg,
     _titles,
 )
+from tiro.anchors import content_hash
+from tiro.annotations import append_highlight, read_annotations, sidecar_stem
+from tiro.cli import cmd_sync
+from tiro.database import get_connection
 from tiro.doctor import fix as doctor_fix
 from tiro.doctor import scan as doctor_scan
+from tiro.lifecycle import delete_article
 from tiro.sync import engine
 from tiro.sync.adapters.base import LOCK_KEY, make_lock_payload
 from tiro.sync.engine import (
@@ -831,3 +839,220 @@ def test_status_survives_garbage_last_wall_ms(initialized_library):
     warnings = load_sync_status(cfg)["warnings"]
     assert len(warnings) == 1
     assert "healthy" in warnings[0]
+
+
+# --- S6.4: mass-delete guard e2e extras --------------------------------------
+#
+# S5's multidevice scenario 8 pins the basic article-guard trip + acceptance;
+# these drills add what it did NOT: trip persistence across cycles, the real
+# CLI acceptance path, and the annotations-guard equivalent (spec §4). The
+# one-shot-across-segments semantic is already pinned at the pull-unit level
+# (test_sync_engine.py::test_pull_mass_delete_acceptance_is_one_shot with
+# hand-seeded segments); drill 4 re-pins it END-TO-END across the two guard
+# KINDS (article RowDels then highlight LineDels, both from real device
+# cycles' diffs).
+
+
+GUARD_WORDS = ["alpha", "bravo", "charlie", "delta", "echo"]
+
+MARKED_BODY = "# Marked\n\nalpha bravo charlie delta echo close the loop.\n"
+
+
+@pytest.fixture
+def guard_rig(tmp_path, initialized_library):
+    """(cfg_a, cfg_b): encrypted two-device rig, no data yet — A initialized
+    the backend, B passphrase-joined but has not cycled (its first _sync
+    auto-bootstraps once A's first cycle has made a snapshot)."""
+    backend = tmp_path / "guard-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="on")
+    cfg_a.sync_enabled = True
+    recovery = asyncio.run(
+        init_backend(cfg_a, adapter_for_config(cfg_a), PASSPHRASE,
+                     kdf_params=WEAK_KDF))
+    cfg_a.sync_identity = recovery
+    cfg_b = _join(tmp_path, backend, name="lib-guard-b")
+    return cfg_a, cfg_b
+
+
+def _hl_count(cfg):
+    return _q(cfg, "SELECT COUNT(*) AS n FROM highlights")[0]["n"]
+
+
+def _highlight_words(cfg, article_id, words):
+    """Create one highlight per word via the real M2.1 sidecar-first path,
+    positions computed against the WRITTEN file body (multidevice #5's
+    recipe). No note_markdown — a synced delete preserves non-empty notes as
+    conflict files, which would blur these drills' sidecar assertions."""
+    row = _q(cfg, "SELECT * FROM articles WHERE id = ?", article_id)[0]
+    body = frontmatter.load(
+        str(cfg.articles_dir / row["markdown_path"])).content
+    conn = get_connection(cfg.db_path)
+    try:
+        for word in words:
+            start = body.index(word)
+            append_highlight(
+                conn=conn, config=cfg, article=row, quote=word,
+                prefix=body[max(0, start - 8):start],
+                suffix=body[start + len(word):start + len(word) + 8],
+                position_start=start, position_end=start + len(word),
+                content_hash=content_hash(body), color="yellow")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _wipe_annotation_sidecars(cfg, expected: int):
+    """Empty every annotations sidecar IN PLACE. Files stay PRESENT, so the
+    S1 annotations mass-delete guard (which fires on a MISSING dir / missing
+    files for >1 stem) does not trip the wiping device's own reconcile:
+    files-win empties its rows and the manifest diff pushes one LineDel per
+    vanished line. (Deleting the files instead would wedge the wiping device
+    behind its own S1 guard — this is the least-contrived honest route to a
+    mass highlight-delete diff.)"""
+    sidecars = sorted((cfg.library / "annotations").glob("*.jsonl"))
+    assert len(sidecars) == expected
+    for path in sidecars:
+        path.write_text("")
+
+
+def _trip_article_guard(cfg_a, cfg_b, n=12):
+    """A ingests n articles, both devices converge, A deletes ALL n and
+    pushes — B's next pull now faces a guarded segment (n RowDels > the
+    max(10, 20%) threshold)."""
+    arts = [_ingest(cfg_a, title=f"Guard {i:02d}",
+                    url=f"https://example.com/guard-{i}") for i in range(n)]
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"  # auto-bootstrap (D-S5-3)
+    assert _count(cfg_b) == n
+    for art in arts:
+        delete_article(cfg_a, art["id"])
+    assert _count(cfg_a) == 0
+    assert _sync(cfg_a).result == "ok"
+
+
+def test_guard_state_persists_across_cycles(guard_rig):
+    """A tripped guard NEVER self-clears: every un-accepted cycle re-trips
+    (watermark held, nothing applied) until an explicit acceptance — the trip
+    is re-derived from the un-advanced watermark each cycle, not a sticky
+    flag someone could lose."""
+    cfg_a, cfg_b = guard_rig
+    _trip_article_guard(cfg_a, cfg_b)
+
+    first = _sync(cfg_b)
+    assert first.result == "needs_attention"
+    assert first.reason == "mass_delete_guard"
+    assert first.guard
+    assert _count(cfg_b) == 12  # nothing applied
+
+    second = _sync(cfg_b)  # NO acceptance — must re-trip, not self-clear
+    assert second.result == "needs_attention"
+    assert second.reason == "mass_delete_guard"
+    assert second.guard
+    assert _count(cfg_b) == 12  # still nothing applied
+
+    accepted = _sync(cfg_b, accept_mass_delete=True)
+    assert accepted.result == "ok"
+    assert accepted.guard is None  # acceptance consumed cleanly
+    assert _count(cfg_b) == 0
+
+
+def test_cli_accept_mass_delete_clears_trip(guard_rig, capsys):
+    """The FROZEN CLI shape end-to-end: `tiro sync --now` surfaces the trip
+    (GUARDED + reason), `tiro sync --now --accept-mass-delete` clears it —
+    through the real cmd_sync, not the engine kwarg directly."""
+    cfg_a, cfg_b = guard_rig
+    _trip_article_guard(cfg_a, cfg_b)
+
+    cmd_sync(Args(cfg_b, now=True))
+    out = capsys.readouterr().out
+    assert "needs_attention" in out
+    assert "GUARDED" in out
+    assert "mass_delete_guard" in out
+    assert _count(cfg_b) == 12
+
+    cmd_sync(Args(cfg_b, now=True, accept_mass_delete=True))
+    out = capsys.readouterr().out
+    assert "Sync: ok" in out
+    assert "GUARDED" not in out
+    assert _count(cfg_b) == 0
+
+
+def test_annotations_mass_delete_guard_equivalent(guard_rig):
+    """Spec §4's "annotations-guard equivalent": a pulled diff deleting >
+    max(10, 20%) of local HIGHLIGHTS halts the merge exactly like the
+    article guard — rows AND sidecar lines survive the trip; acceptance
+    applies the wipe (rows gone, sidecars emptied)."""
+    cfg_a, cfg_b = guard_rig
+    arts = [_ingest(cfg_a, title=f"Marked {i}", body=MARKED_BODY,
+                    url=f"https://example.com/marked-{i}") for i in range(3)]
+    for art in arts:
+        _highlight_words(cfg_a, art["id"], GUARD_WORDS)
+    assert _hl_count(cfg_a) == 15
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"
+    assert _hl_count(cfg_b) == 15
+
+    _wipe_annotation_sidecars(cfg_a, expected=3)
+    report_a = _sync(cfg_a)
+    # A's own wipe is A's own edit: the pull-side guard does not apply, the
+    # S1 reconcile guard stays quiet (files present), rows empty files-win.
+    assert report_a.result == "ok"
+    assert _hl_count(cfg_a) == 0
+
+    tripped = _sync(cfg_b)
+    assert tripped.result == "needs_attention"
+    assert tripped.reason == "mass_delete_guard"
+    assert "highlight" in tripped.guard  # the annotations leg, not articles
+    assert _hl_count(cfg_b) == 15  # rows survive the trip
+    b_sidecars = sorted((cfg_b.library / "annotations").glob("*.jsonl"))
+    assert len(b_sidecars) == 3
+    assert all(p.read_text() for p in b_sidecars)  # lines survive too
+    for art in _q(cfg_b, "SELECT markdown_path FROM articles"):
+        assert len(read_annotations(cfg_b, sidecar_stem(art))) == 5
+
+    accepted = _sync(cfg_b, accept_mass_delete=True)
+    assert accepted.result == "ok"
+    assert accepted.guard is None
+    assert _hl_count(cfg_b) == 0
+    for path in b_sidecars:
+        assert path.read_text() == ""  # emptied, not orphaned
+
+
+def test_guard_acceptance_is_one_shot_across_segments(guard_rig):
+    """One-shot acceptance END-TO-END across the two guard KINDS: A's two
+    cycles push one article-mass-delete segment then one highlight-mass-
+    delete segment; B's accepted run consumes the acceptance on the FIRST
+    trip (articles applied) and re-trips on the second (highlights held); a
+    second accepted run clears it."""
+    cfg_a, cfg_b = guard_rig
+    bulk = [_ingest(cfg_a, title=f"Bulk {i:02d}",
+                    url=f"https://example.com/bulk-{i}") for i in range(12)]
+    marked = [_ingest(cfg_a, title=f"Marked {i}", body=MARKED_BODY,
+                      url=f"https://example.com/marked-{i}") for i in range(3)]
+    for art in marked:
+        _highlight_words(cfg_a, art["id"], GUARD_WORDS)
+    assert _sync(cfg_a).result == "ok"
+    assert _sync(cfg_b).result == "ok"
+    assert _count(cfg_b) == 15
+    assert _hl_count(cfg_b) == 15
+
+    # Guarded segment #1: 12 article deletions (> max(10, ceil(0.2*15))).
+    for art in bulk:
+        delete_article(cfg_a, art["id"])
+    assert _sync(cfg_a).result == "ok"
+    # Guarded segment #2: 15 highlight deletions (> max(10, ceil(0.2*15))).
+    _wipe_annotation_sidecars(cfg_a, expected=3)
+    assert _sync(cfg_a).result == "ok"
+
+    report = _sync(cfg_b, accept_mass_delete=True)
+    assert report.result == "needs_attention"
+    assert report.reason == "mass_delete_guard"
+    assert "highlight" in report.guard  # the SECOND, un-accepted trip
+    assert _count(cfg_b) == 3     # first trip consumed the acceptance, applied
+    assert _hl_count(cfg_b) == 15  # second trip held its segment
+
+    report2 = _sync(cfg_b, accept_mass_delete=True)
+    assert report2.result == "ok"
+    assert report2.guard is None
+    assert _hl_count(cfg_b) == 0
+    assert _count(cfg_b) == 3
