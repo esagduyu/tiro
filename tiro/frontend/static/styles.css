@@ -4188,6 +4188,16 @@ main {
     background: var(--tiro-secondary);
 }
 
+/* Sync status tiers (S5.8): warn = gold, err = the must-read crimson.
+   Both variables exist in papyrus.css AND roman-night.css. */
+.status-warn {
+    background: var(--tiro-gold);
+}
+
+.status-err {
+    background: var(--tiro-tier-must-read);
+}
+
 .status-off {
     background: var(--tiro-border);
 }

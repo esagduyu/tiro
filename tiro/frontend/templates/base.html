@@ -112,6 +112,16 @@
             </div>
         </div>
         <div class="sidebar-footer">
+            <!-- Sync status (S5.8): rendered hidden; sidebar.js's
+                 setupSyncStatus() unhides it only when GET /api/settings/sync
+                 reports configured: true, and colors #sync-dot from the
+                 response's `dot` field (ok/warn/err). One fetch per page
+                 load, no polling — same posture as the unread badge. -->
+            <a href="/settings#sync-section" id="sync-status" class="sidebar-footer-item" title="Sync" hidden>
+                {{ icon("refresh", size=17) }}
+                <span id="sync-dot" class="status-indicator" aria-hidden="true"></span>
+                <span class="sidebar-label">Sync</span>
+            </a>
             <button id="theme-toggle" class="sidebar-footer-item sidebar-theme-toggle" title="Toggle dark mode">
                 <span class="sidebar-icon"></span>
                 <span class="sidebar-label" id="theme-label">Light</span>

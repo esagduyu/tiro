@@ -260,5 +260,7 @@ def test_static_version_bumped_for_saved_views_ui():
     # 68 -> 69 in Phase 6 K2.5 (/agents page: agents.html/agents.js, base.html
     # sidebar + Library-sheet nav entries landed under the old "68" pin), then
     # 69 -> 70 in Phase 6 K3.8 (suggestion chips + /agents queue & persona
-    # management landed under the old "69" pin).
-    assert STATIC_VERSION == "70"
+    # management landed under the old "69" pin), then 70 -> 71 in sync S5.8
+    # (sync settings card + sidebar status dot landed in settings.html/
+    # base.html/sidebar.js/styles.css under the old "70" pin).
+    assert STATIC_VERSION == "71"

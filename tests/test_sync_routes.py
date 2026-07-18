@@ -260,3 +260,23 @@ def test_sync_repair_confirmed_reseeds(authenticated_client,
     assert after and not (after & before)
     assert not any(p.is_file() for p in (backend / "journal").rglob("*"))
     assert any(p.is_file() for p in (backend / "snapshots").rglob("*"))
+
+
+# --- S5.8: settings card + sidebar status anchor (template surface) ----------
+
+
+def test_settings_page_has_sync_section(authenticated_client):
+    r = authenticated_client.get("/settings")
+    assert r.status_code == 200
+    assert 'id="sync-section"' in r.text
+    assert "tiro sync setup" in r.text
+
+
+def test_base_sidebar_has_sync_status_anchor(authenticated_client):
+    r = authenticated_client.get("/inbox")
+    assert r.status_code == 200
+    assert 'id="sync-status"' in r.text
+    # Rendered hidden until sidebar.js unhides on configured: true — the
+    # `hidden` attribute sits on the same anchor tag as the id.
+    anchor_tag = r.text.split('id="sync-status"')[1].split(">")[0]
+    assert "hidden" in anchor_tag
