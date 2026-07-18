@@ -739,3 +739,95 @@ def test_pull_warns_on_remote_clock_behind(skew_rig, tmp_path, monkeypatch):
     assert report_c.result == "ok"
     assert _titles(cfg_c) >= {"Alpha", "Gamma"}
     assert _skews(report_c.warnings) == []
+
+
+def test_skew_no_double_report_across_surfaces(initialized_library):
+    """S6.3 review #1: a persisted prong-A line must appear ONCE per
+    surface — doctor carries it under clock_skew and EXCLUDES it from
+    cycle_warnings; non-skew cycle warnings stay in cycle_warnings only."""
+    from tiro.doctor import scan
+    from tiro.sync.engine import CycleReport, _record_cycle, load_sync_status
+
+    cfg = initialized_library
+    cfg.sync_path = str(cfg.library / "unused-backend")  # configured=True
+    get_or_create_device(cfg)
+    report = CycleReport()
+    report.result = "ok"
+    report.finished_at = "2026-07-17T00:00:00Z"
+    skew_line = ("clock skew: device 'fast-laptop' is ~30h ahead of this "
+                 "device's clock — last-write-wins merges may misorder "
+                 "until fixed")
+    report.warnings = [skew_line, "compaction skipped: transient"]
+    _record_cycle(cfg, report)
+
+    status = load_sync_status(cfg)
+    assert status["warnings"].count(skew_line) == 1
+
+    section = scan(cfg)["sync"]
+    assert skew_line in section["clock_skew"]
+    assert skew_line not in section["cycle_warnings"]
+    assert "compaction skipped: transient" in section["cycle_warnings"]
+
+
+def test_skew_shared_name_never_suppresses(initialized_library):
+    """S6.3 review #3: two devices sharing a NAME must not dedupe each
+    other's warnings — a live-ahead line for one 'MacBook' plus a persisted
+    line for the other 'MacBook' both survive."""
+    import time
+
+    from tiro.sync.engine import (
+        CycleReport,
+        _record_cycle,
+        load_sync_status,
+        upsert_remote_device,
+    )
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+    upsert_remote_device(cfg, "01SKEWTWINAAAAAAAAAAAAAAAA", name="MacBook",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+    upsert_remote_device(cfg, "01SKEWTWINBBBBBBBBBBBBBBBB", name="MacBook",
+                         last_wall_ms=now_ms)
+    report = CycleReport()
+    report.result = "ok"
+    report.finished_at = "2026-07-17T00:00:00Z"
+    persisted = ("clock skew: device 'MacBook' is ~30h behind this "
+                 "device's clock — last-write-wins merges may misorder "
+                 "until fixed")
+    report.warnings = [persisted]
+    _record_cycle(cfg, report)
+
+    warnings = load_sync_status(cfg)["warnings"]
+    # One live ahead line + the persisted behind line: both present.
+    assert len(warnings) == 2
+    assert any("ahead" in w for w in warnings)
+    assert persisted in warnings
+
+
+def test_status_survives_garbage_last_wall_ms(initialized_library):
+    """S6.3 review #4: one hand-edited garbage last_wall_ms row degrades to
+    a skipped row, not a lost prong-B pass for every other device."""
+    import time
+
+    from tiro.database import get_connection
+    from tiro.sync.engine import load_sync_status, upsert_remote_device
+
+    cfg = initialized_library
+    get_or_create_device(cfg)
+    now_ms = time.time_ns() // 1_000_000
+    upsert_remote_device(cfg, "01SKEWGARBAGEROW0000000000", name="broken")
+    conn = get_connection(cfg.db_path)
+    try:
+        conn.execute(
+            "UPDATE sync_state SET last_wall_ms = 'not-a-number' "
+            "WHERE device_id = ?", ("01SKEWGARBAGEROW0000000000",))
+        conn.commit()
+    finally:
+        conn.close()
+    upsert_remote_device(cfg, "01SKEWHEALTHYROW0000000000", name="healthy",
+                         last_wall_ms=now_ms + 30 * 3600 * 1000)
+
+    warnings = load_sync_status(cfg)["warnings"]
+    assert len(warnings) == 1
+    assert "healthy" in warnings[0]

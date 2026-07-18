@@ -286,7 +286,14 @@ def scan(config: TiroConfig) -> dict:
             ),
             "stale_lock": False,
             "conflict_files": len(report["conflict_files"]),
-            "cycle_warnings": list(last_cycle.get("warnings") or []),
+            # Clock-skew lines are excluded here (S6.3 review #1): they
+            # arrive via "clock_skew" below — carrying them in both keys
+            # double-prints them in cmd_doctor and doubles them for --json
+            # consumers.
+            "cycle_warnings": [
+                w for w in (last_cycle.get("warnings") or [])
+                if not (isinstance(w, str) and w.startswith("clock skew:"))
+            ],
             # Clock-skew warnings (S6.3): load_sync_status already merges
             # the live registry ahead-check with persisted cycle warnings
             # and dedupes by device label — report-only, like the rest of

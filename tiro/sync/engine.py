@@ -339,13 +339,28 @@ def load_sync_status(config: TiroConfig) -> dict:
             # persisted prong-A cycle warning folded in below.
             now_ms = int(datetime.now(UTC).timestamp() * 1000)
             threshold_ms = CLOCK_SKEW_WARN_HOURS * 3600 * 1000
+            # Labels shared by >1 device never enter the dedupe set (S6.3
+            # review #3): suppressing one same-named device's persisted
+            # line with another's live line would hide a real warning —
+            # under a name collision, over-reporting beats suppression.
+            label_counts: dict[str, int] = {}
+            for r in state["devices"]:
+                if not r["is_self"]:
+                    lbl = r.get("name") or r["device_id"]
+                    label_counts[lbl] = label_counts.get(lbl, 0) + 1
             for r in state["devices"]:
                 if r["is_self"]:
                     continue
                 wall = r.get("last_wall_ms")
+                # Per-row shape guard (S6.3 review #4): one hand-edited
+                # garbage last_wall_ms row must not abort the whole pass
+                # via the belt except below.
+                if not isinstance(wall, (int, float)) or isinstance(wall, bool):
+                    continue
                 if wall and wall > now_ms + threshold_ms:
                     label = r.get("name") or r["device_id"]
-                    warned_labels.add(label)
+                    if label_counts.get(label, 0) <= 1:
+                        warned_labels.add(label)
                     warnings.append(_skew_warning(
                         label, (wall - now_ms) / 3_600_000, "ahead of"))
     except Exception as e:  # read_sync_state already degrades; belt on top
@@ -731,6 +746,17 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     # bootstrap/catch-up pull) => no behind-check, so a laptop offline all
     # weekend can never false-fire. The ahead-check needs no baseline: an
     # HLC wall stamp from the future proves relative skew outright.
+    # Known narrowness (S6.3 review #2, accepted): the baseline is the LAST
+    # cycle iff it was "ok" — a routine skipped_lock/error record nulls it
+    # and disables the behind-check for one pull (false-negative window,
+    # self-healing at the next ok cycle; requiring result == "ok" stays
+    # correct because a needs_attention cycle consumed nothing, so pending
+    # stamps may legitimately predate it). A skipped_lock record likewise
+    # overwrites last_cycle_json and expires a persisted behind warning
+    # early — "ahead" survives via prong B's registry check; "behind"
+    # honestly expires rather than being restated from stale state. Also
+    # accepted (#5): the warning fires on the FIRST segment that trips per
+    # device, so a later same-cycle segment cannot upgrade the magnitude.
     prev_cycle = state["last_cycle"]
     prev_success_ms = (_iso_to_ms(prev_cycle.get("finished_at"))
                        if isinstance(prev_cycle, dict)

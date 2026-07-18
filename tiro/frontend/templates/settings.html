@@ -1427,6 +1427,10 @@
         }
         if (Array.isArray(cycle.warnings)) {
             cycle.warnings.forEach(function(w) {
+                // Clock-skew lines are skipped here (S6.3 review #1): the
+                // server folds them into d.warnings, rendered warning-colored
+                // below — printing both would double-show the same line.
+                if (String(w).indexOf('clock skew:') === 0) return;
                 html += '<div class="status-detail muted">' + escapeHtml(String(w)) + '</div>';
             });
         }
