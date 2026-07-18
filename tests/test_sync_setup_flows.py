@@ -551,3 +551,59 @@ async def test_repair_aborts_before_wipe_on_underivable_state(
     assert "no hash" in report.reason
     # The backend was never touched: every pre-repair file still present.
     assert _backend_files() == files_before
+
+
+async def test_repair_epoch_detection_pull_only_device(initialized_library,
+                                                       tmp_path):
+    """Whole-branch review Major #1: a freshly-bootstrapped PULL-ONLY device
+    (last_seq == 0, non-empty watermarks — the normal post-bootstrap state)
+    must still epoch-detect after a repair elsewhere. Pre-fix, the
+    last_seq-only gate skipped detection, the new epoch's low-seq segments
+    sat below the stale watermarks and were silently skipped, and the
+    device's heartbeat re-published the stale watermarks as acked —
+    licensing GC to cement the divergence."""
+    from tests.test_reconcile import _ingest
+    from tiro.sync.engine import read_sync_state
+
+    backend = tmp_path / "backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="on")
+    adapter_a = adapter_for_config(cfg_a)
+    recovery = await init_backend(cfg_a, adapter_a, "pw", kdf_params=WEAK_KDF)
+    cfg_a.sync_identity = recovery
+    _ingest(cfg_a, title="First", url="https://example.com/first")
+    assert (await sync_cycle(cfg_a, adapter_a)).result == "ok"
+    # A pushes a SECOND article so B accrues a real watermark for A beyond
+    # the snapshot covers (segment 2 survives compaction cadence).
+    _ingest(cfg_a, title="Second", url="https://example.com/second")
+    assert (await sync_cycle(cfg_a, adapter_a)).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-b")
+    _sync_cfg(cfg_b, backend, encrypt="on", identity=recovery)
+    assert (await sync_cycle(cfg_b)).result == "ok"  # auto-bootstrap + pull
+    # Construct the pull-only state explicitly: the normal bootstrap cycle
+    # pushes the documented one-cycle meta echo (last_seq 1), but a failed
+    # first push / echo-free bootstrap leaves last_seq 0 WITH watermarks --
+    # the exact state whose epoch detection the old last_seq-only gate
+    # skipped. Forcing it keeps the pin honest without depending on echo
+    # mechanics.
+    from tiro.sync.engine import update_self_state
+    update_self_state(cfg_b, last_seq=0)
+    state_b = read_sync_state(cfg_b)
+    assert (state_b["self"]["last_seq"] or 0) == 0
+    assert state_b["watermarks"], "precondition: B holds watermarks for A"
+    assert _titles(cfg_b) == {"First", "Second"}
+
+    assert (await repair(cfg_a, adapter_a)).result == "ok"
+
+    report = await sync_cycle(cfg_b)
+    assert report.result == "ok"
+    assert any("repair epoch" in w for w in report.warnings)
+
+    # Post-epoch convergence proof: A pushes NEW content at low seq numbers
+    # (post-repair journal restarts at 1); B must pick it up, not silently
+    # skip it below stale watermarks.
+    _ingest(cfg_a, title="Post Repair", url="https://example.com/post")
+    assert (await sync_cycle(cfg_a, adapter_a)).result == "ok"
+    assert (await sync_cycle(cfg_b)).result == "ok"
+    assert "Post Repair" in _titles(cfg_b)
+    assert _titles(cfg_b) == {"First", "Second", "Post Repair"}

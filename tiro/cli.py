@@ -1006,8 +1006,10 @@ def cmd_sync(args):
 def _sync_setup(config):
     """Interactive sync setup (spec §9): backend + encryption + passphrase,
     with the recovery-code show-once ceremony. Nothing is persisted until
-    every check passes; the recovery code is printed exactly once and
-    NEVER written anywhere by Tiro.
+    every check passes; the recovery code is SHOWN exactly once and never
+    written to the backend — locally it IS persisted, deliberately, as
+    `sync_identity` in config.yaml (0600, masked everywhere) because
+    background cycles must decrypt without prompting.
 
     ALL backend IO (format.json probe, verify/init, the optional bootstrap
     and the final aclose) runs inside ONE asyncio.run() event loop — a
@@ -1219,6 +1221,13 @@ def _sync_setup(config):
             # 6. Persist — the point of no return for this ceremony.
             updates["sync_enabled"] = True
             config.sync_enabled = True
+            # YAML 1.1 trap parity with POST /api/settings/sync: any free
+            # string the user typed that pyyaml would re-read as a bool
+            # (a bucket named "no", a path "on", ...) must persist quoted.
+            for key, value in updates.items():
+                if isinstance(value, str) and value.lower() in (
+                        "on", "off", "yes", "no", "true", "false", "y", "n"):
+                    updates[key] = yaml_quote(value)
             persist_config(config, updates)
             get_or_create_device(config)
 

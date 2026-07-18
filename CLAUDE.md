@@ -67,7 +67,7 @@ uv run tiro run            # Start server on localhost:8000 (auto-opens browser)
 uv run tiro run --lan      # Bind to 0.0.0.0 for LAN access — refuses without a password
 ```
 
-Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro import-readwise <json>`, `tiro import-instapaper <csv>`, `tiro import-omnivore <zip>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`, `tiro migrate-library [dest] [--yes]` (copy-then-confirm-never-remove, server stopped — Desktop packaging bullet), `tiro service install|uninstall|status|logs [--follow]` (launchd/systemd run-at-login), `tiro backup [--output|--include-audio]`, `tiro restore <snapshot> [--yes]`, `tiro import <bundle> [--conflicts]`, `tiro agent list|run <name> [--input k=v] [--backfill [--limit N]]`, `tiro evals run [agent] [--real]`, `tiro reconcile [--dry-run] [--json]` (local reconcile engine — sync S1 bullet), `tiro sync [--now|--status|--accept-mass-delete]` (BYO sync — status is the default and offline; `--accept-mass-delete` only with `--now`), `tiro sync setup` (interactive backend + encryption ceremony — recovery code shown ONCE, never stored), `tiro sync repair` (typed-confirm backend wipe-and-reseed — Sync engine S5 bullet), `tiro run --cert <path> --key <path>` (both-or-neither; `run.py` accepts the same pair). Tests: `uv run pytest` (1861, must stay 0-warnings) + `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs` (158 + 7 = 165).
+Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro import-readwise <json>`, `tiro import-instapaper <csv>`, `tiro import-omnivore <zip>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`, `tiro migrate-library [dest] [--yes]` (copy-then-confirm-never-remove, server stopped — Desktop packaging bullet), `tiro service install|uninstall|status|logs [--follow]` (launchd/systemd run-at-login), `tiro backup [--output|--include-audio]`, `tiro restore <snapshot> [--yes]`, `tiro import <bundle> [--conflicts]`, `tiro agent list|run <name> [--input k=v] [--backfill [--limit N]]`, `tiro evals run [agent] [--real]`, `tiro reconcile [--dry-run] [--json]` (local reconcile engine — sync S1 bullet), `tiro sync [--now|--status|--accept-mass-delete]` (BYO sync — status is the default and offline; `--accept-mass-delete` only with `--now`), `tiro sync setup` (interactive backend + encryption ceremony — recovery code shown ONCE, stored only as the local `sync_identity` secret), `tiro sync repair` (typed-confirm backend wipe-and-reseed — Sync engine S5 bullet), `tiro run --cert <path> --key <path>` (both-or-neither; `run.py` accepts the same pair). Tests: `uv run pytest` (1861, must stay 0-warnings) + `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs` (158 + 7 = 165).
 
 Before starting the server, kill any existing process on port 8000:
 ```bash
@@ -338,8 +338,10 @@ lsof -ti :8000 | xargs kill -9
   devices epoch-detect via their own vanished device doc and reset for a
   full re-diff/re-push (`clear_shadow` preserves alias + metats rows).
   `sync_identity` is a SECRET in config.yaml (fixed-width masked, never
-  returned by the API; recovery code printed exactly once by `tiro sync
-  setup`, never stored by Tiro). Typed confirms: `REPAIR` (CLI + route) and
+  returned by the API; the recovery code is SHOWN exactly once by `tiro sync
+  setup` and never written to the backend — locally it IS stored as
+  `sync_identity`, by design, so background cycles decrypt without
+  prompting). Typed confirms: `REPAIR` (CLI + route) and
   `UNENCRYPTED` with END-STATE semantics — any settings write LANDING on
   plaintext-over-a-network-backend needs it, not just the downgrade
   transition (idempotent re-save of an already-plaintext network config is

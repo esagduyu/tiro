@@ -550,12 +550,19 @@ def _remap_alias_uids(ops: list, aliases: dict[str, str]) -> list:
 
 async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
                 report: CycleReport, *,
-                accept_mass_delete: bool = False) -> bool:
+                accept_mass_delete: bool = False,
+                skip_epoch_check: bool = False) -> bool:
     """Pull + apply every unseen remote segment (spec §6.2). Returns False
     when the cycle must NOT proceed to push (gap, quarantine, vanished
     segment, mass-delete guard) — report.result/reason say why. Watermarks
     persist PER SEGMENT (D19#2: minimizes the crash-replay window; the
-    conflict-file same-content dedupe covers the residual window)."""
+    conflict-file same-content dedupe covers the residual window).
+
+    skip_epoch_check: a cycle that JUST bootstrapped (auto-bootstrap or the
+    public bootstrap verb) holds covers-derived watermarks but has not yet
+    published its device doc — the epoch heuristic (doc gone + history
+    present) would false-fire and throw those watermarks away. The doc
+    publishes at this cycle's push; every later cycle checks normally."""
     from tiro.sync.manifest import clear_shadow, load_shadow
     from tiro.sync.merge import apply_ops
     from tiro.sync.snapshot import (
@@ -575,14 +582,23 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
     watermarks = dict(state["watermarks"])
 
     # 0. Repair-epoch detection (spec §6.6 / S5 plan decision #5): we have
-    # pushed before (last_seq > 0) yet our own device doc is GONE while
-    # format.json still exists — a repair wiped the backend elsewhere.
-    # Reset the SYNC BOOKKEEPING only — shadow entries/tombstones
-    # (clear_shadow preserves alias + metats rows), last_seq, watermarks —
-    # so this cycle re-diffs and re-pushes the full local state. LOCAL DATA
-    # UNTOUCHED. last_seq=0 is safe against seq collision: the repair wiped
-    # journal/, and _push's backend-max allocation covers any stragglers.
-    if ((state["self"] or {}).get("last_seq") or 0) > 0:
+    # SYNC HISTORY — pushed before (last_seq > 0) OR pulled before
+    # (non-empty watermarks: a freshly-bootstrapped pull-only device
+    # normally sits at last_seq == 0; whole-branch review Major #1) — yet
+    # our own device doc is GONE while format.json still exists — a repair
+    # wiped the backend elsewhere. Without the watermark half of the gate a
+    # pull-only device would silently skip the new epoch's low-seq segments
+    # (they sit below its stale watermarks) AND re-publish those stale
+    # watermarks as acked in its device doc, licensing other devices' GC to
+    # cement the loss. Reset the SYNC BOOKKEEPING only — shadow entries/
+    # tombstones (clear_shadow preserves alias + metats rows), last_seq,
+    # watermarks — so this cycle re-diffs and re-pushes the full local
+    # state. LOCAL DATA UNTOUCHED. last_seq=0 is safe against seq
+    # collision: the repair wiped journal/, and _push's backend-max
+    # allocation covers any stragglers.
+    if (not skip_epoch_check
+            and (((state["self"] or {}).get("last_seq") or 0) > 0
+                 or watermarks)):
         own_doc = await _get_or_none(adapter, device_key(device_id))
         if own_doc is None and (
                 await _get_or_none(adapter, FORMAT_KEY)) is not None:
@@ -644,7 +660,9 @@ async def _pull(config: TiroConfig, adapter, codec, clock, clock_state: dict,
             report.reason = (
                 f"journal gap for device {dev}: expected segment {want}, "
                 f"found {seq} — NOTHING from this run was applied; segments "
-                "were GC'd past this device's ack; re-bootstrap or repair")
+                "were GC'd past this device's ack; run `tiro sync repair` "
+                "on the most complete device (bootstrap only fits an "
+                "empty library)")
             logger.error("Sync pull: %s", report.reason)
             return False
         expected[dev] = seq + 1
@@ -1123,11 +1141,25 @@ async def _compact(config: TiroConfig, adapter, codec,
         await adapter.delete(key)
 
 
+MAX_RECORDED_WARNINGS = 50
+
+
 def _record_cycle(config: TiroConfig, report: CycleReport) -> None:
-    """Persist the report as last_cycle_json — best-effort, never raises."""
+    """Persist the report as last_cycle_json — best-effort, never raises.
+
+    Warnings are capped before persisting (whole-branch review Minor #2):
+    one degraded-backend cycle can mint a warning per garbage key, and the
+    full list would otherwise bloat sync_state.last_cycle_json and the
+    settings card that renders it."""
     try:
         get_or_create_device(config)
-        update_self_state(config, last_cycle=report.as_dict())
+        payload = report.as_dict()
+        warnings = payload.get("warnings") or []
+        if len(warnings) > MAX_RECORDED_WARNINGS:
+            payload["warnings"] = warnings[:MAX_RECORDED_WARNINGS] + [
+                f"... and {len(warnings) - MAX_RECORDED_WARNINGS} more "
+                "warnings suppressed"]
+        update_self_state(config, last_cycle=payload)
     except Exception as e:
         logger.warning("Could not record sync cycle outcome: %s", e)
 
@@ -1200,6 +1232,7 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 # merge-two-libraries flow stays behind the explicit setup
                 # ceremony (bootstrap(), D-S5-3).
                 state = read_sync_state(config)
+                just_bootstrapped = False
                 if (_count_articles(config) == 0
                         and not state["watermarks"]
                         and ((state["self"] or {}).get("last_seq") or 0) == 0
@@ -1210,9 +1243,11 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                         "latest snapshot (D-S5-3)")
                     await _materialize_latest_snapshot(
                         config, adapter, codec, report)
+                    just_bootstrapped = True
                 ok = await _pull(config, adapter, codec, clock, clock_state,
                                  report,
-                                 accept_mass_delete=accept_mass_delete)
+                                 accept_mass_delete=accept_mass_delete,
+                                 skip_epoch_check=just_bootstrapped)
                 if ok:
                     await _push(config, adapter, codec, clock, clock_state,
                                 report)
@@ -1493,10 +1528,13 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
                         clock_state: dict = {}
                         # Bootstrap trusts the backend's state wholesale:
                         # the journal tail may legitimately mass-delete
-                        # relative to the snapshot.
+                        # relative to the snapshot. skip_epoch_check: our
+                        # device doc publishes at this cycle's push — the
+                        # covers-derived watermarks must survive the pull.
                         ok = await _pull(config, adapter, codec, clock,
                                          clock_state, report,
-                                         accept_mass_delete=True)
+                                         accept_mass_delete=True,
+                                         skip_epoch_check=True)
                         if ok:
                             await _push(config, adapter, codec, clock,
                                         clock_state, report)
