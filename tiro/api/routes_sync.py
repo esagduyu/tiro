@@ -6,10 +6,11 @@ POST /api/sync/repair (typed-confirm backend wipe-and-reseed).
 
 Secrets follow the email-settings precedent: masked on GET via
 routes_settings._mask_password (reused, never forked), and a posted secret
-equal to None/""/the mask means "keep the stored value". sync_encrypt is
+equal to None/""/the mask means "keep the stored value". Any posted string
+that pyyaml (YAML 1.1) would re-read as a boolean (`on`/`off`/`no`/...) is
 persisted through config.yaml_quote — a plain `on`/`off` scalar would
-round-trip through pyyaml (YAML 1.1) as a boolean and poison
-resolve_encryption.
+otherwise round-trip as a boolean and poison resolve_encryption (or a
+bucket named "no").
 """
 
 import logging
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["sync"])
 
 _SECRET_MASK = "********"  # what _mask_password returns for a set secret
+
+# Strings pyyaml's YAML 1.1 loader parses as booleans — any posted value
+# in this set must persist through yaml_quote or it round-trips as a bool.
+_YAML_BOOL_STRINGS = {"on", "off", "yes", "no", "true", "false", "y", "n"}
 
 # Request-body field -> TiroConfig field (FROZEN key names, spec §8).
 _FIELD_MAP = {
@@ -147,15 +152,22 @@ async def update_sync_settings(body: SyncSettings, request: Request):
     new_backend = effective["sync_backend"]
     new_on = _resolves_on(new_backend, effective["sync_encrypt"])
 
-    # Typed confirm: turning encryption OFF on a network backend that
-    # CURRENTLY resolves ON needs the same UNENCRYPTED ceremony as the CLI.
+    # Typed confirm: the ceremony guards the END STATE — plaintext on a
+    # network backend — not just the downgrade transition (matches the
+    # CLI's posture; review M1). A single POST from a filesystem/auto
+    # config straight to {backend: s3, encrypt: off} needs the ceremony
+    # too; only an idempotent re-save of an ALREADY-plaintext network
+    # config stays ceremony-free.
     try:
         currently_on = resolve_encryption(config)
     except SyncConfigError:
         # The stored pin is invalid — this POST is (or precedes) the fix;
         # no ceremony over a value that never resolved ON.
         currently_on = False
-    if (currently_on and not new_on and new_backend in ("s3", "webdav")
+    already_plain_network = (config.sync_backend in ("s3", "webdav")
+                            and not currently_on)
+    if (new_backend in ("s3", "webdav") and not new_on
+            and not already_plain_network
             and body.confirm_unencrypted != "UNENCRYPTED"):
         raise HTTPException(status_code=400, detail=(
             "turning encryption off stores your library as PLAINTEXT on a "
@@ -178,8 +190,12 @@ async def update_sync_settings(body: SyncSettings, request: Request):
 
     if changes:
         updates = dict(changes)
-        if "sync_encrypt" in updates:
-            updates["sync_encrypt"] = yaml_quote(updates["sync_encrypt"])
+        # yaml_quote ANY string that pyyaml (YAML 1.1) would re-read as a
+        # boolean — not just sync_encrypt: an S3 bucket literally named
+        # "no" must round-trip as the string "no" (review m5).
+        for key, value in updates.items():
+            if isinstance(value, str) and value.lower() in _YAML_BOOL_STRINGS:
+                updates[key] = yaml_quote(value)
         try:
             persist_config(config, updates)
         except ValueError as e:
@@ -248,6 +264,8 @@ async def sync_repair(body: SyncRepairRequest, request: Request):
     library (engine.repair). Destructive for other devices' un-pulled
     history, so it takes the same typed confirmation as the CLI."""
     config = request.app.state.config
+    if sync_cycle_running():
+        raise HTTPException(status_code=409, detail="sync_running")
     if body.confirm != "REPAIR":
         return JSONResponse(status_code=400, content={
             "error": "confirm_required",

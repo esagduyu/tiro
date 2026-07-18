@@ -159,6 +159,14 @@ def read_sync_state(config: TiroConfig) -> dict:
             except ValueError:
                 logger.warning("sync_state: unreadable last_cycle_json — "
                                "treating as no prior cycle")
+            # Type-validate, not just parse (S5.7 review M2, mirroring the
+            # watermarks guard): every consumer treats last_cycle as a
+            # dict (`last_cycle.get(...)`) — a valid-JSON scalar/array
+            # ('"boom"', '[1]') must degrade to None, never crash status.
+            if last_cycle is not None and not isinstance(last_cycle, dict):
+                logger.warning("sync_state: last_cycle_json is not an "
+                               "object — treating as no prior cycle")
+                last_cycle = None
     return {
         "self": self_row,
         "devices": rows,
@@ -1139,6 +1147,7 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
         report.finished_at = _now_iso()
         return report  # not recorded — we don't own the state
     engine_built_adapter = adapter is None
+    cancelled = False
     try:
         if adapter is None:
             adapter = adapter_for_config(config)
@@ -1206,6 +1215,14 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                         await adapter.unlock()
                     except Exception as e:
                         logger.warning("Sync unlock failed: %s", e)
+    except asyncio.CancelledError:
+        # m4 (S5.7 review): a cancelled half-cycle's report is meaningless
+        # — record NOTHING (the previous last_cycle stands) and re-raise;
+        # the finally below still releases the adapter and the in-process
+        # lock. Without this flag the finally would record the report's
+        # default "ok" for work that never finished.
+        cancelled = True
+        raise
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
@@ -1228,9 +1245,11 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
             # must never interleave their last_cycle_json writes (the lock
             # is a threading.Lock precisely because of that pattern). The
             # in-process-lock skip branch above stays unrecorded — it does
-            # not own the state.
-            report.finished_at = _now_iso()
-            _record_cycle(config, report)
+            # not own the state. A CANCELLED cycle records nothing either
+            # (m4) — but the adapter close and lock release below still run.
+            if not cancelled:
+                report.finished_at = _now_iso()
+                _record_cycle(config, report)
             # M3: close the adapter ONLY when this cycle constructed it —
             # a caller-provided adapter's lifecycle belongs to the caller.
             # Best-effort: a failing close never changes the report.
@@ -1431,6 +1450,7 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
     report = CycleReport()
+    cancelled = False
     try:
         n = _count_articles(config)
         if n > 0:
@@ -1472,6 +1492,11 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
                                 "Sync bootstrap unlock failed: %s", e)
             finally:
                 _CYCLE_LOCK.release()
+    except asyncio.CancelledError:
+        # m4 parity with sync_cycle: a cancelled half-bootstrap records
+        # nothing; the inner finallys above already released the locks.
+        cancelled = True
+        raise
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
@@ -1484,8 +1509,9 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
         report.result = "error"
         report.reason = str(e)[:300]
     finally:
-        report.finished_at = _now_iso()
-        _record_cycle(config, report)
+        if not cancelled:
+            report.finished_at = _now_iso()
+            _record_cycle(config, report)
     return report
 
 
@@ -1497,54 +1523,71 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
     format.json is KEPT — never rewritten, byte-identical — so every other
     device keeps decrypting; they detect the repair epoch on their next
     pull (own device doc gone + format.json present) and re-push. Repair
-    is conservative: it NEVER proceeds without the backend lock (held ->
-    skipped_lock; a lock fault -> error via the generic taxonomy), and it
-    DERIVES BEFORE IT DESTROYS (S5.5-fix M2): the full local snapshot plan
-    is built first, so a hashless/unreadable local entry aborts with the
-    backend fully intact."""
+    is conservative: it NEVER proceeds without EITHER lock (S5.7 review
+    m3: the in-process cycle lock non-blocking, like bootstrap, THEN the
+    backend advisory lock; held -> skipped_lock; a lock fault -> error via
+    the generic taxonomy), and it DERIVES BEFORE IT DESTROYS (S5.5-fix
+    M2): the full local snapshot plan is built first, so a hashless/
+    unreadable local entry aborts with the backend fully intact."""
     from tiro.sync.manifest import save_shadow
     from tiro.sync.reconcile import reconcile_library
     from tiro.sync.snapshot import QUARANTINE_ERRORS
 
     report = CycleReport()
+    cancelled = False
     try:
-        _fmt, codec = await _open_backend(config, adapter)
-        got = await adapter.lock(LOCK_TTL_S)  # a fault -> error, never lockless
-        if not got:
+        if not _CYCLE_LOCK.acquire(blocking=False):
             report.result = "skipped_lock"
-            report.reason = "backend lock held by another device"
+            report.reason = "another cycle is running in this process"
         else:
             try:
-                device_id, name = get_or_create_device(config)
-                # Derivation FIRST (M2), reconcile before it (spec §6.3
-                # parity with _push) so the epoch seed captures external
-                # edits. covers={} deliberately: the journal will be empty
-                # (nothing subsumed), and a bootstrapping device starts at
-                # watermarks {} and pulls future segments from seq 1.
-                await asyncio.to_thread(reconcile_library, config)
-                (snapshot_id, doc_text, addresses, bodies_by_address,
-                 manifest) = await _derive_local_snapshot(
-                    config, device_id, {})
-                # Only NOW is the backend touched.
-                for prefix in ("journal/", "objects/", "snapshots/",
-                               "devices/"):
-                    for key in await adapter.list(prefix):
-                        await adapter.delete(key)
-                uploaded = await _upload_snapshot(
-                    adapter, codec, snapshot_id, doc_text, addresses,
-                    bodies_by_address)
-                report.pushed_objects += uploaded
-                update_self_state(config, last_seq=0, watermarks={})
-                await _put_device_doc(config, adapter, device_id, name,
-                                      last_seq=0)
-                # Shadow = the exact manifest the snapshot was built from:
-                # nothing is pending to push after a repair.
-                await asyncio.to_thread(save_shadow, config, manifest)
+                _fmt, codec = await _open_backend(config, adapter)
+                # A fault -> error, never lockless.
+                got = await adapter.lock(LOCK_TTL_S)
+                if not got:
+                    report.result = "skipped_lock"
+                    report.reason = "backend lock held by another device"
+                else:
+                    try:
+                        device_id, name = get_or_create_device(config)
+                        # Derivation FIRST (M2), reconcile before it (spec
+                        # §6.3 parity with _push) so the epoch seed captures
+                        # external edits. covers={} deliberately: the
+                        # journal will be empty (nothing subsumed), and a
+                        # bootstrapping device starts at watermarks {} and
+                        # pulls future segments from seq 1.
+                        await asyncio.to_thread(reconcile_library, config)
+                        (snapshot_id, doc_text, addresses, bodies_by_address,
+                         manifest) = await _derive_local_snapshot(
+                            config, device_id, {})
+                        # Only NOW is the backend touched.
+                        for prefix in ("journal/", "objects/", "snapshots/",
+                                       "devices/"):
+                            for key in await adapter.list(prefix):
+                                await adapter.delete(key)
+                        uploaded = await _upload_snapshot(
+                            adapter, codec, snapshot_id, doc_text, addresses,
+                            bodies_by_address)
+                        report.pushed_objects += uploaded
+                        update_self_state(config, last_seq=0, watermarks={})
+                        await _put_device_doc(config, adapter, device_id,
+                                              name, last_seq=0)
+                        # Shadow = the exact manifest the snapshot was built
+                        # from: nothing is pending to push after a repair.
+                        await asyncio.to_thread(save_shadow, config, manifest)
+                    finally:
+                        try:
+                            await adapter.unlock()
+                        except Exception as e:
+                            logger.warning(
+                                "Sync repair unlock failed: %s", e)
             finally:
-                try:
-                    await adapter.unlock()
-                except Exception as e:
-                    logger.warning("Sync repair unlock failed: %s", e)
+                _CYCLE_LOCK.release()
+    except asyncio.CancelledError:
+        # m4 parity with sync_cycle: a cancelled half-repair records
+        # nothing; the inner finallys above already released the locks.
+        cancelled = True
+        raise
     except SyncConfigError as e:
         report.result = "error"
         report.reason = f"not configured: {e}"
@@ -1557,6 +1600,7 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
         report.result = "error"
         report.reason = str(e)[:300]
     finally:
-        report.finished_at = _now_iso()
-        _record_cycle(config, report)
+        if not cancelled:
+            report.finished_at = _now_iso()
+            _record_cycle(config, report)
     return report
