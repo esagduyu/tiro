@@ -114,12 +114,24 @@ def _sidecar_bytes(cfg) -> dict:
 
 
 def _converged(cfg_a, cfg_b):
-    """Identical synced state across the two libraries: article rows,
-    highlight rows (+ anchored note per article uid), and sidecar file
-    sets with byte-identical contents."""
-    arts_sql = ("SELECT uid, title, body_hash, rating, is_read "
-                "FROM articles ORDER BY uid")
+    """Identical synced state across the two libraries: article rows (all
+    five LWW meta fields), source/tag rows + article-tag links, highlight
+    rows (+ anchored note per article uid), and sidecar file sets with
+    byte-identical contents. (S5.9 review Major #1: the oracle must cover
+    the row/link portion of the synced set too — diverged sources/tags/
+    snooze state must not certify as converged.)"""
+    arts_sql = ("SELECT uid, title, body_hash, rating, is_read, "
+                "snoozed_until, opened_count FROM articles ORDER BY uid")
     assert _q(cfg_a, arts_sql) == _q(cfg_b, arts_sql)
+    src_sql = ("SELECT s.uid, s.name, s.source_type, s.is_vip "
+               "FROM sources s JOIN articles a ON a.source_id = s.id "
+               "GROUP BY s.uid ORDER BY s.uid")
+    assert _q(cfg_a, src_sql) == _q(cfg_b, src_sql)
+    tag_sql = ("SELECT t.uid, t.name, a.uid AS article_uid "
+               "FROM tags t JOIN article_tags at ON at.tag_id = t.id "
+               "JOIN articles a ON a.id = at.article_id "
+               "ORDER BY t.uid, a.uid")
+    assert _q(cfg_a, tag_sql) == _q(cfg_b, tag_sql)
     hl_sql = ("SELECT a.uid AS article_uid, h.uid, h.color, "
               "n.body_markdown AS note "
               "FROM highlights h JOIN articles a ON a.id = h.article_id "
@@ -337,15 +349,31 @@ def test_wipe_and_bootstrap_full_restore(rig, tmp_path):
 # --- #6 wrong passphrase — clean refusal -------------------------------------
 
 
-def _backend_files(backend: Path) -> list[str]:
-    return sorted(p.relative_to(backend).as_posix()
-                  for p in backend.rglob("*") if p.is_file())
+def _backend_files(backend: Path) -> list[tuple]:
+    """(relpath, sha256) pairs — byte-level untouched-ness, not just names
+    (S5.9 review Minor #2)."""
+    import hashlib
+
+    return sorted(
+        (p.relative_to(backend).as_posix(),
+         hashlib.sha256(p.read_bytes()).hexdigest())
+        for p in backend.rglob("*") if p.is_file())
 
 
 def test_wrong_passphrase_clean_refusal(rig, tmp_path):
     cfg_a, _cfg_b, backend = rig
-    _ingest(cfg_a, title="Private", url="https://example.com/private")
+    _ingest(cfg_a, title="Private", url="https://example.com/private",
+            body="# Private\n\nQuarterly numbers live here.")
     assert _sync(cfg_a).result == "ok"
+
+    # Ciphertext opacity (S5.9 review Minor #3): with encryption ON, no
+    # backend blob may contain the plaintext title/body — a symmetric no-op
+    # codec regression would pass every round-trip test but fail this.
+    for p in backend.rglob("*"):
+        if p.is_file() and p.name != "format.json":
+            blob = p.read_bytes()
+            assert b"Private" not in blob and b"Quarterly" not in blob, \
+                f"plaintext leaked into backend file {p}"
 
     cfg_x = _second_library(tmp_path, "lib-x")
     _sync_cfg(cfg_x, backend, encrypt="on")
@@ -356,7 +384,7 @@ def test_wrong_passphrase_clean_refusal(rig, tmp_path):
 
     assert result is None  # clean refusal, no exception
     assert _count(cfg_x) == 0
-    assert _backend_files(backend) == files_before  # X wrote NOTHING
+    assert _backend_files(backend) == files_before  # X wrote NOTHING, byte-level
 
 
 # --- #7 corrupted segment — quarantine, not half-apply -----------------------
