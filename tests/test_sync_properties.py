@@ -181,6 +181,23 @@ def test_wire_roundtrip_line_ops(lines, hlc):
 
 @settings(settings.get_profile("sync_pure"))
 @given(st_lines(), st_lines())
+@example(
+    # Pinned counterexample #5 (hypothesis-found 2026-07-17, S6.5 gate
+    # run): two lines identical except note_markdown None vs "   " —
+    # _note_rank collapsed every BLANK note shape to one rank, making
+    # _line_key non-total; _lww_pick then broke the "tie" positionally and
+    # the winner's preserved bytes flipped with argument order. Fixed by
+    # ranking blanks among themselves by canonical form (blank-loses
+    # unchanged).
+    a=[{"uid": HL_UIDS[0], "article_uid": ART_UIDS[0], "quote": "0",
+        "prefix": "", "suffix": "", "position_start": 0, "position_end": 0,
+        "content_hash": "a" * 64, "color": "yellow", "note_markdown": None,
+        "created_at": "2026-07-01T00:00:00Z", "updated_at": None}],
+    b=[{"uid": HL_UIDS[0], "article_uid": ART_UIDS[0], "quote": "0",
+        "prefix": "", "suffix": "", "position_start": 0, "position_end": 0,
+        "content_hash": "a" * 64, "color": "yellow", "note_markdown": "   ",
+        "created_at": "2026-07-01T00:00:00Z", "updated_at": None}],
+)
 def test_merge_jsonl_commutative(a, b):
     assert merge_jsonl(a, b, label_a="x", label_b="y") == \
            merge_jsonl(b, a, label_a="y", label_b="x")

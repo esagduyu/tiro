@@ -621,7 +621,15 @@ def _note_rank(note) -> tuple:
     is blank, in which case nothing is ever blockified), restoring the
     canonical head+sorted-block-set form's grouping independence."""
     if note is None or not str(note).strip():
-        return (0, "", "")
+        # Blanks still order deterministically AMONG THEMSELVES by
+        # canonical form (third hypothesis-found divergence, 2026-07-17,
+        # S6.5 gate run): collapsing every blank shape (None / "" / "   ")
+        # to one identical rank made _line_key non-total — two lines
+        # differing only in blank representation compared EQUAL, and
+        # _lww_pick's >= broke the tie by argument position, flipping the
+        # winner (and its preserved bytes) with fold order. Blank-loses
+        # semantics are unchanged: rank 0 still sits below every real note.
+        return (0, "", canonical_json(note))
     # Rank by the DECOMPOSED HEAD, not the mutated full note (second
     # hypothesis-found divergence, 2026-07-17): folds mutate notes by
     # accruing conflict blocks, and a rebind fold can leave a real note
