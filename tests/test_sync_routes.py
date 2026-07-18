@@ -458,3 +458,20 @@ def test_base_sidebar_has_sync_status_anchor(authenticated_client):
     # `hidden` attribute sits on the same anchor tag as the id.
     anchor_tag = r.text.split('id="sync-status"')[1].split(">")[0]
     assert "hidden" in anchor_tag
+
+
+def test_sidebar_sync_anchor_hidden_attribute_is_effective():
+    """S5.8 review M1: the bare [hidden] attribute loses to the author-origin
+    `.sidebar-footer-item { display: flex }` rule (UA [hidden] is weaker), so
+    without an explicit override the sync anchor would render for everyone,
+    configured or not. Pin the override's presence."""
+    from pathlib import Path
+
+    import tiro
+
+    css = (Path(tiro.__file__).parent / "frontend" / "static"
+           / "styles.css").read_text(encoding="utf-8")
+    idx = css.find(".sidebar-footer-item[hidden]")
+    assert idx != -1, "missing .sidebar-footer-item[hidden] override"
+    rule = css[idx:css.index("}", idx)]
+    assert "display: none" in rule
