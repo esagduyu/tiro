@@ -67,7 +67,7 @@ uv run tiro run            # Start server on localhost:8000 (auto-opens browser)
 uv run tiro run --lan      # Bind to 0.0.0.0 for LAN access — refuses without a password
 ```
 
-Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro import-readwise <json>`, `tiro import-instapaper <csv>`, `tiro import-omnivore <zip>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`, `tiro migrate-library [dest] [--yes]` (copy-then-confirm-never-remove, server stopped — Desktop packaging bullet), `tiro service install|uninstall|status|logs [--follow]` (launchd/systemd run-at-login), `tiro backup [--output|--include-audio]`, `tiro restore <snapshot> [--yes]`, `tiro import <bundle> [--conflicts]`, `tiro agent list|run <name> [--input k=v] [--backfill [--limit N]]`, `tiro evals run [agent] [--real]`, `tiro reconcile [--dry-run] [--json]` (local reconcile engine — sync S1 bullet), `tiro run --cert <path> --key <path>` (both-or-neither; `run.py` accepts the same pair). Tests: `uv run pytest` (1627, must stay 0-warnings) + `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs` (158 + 7 = 165).
+Other CLI verbs: `tiro set-password`, `tiro token create|list|revoke <name/id>`, `tiro doctor [--fix] [--json]` (server stopped), `tiro audit [--date|--month|--service|--json]`, `tiro status`, `tiro delete <id>`, `tiro export`, `tiro import-emails <dir>`, `tiro import-readwise <json>`, `tiro import-instapaper <csv>`, `tiro import-omnivore <zip>`, `tiro setup-email`, `tiro check-email`, `tiro migrate`, `tiro migrate-library [dest] [--yes]` (copy-then-confirm-never-remove, server stopped — Desktop packaging bullet), `tiro service install|uninstall|status|logs [--follow]` (launchd/systemd run-at-login), `tiro backup [--output|--include-audio]`, `tiro restore <snapshot> [--yes]`, `tiro import <bundle> [--conflicts]`, `tiro agent list|run <name> [--input k=v] [--backfill [--limit N]]`, `tiro evals run [agent] [--real]`, `tiro reconcile [--dry-run] [--json]` (local reconcile engine — sync S1 bullet), `tiro sync [--now|--status|--accept-mass-delete]` (BYO sync — status is the default and offline; `--accept-mass-delete` only with `--now`), `tiro sync setup` (interactive backend + encryption ceremony — recovery code shown ONCE, never stored), `tiro sync repair` (typed-confirm backend wipe-and-reseed — Sync engine S5 bullet), `tiro run --cert <path> --key <path>` (both-or-neither; `run.py` accepts the same pair). Tests: `uv run pytest` (1861, must stay 0-warnings) + `node --test tiro/frontend/static/js/tests/*.test.mjs extension/lib.test.mjs` (158 + 7 = 165).
 
 Before starting the server, kill any existing process on port 8000:
 ```bash
@@ -181,6 +181,10 @@ lsof -ti :8000 | xargs kill -9
 | GET | /api/suggestions | List suggestions (`?status=&article_id=`) |
 | POST | /api/suggestions/{uid}/accept | Apply a pending suggestion via its kind's validated writer, then mark accepted (apply-first-resolve-second; failed apply stays pending) |
 | POST | /api/suggestions/{uid}/dismiss | Mark a pending suggestion dismissed (no apply) |
+| GET | /api/settings/sync | Sync status + configuration (secrets and `sync_identity` fixed-width masked, `encrypt_resolved` included) |
+| POST | /api/settings/sync | Validated settings update (omitted field = unchanged, posted mask/empty secret = keep stored); typed `{"confirm_unencrypted": "UNENCRYPTED"}` guards the plaintext-on-network END STATE (not just the downgrade transition); dynamic scheduler restart (imap pattern) |
+| POST | /api/sync/now | Run one sync cycle now; 409 `sync_running` while one runs in-process; optional `{accept_mass_delete}` one-shot guard acceptance |
+| POST | /api/sync/repair | Typed `{"confirm": "REPAIR"}` — wipes the backend's sync state (keeping format.json byte-identical) and re-seeds from THIS device |
 
 ## Current Status
 
@@ -202,7 +206,7 @@ lsof -ti :8000 | xargs kill -9
 
 **Phase 6 — Agent runtime: K1+K2+K3+K4 COMPLETE ON BRANCH (`phase-6-k4-contradiction`, stacked on `phase-6-k3-personas`), unmerged** — the runtime kernel and the migration of all four AI features onto it landed on `main` 2026-07-11 (K1+K2, migration 014 `agent_runs`, STATIC_VERSION 69). K3 (personas + structural sandbox + suggestions, migration 017, STATIC_VERSION 70) closed out on the `phase-6-k3-personas` worktree branch 2026-07-16; K4 (ContradictionDetector + on-ingest hooks, NO new migration, no frontend change) closed out stacked on it the same day — 1368 pytest (0 warnings) + 165 node, ruff clean — but is **not yet merged to `main`**: the coordinator merges after sync S2's migration 016 lands on main first (D17 ruling — migration 016 is deliberately absent on this branch so numbers don't collide). `tiro/agents/` holds the `TiroAgent`/`AgentContext` contract, `run_agent()` with per-run JSONL traces under `{library}/agents/traces/`, replay, an `/agents` page, and an evals harness (`tiro evals`, `tiro agent`). MetadataExtractor/PreferenceClassifier/DigestWriter/IngenuityAnalyst run through it behavior-identically (golden transcript tests pin prompt bytes; `extract_metadata`/`classify_articles`/`generate_digest`/`analyze_article` stay as zero-churn compat wrappers). K3 adds `{library}/personas/*.md` — untrusted, community-shareable prompt templates over scope-derived read-only contexts, suggest-only writes, no network tool — plus the `suggestions` table/accept-dismiss flow and `/agents` persona management; see the **Personas & suggestions (Phase 6 K3)** conventions bullet below. K4 adds the `contradiction-detector` agent, the on-ingest hook infrastructure (which also dispatches article-scope `schedule: on-ingest` personas), the contradiction accept applier, the backfill CLI, and the six spec eval pairs; see the **ContradictionDetector & on-ingest hooks (Phase 6 K4)** conventions bullet below. **Remaining before 0.8.0:** merge to main (post-S2, per D17). Kernel contract is FROZEN as of K3.
 
-**Phase 7a — BYO sync: IN PROGRESS (S1 MERGED to `main`, unreleased; S2 started)** — S1, the local reconcile engine (the absorbed Phase 2b), landed 2026-07-11 (branch `sync-s1-reconcile`, migration 015 `body_hash`/`meta_updated_at`/`sources.uid`). External edits to the library reconcile into SQLite/Chroma/anchors, conflict files preserve losing versions, external files ingest as `ingestion_method='external'`, external deletes run through `delete_article` under the mass-delete guard; `tiro reconcile` CLI + a scheduler task (`reconcile_interval_s`). See the **Local reconcile engine (sync S1, absorbed Phase 2b)** conventions bullet below. S2 (pure merge core, migration 016 `sync_shadow`) is COMPLETE on branch `sync-s2-merge-core` (journal/manifest/merge + the hypothesis property suite — see the **Sync pure merge core (S2)** conventions bullet below; owner-review items in decisions log D26). **Remaining before 0.9.0:** S3–S6 (format/crypto, adapters, engine loop, hardening). Full plans banked. **The v1.0.0 go/no-go gate** = S2's hypothesis property suite + S5's multi-device integration suite both green — never shaved; if not green, ship 0.9.0-beta with sync opt-in and slip 1.0.
+**Phase 7a — BYO sync: IN PROGRESS (S1+S2+S3+S4 MERGED to `main`, unreleased; S5 COMPLETE on branch `sync-s5-engine`)** — S1, the local reconcile engine (the absorbed Phase 2b), landed 2026-07-11 (branch `sync-s1-reconcile`, migration 015 `body_hash`/`meta_updated_at`/`sources.uid`). External edits to the library reconcile into SQLite/Chroma/anchors, conflict files preserve losing versions, external files ingest as `ingestion_method='external'`, external deletes run through `delete_article` under the mass-delete guard; `tiro reconcile` CLI + a scheduler task (`reconcile_interval_s`). See the **Local reconcile engine (sync S1, absorbed Phase 2b)** conventions bullet below. S2 (pure merge core, migration 016 `sync_shadow` — journal/manifest/merge + the hypothesis property suite; see the **Sync pure merge core (S2)** conventions bullet below, owner-review items in decisions log D26), S3 (age encryption + backend blob format, no product surface), and S4 (filesystem/S3/WebDAV storage adapters + shared conformance suite) are all merged. S5 — the impure engine loop (pull-merge-push cycle, migration 018 `sync_state`), the product surface (`tiro sync` CLI with the recovery-code setup ceremony, `GET/POST /api/settings/sync` + `POST /api/sync/now|repair`, settings sync card + sidebar status dot, scheduler `PeriodicTask("sync")`), and the multi-device integration suite — is COMPLETE on branch `sync-s5-engine`; see the **Sync engine (S5)** conventions bullet below. **Remaining before 0.9.0:** S6 (hardening). Full plans banked. **The v1.0.0 go/no-go gate** = S2's hypothesis property suite + S5's multi-device integration suite (`tests/test_sync_multidevice.py`) both green — never shaved; if not green, ship 0.9.0-beta with sync opt-in and slip 1.0.
 
 **Path to v1.0** (the current campaign — 1.0 = the local-complete product = 0.7 + Phase 6 + Phase 7a; Tiro Cloud 7b is post-1.0). **Start any resuming session at the coordinator handoff runbook: `docs/plans/2026-07-11-campaign-handoff-runbook.md`** — it carries the ladder, per-milestone plan index, merge protocol, guardrails, failure playbooks, and decision authority. Remaining milestones each have a full decision-complete plan under `docs/plans/` (all local-only/gitignored): K3 `2026-07-10-agents-k3-plan.md`, K4 `2026-07-11-agents-k4-contradiction-plan.md`, S2 `2026-07-10-sync-s2-merge-core-plan.md`, S3 `2026-07-11-sync-s3-format-crypto-plan.md`, S4 `2026-07-11-sync-s4-adapters-plan.md`, S5 `2026-07-11-sync-s5-engine-plan.md`, S6 `2026-07-11-sync-s6-hardening-plan.md`. Campaign decision log (D1–D15) + owner-review items: `docs/plans/2026-07-10-overnight-decisions.md`. Migrations pre-assigned 014–018 (014 K1 ✅, 015 S1 ✅, 016 S2, 017 K3 ✅ on branch/unmerged, 018 S5). Version tags are **owner-only** (0.8.0 / 0.9.0 / v1.0.0).
 
@@ -301,6 +305,59 @@ lsof -ti :8000 | xargs kill -9
   gained the value `'sync'` for remote-materialized articles. sync_shadow is
   derived/rebuildable state — excluded from export and never
   doctor-reconciled.
+- **Sync engine (S5):** `tiro/sync/engine.py` is the ONE impure orchestrator
+  over the pure S2/S3 modules and the S4 adapters. Cycle = S1 reconcile FIRST
+  (pull-side merge decisions read the local DB census — an unreconciled
+  external edit would let a remote tombstone blind-delete an edited file) →
+  empty-library auto-bootstrap (ONLY zero-article + never-pushed: empty
+  watermarks AND last_seq 0 + a backend snapshot exists, D-S5-3 — materialize
+  the latest snapshot so covers-derived watermarks defeat the gap refusal on
+  GC'd history) → pull (per-device journal watermarks; journal-GAP refusal;
+  quarantine on QUARANTINE_ERRORS → `needs_attention` with the watermark
+  HELD, never a half-apply; alias remap per segment with a capped
+  visited-set chain walk; mass-delete guard always armed, acceptance
+  (`--accept-mass-delete` / `{accept_mass_delete}`) is ONE-SHOT — consumed
+  by a single guard trip, a second guarded segment stops the pull again) →
+  push (FROZEN crash-safety order: objects → journal segment → device doc →
+  local last_seq THEN shadow LAST; backend-max seq allocation makes every
+  crash window a duplicate, never an overwrite) → compaction/GC ONLY under a
+  confirmed backend lock (object GC computes liveness from a LIST snapshot —
+  lockless GC would delete a concurrent pusher's objects-before-segment
+  window; `plan_gc` warnings surface on the report). Per-cycle format.json
+  encryption PIN: the LOCAL `resolve_encryption` is the authority (format.json
+  is plaintext/unauthenticated) — a disagreeing backend doc refuses BEFORE any
+  codec/identity is touched; plaintext auto-init happens ONLY on a fully
+  EMPTY backend (data-without-format.json refuses as tamper/partial copy);
+  encrypted init is setup-ceremony-only (`init_backend`). Concurrency is
+  two-layer: threading `_CYCLE_LOCK` (in-process; last_cycle recorded
+  before release, the lock-skip branch and a CANCELLED cycle record
+  nothing) + the backend advisory lock (cross-process; pull/push survive
+  lockless — per-device journals — GC never); bootstrap/repair take BOTH
+  and repair is NEVER lockless. Repair keeps format.json BYTE-IDENTICAL
+  (other devices keep decrypting) and derives-before-it-destroys; other
+  devices epoch-detect via their own vanished device doc and reset for a
+  full re-diff/re-push (`clear_shadow` preserves alias + metats rows).
+  `sync_identity` is a SECRET in config.yaml (fixed-width masked, never
+  returned by the API; recovery code printed exactly once by `tiro sync
+  setup`, never stored by Tiro). Typed confirms: `REPAIR` (CLI + route) and
+  `UNENCRYPTED` with END-STATE semantics — any settings write LANDING on
+  plaintext-over-a-network-backend needs it, not just the downgrade
+  transition (idempotent re-save of an already-plaintext network config is
+  ceremony-free). `sync_encrypt` refuses unknown values (`auto|on|off`;
+  auto = off for filesystem, ON for s3/webdav); any posted string YAML 1.1
+  would re-read as a boolean (`on`/`off`/a bucket literally named "no")
+  persists through `yaml_quote` or it round-trips as a bool. Migration 018
+  `sync_state` (device registry/watermarks; partial unique index on the
+  is_self=1 row guards the identity mint race) is the campaign's LAST
+  reserved migration number. All backend IO flows through the one
+  `AuditedAdapter` surface (uniform audit lines, `bytes_in` recorded on
+  get). Sidecar conflict files dedupe by CONTENT, so segment replay after a
+  held watermark can't multiply them. `sqlite3.OperationalError` re-raises
+  out of apply — a retryable cycle "error" with the watermark held; the
+  next cycle re-applies the whole segment idempotently.
+  `tests/test_sync_multidevice.py` (FilesystemAdapter + encryption ON, all
+  spec-§9 scenarios) is the SECOND half of the v1.0.0 go/no-go gate —
+  never weakened, alongside S2's property suite.
 
 ## Playwright MCP
 
