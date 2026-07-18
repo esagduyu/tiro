@@ -1439,3 +1439,233 @@ def test_cli_argv_shape_parses_to_expected_dests(monkeypatch):
     monkeypatch.setattr("sys.argv", ["tiro", "sync", "repair"])
     cli.main()
     assert captured["args"].sync_cmd == "repair"
+
+
+# --- S6.6: mid-cycle advisory-lock renewal (D-S6-4; fixes D-S5-7a) -----------
+
+
+def _renewer_rig(tmp_path):
+    """(lock_path, adapter, renewer): bare filesystem adapter (no config —
+    built-in audit no-ops) + a renewer that believes it holds the lock."""
+    from tiro.sync.adapters.filesystem import FilesystemAdapter
+
+    backend = tmp_path / "renew-backend"
+    (backend / "locks").mkdir(parents=True, exist_ok=True)
+    adapter = FilesystemAdapter(backend, device_id="dev-renewer")
+    renewer = engine._LockRenewer(adapter, "dev-renewer", held=True)
+    return backend / LOCK_KEY, adapter, renewer
+
+
+def test_lock_renewer_no_op_before_interval_and_when_not_held(tmp_path):
+    """tick() is a no-op before LOCK_TTL_S/3 has elapsed, and ALWAYS a
+    no-op when the lock isn't held (lockless cycle) — no read, no put."""
+    lock_path, adapter, renewer = _renewer_rig(tmp_path)
+    payload = make_lock_payload("dev-renewer", engine.LOCK_TTL_S)
+    lock_path.write_bytes(payload)
+
+    asyncio.run(renewer.tick())  # timer fresh from construction
+    assert lock_path.read_bytes() == payload  # byte-untouched
+
+    idle = engine._LockRenewer(adapter, "dev-renewer", held=False)
+    idle._last -= engine.LOCK_TTL_S  # interval elapsed — but not held
+    asyncio.run(idle.tick())
+    assert lock_path.read_bytes() == payload
+    assert idle.stolen is False
+
+
+def test_lock_renewer_renews_own_lock_and_resets_timer(tmp_path):
+    """After the interval, a lock still owned by us is re-put with a FRESH
+    acquired_at, and the timer resets (the very next tick no-ops again)."""
+    import json
+
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    old_stamp = datetime.now(UTC) - timedelta(seconds=100)
+    lock_path.write_bytes(make_lock_payload(
+        "dev-renewer", engine.LOCK_TTL_S, now=old_stamp))
+    renewer._last -= engine.LOCK_TTL_S / 3  # interval elapsed
+
+    asyncio.run(renewer.tick())
+
+    data = json.loads(lock_path.read_bytes())
+    assert data["device_id"] == "dev-renewer"
+    assert data["ttl_s"] == engine.LOCK_TTL_S
+    acquired = datetime.fromisoformat(data["acquired_at"])
+    assert acquired > old_stamp + timedelta(seconds=50)  # advanced
+    assert renewer.stolen is False
+    refreshed = lock_path.read_bytes()
+    asyncio.run(renewer.tick())  # timer reset: immediate re-tick no-ops
+    assert lock_path.read_bytes() == refreshed
+
+
+def test_lock_renewer_stops_when_lock_owned_by_another_device(tmp_path):
+    """A lock now owned by ANOTHER device is NEVER clobbered: no put,
+    renewer marked stolen, and renewal stays off for the rest of the cycle
+    even across further elapsed intervals."""
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    foreign = make_lock_payload(STALE_DEVICE, engine.LOCK_TTL_S)
+    lock_path.write_bytes(foreign)
+    renewer._last -= engine.LOCK_TTL_S
+
+    asyncio.run(renewer.tick())
+
+    assert renewer.stolen is True
+    assert lock_path.read_bytes() == foreign  # never clobbered
+    # Permanently stopped for this cycle — even a lock that reads as ours
+    # again is left alone once stolen.
+    ours = make_lock_payload("dev-renewer", engine.LOCK_TTL_S,
+                             now=datetime.now(UTC) - timedelta(seconds=100))
+    lock_path.write_bytes(ours)
+    renewer._last -= engine.LOCK_TTL_S
+    asyncio.run(renewer.tick())
+    assert lock_path.read_bytes() == ours  # no re-put
+
+
+def test_lock_renewer_vanished_lock_marks_stolen(tmp_path):
+    """A lock file that VANISHED mid-cycle gets the same stolen handling:
+    nothing re-minted, renewal off for the rest of the cycle."""
+    lock_path, _adapter, renewer = _renewer_rig(tmp_path)
+    renewer._last -= engine.LOCK_TTL_S
+
+    asyncio.run(renewer.tick())
+
+    assert renewer.stolen is True
+    assert not lock_path.exists()  # nothing re-minted
+    asyncio.run(renewer.tick())  # subsequent ticks stay no-ops
+    assert not lock_path.exists()
+
+
+def test_lock_renewer_wired_into_push_and_snapshot_upload(
+        tmp_path, initialized_library, monkeypatch):
+    """Wiring smoke (D-S6-4): a real cycle pushing several articles ticks
+    the renewer in BOTH long-upload loops — once per object in _push and
+    once per address in _upload_snapshot (the first cycle against an empty
+    backend always snapshots, covering the compaction path)."""
+    calls = {"n": 0}
+    orig = engine._LockRenewer.tick
+
+    async def counting_tick(self):
+        calls["n"] += 1
+        return await orig(self)
+
+    monkeypatch.setattr(engine._LockRenewer, "tick", counting_tick)
+
+    backend = tmp_path / "renew-wiring-backend"
+    cfg = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg.sync_enabled = True
+    for i in range(3):
+        _ingest(cfg, title=f"Renew {i}", body=f"# Renew {i}\n\nBody {i}.",
+                url=f"https://example.com/renew-{i}")
+
+    report = _sync(cfg)
+
+    assert report.result == "ok"
+    assert report.pushed_objects >= 3      # _push's objects loop ran
+    assert list(backend.glob("snapshots/*/*"))  # snapshot uploaded too
+    # One tick per _push object + one per snapshot address: strictly more
+    # ticks than push objects proves the _upload_snapshot loop is wired,
+    # not just _push's.
+    assert calls["n"] > report.pushed_objects
+
+
+# --- S6.6: corrupt LATEST snapshot blocks compaction LOUDLY (D-S6-7) ---------
+
+
+def test_corrupt_latest_snapshot_surfaces_compaction_blockage(
+        seeded_backend, capsys):
+    """D-S6-7 (S5 flag): a corrupt/undecryptable LATEST snapshot used to
+    raise into _maybe_compact's catch-all as a generic "compaction skipped"
+    every cycle forever. Now the warning is DISTINCT — names the snapshot,
+    says compaction is blocked, points at `tiro sync repair` — the cycle
+    stays "ok" (contract unchanged), and the warning is visible in doctor's
+    sync section AND `tiro sync` status output."""
+    cfg_a, _backend, manifests = seeded_backend
+    manifests[-1].write_bytes(CORRUPTION)
+
+    report = _sync(cfg_a)
+
+    assert report.result == "ok"  # compaction blockage never fails a cycle
+    blocked = [w for w in report.warnings if "compaction blocked" in w]
+    assert len(blocked) == 1
+    assert "corrupt" in blocked[0]
+    assert "latest snapshot" in blocked[0]
+    assert "tiro sync repair" in blocked[0]
+    # NOT the generic catch-all shape it used to drown in.
+    assert not any(w.startswith("compaction skipped:")
+                   for w in report.warnings)
+
+    # Doctor's sync section carries it in cycle_warnings (S6.2/S6.3 path).
+    section = doctor_scan(cfg_a)["sync"]
+    assert any("compaction blocked" in w for w in section["cycle_warnings"])
+
+    # And `tiro sync` (status branch, no network) prints it.
+    cmd_sync(Args(cfg_a))
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "compaction blocked" in out
+    assert "tiro sync repair" in out
+
+
+# --- S6.6: newline-posture pin (D-S6-5; closes the D-S5-4 flag) --------------
+
+
+def test_crlf_external_edit_converges_lf_without_conflict(
+        tmp_path, initialized_library):
+    """PINS D-S6-5's ACCEPTED posture (closing the D-S5-4 flag): file-space
+    hashes stay in newline-TRANSLATED space (read_text universal newlines)
+    — self-consistent and convergent; switching spaces would phantom-
+    conflict every CRLF file at upgrade. Accepted consequence, pinned here:
+    an externally-edited CRLF article that round-trips through sync apply
+    is rewritten LF on the RECEIVING side (the editing device's own file
+    keeps its CRLF bytes — S1 never rewrites an externally-owned file);
+    NO conflict is minted anywhere and convergence is STABLE (no
+    ping-pong)."""
+    backend = tmp_path / "crlf-backend"
+    cfg_a = _sync_cfg(initialized_library, backend, encrypt="off")
+    cfg_a.sync_enabled = True
+    _ingest(cfg_a, title="Alpha", body="# Alpha\n\nBody one.",
+            url="https://example.com/crlf-alpha")
+    assert _sync(cfg_a).result == "ok"
+
+    cfg_b = _second_library(tmp_path, "lib-crlf-b")
+    _sync_cfg(cfg_b, backend, encrypt="off")
+    cfg_b.sync_enabled = True
+    assert _sync(cfg_b).result == "ok"  # auto-bootstrap (D-S5-3)
+    assert _titles(cfg_b) == {"Alpha"}
+
+    # External CRLF edit on A: a Windows-flavored editor changes the body
+    # AND rewrites the whole file with \r\n endings.
+    path_a = next(p for p in cfg_a.articles_dir.glob("*.md")
+                  if not p.name.startswith("."))
+    text = path_a.read_text(encoding="utf-8")
+    assert "\r" not in text
+    edited = text.replace("Body one.", "Body edited externally.")
+    assert edited != text
+    path_a.write_bytes(edited.replace("\n", "\r\n").encode("utf-8"))
+
+    assert _sync(cfg_a).result == "ok"  # cycle's own reconcile censuses it
+    rb = _sync(cfg_b)
+    assert rb.result == "ok"
+    assert rb.applied > 0
+
+    # (1) bodies equal modulo newline translation: A keeps CRLF bytes on
+    # disk, B's applied copy is written LF.
+    assert b"\r\n" in path_a.read_bytes()
+    path_b = next(p for p in cfg_b.articles_dir.glob("*.md")
+                  if not p.name.startswith("."))
+    assert b"\r" not in path_b.read_bytes()
+    body_a = frontmatter.load(str(path_a)).content  # translated read
+    body_b = frontmatter.load(str(path_b)).content
+    assert "Body edited externally." in body_b
+    assert body_a == body_b
+
+    # (2) NO conflict file minted on either side.
+    for cfg in (cfg_a, cfg_b):
+        assert not list(cfg.library.rglob("*conflict*"))
+
+    # (3) convergence is STABLE — a further cycle pair moves nothing (the
+    # translated-space hash is what both sides agree on; no ping-pong).
+    ra2, rb2 = _sync(cfg_a), _sync(cfg_b)
+    assert ra2.result == "ok" and rb2.result == "ok"
+    assert ra2.pushed_ops == 0 and ra2.applied == 0
+    assert rb2.pushed_ops == 0 and rb2.applied == 0
+    assert b"\r\n" in path_a.read_bytes()  # A's file still untouched

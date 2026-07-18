@@ -17,6 +17,7 @@ import platform
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import asdict, dataclass
 from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
@@ -651,6 +652,67 @@ async def clear_stale_lock(config: TiroConfig, adapter) -> bool:
     return True
 
 
+class _LockRenewer:
+    """Mid-cycle advisory-lock renewal (S6.6, D-S6-4; fixes D-S5-7a).
+
+    LOCK_TTL_S = 120 with no renewal meant a >120s push (large library
+    over WebDAV/S3) let another device steal the expired lock and run
+    compaction/GC against the slow pusher's objects-before-segment window
+    — the late segment then referenced deleted objects and every puller
+    quarantined. The engine's two long upload loops (_push's objects loop
+    and _upload_snapshot's addresses loop) call tick() per iteration; the
+    renewer uses only the FROZEN adapter verbs (get/put on LOCK_KEY) — no
+    adapter-contract change.
+
+    tick() semantics: no-op when the lock isn't held (lockless/skipped
+    cycle) or when less than LOCK_TTL_S/3 has elapsed since acquire/last
+    renewal (time.monotonic). Otherwise the lock is re-read: still ours ->
+    re-put with a fresh acquired_at and the timer resets; owned by ANOTHER
+    device or vanished -> marked stolen and renewal stops PERMANENTLY for
+    this cycle (never clobber another device's lock — the protocol
+    tolerates lockless; warned once). Best-effort throughout: a failing
+    renewal read/put logs and retries after the next interval, never
+    raising into the upload loop it protects."""
+
+    def __init__(self, adapter, device_id: str, held: bool):
+        self.adapter = adapter
+        self.device_id = device_id
+        self.held = held
+        self.stolen = False
+        self._last = time.monotonic()
+
+    async def tick(self) -> None:
+        if not self.held or self.stolen:
+            return
+        if time.monotonic() - self._last < LOCK_TTL_S / 3:
+            return
+        from tiro.sync.adapters.base import (
+            LOCK_KEY,
+            lock_owner,
+            make_lock_payload,
+        )
+
+        try:
+            raw = await _get_or_none(self.adapter, LOCK_KEY)
+            owner = lock_owner(raw) if raw is not None else None
+            if owner != self.device_id:
+                self.stolen = True
+                logger.warning(
+                    "Sync lock renewal: lock %s mid-cycle — renewal stops "
+                    "for this cycle (never clobbering another device's "
+                    "lock; the protocol tolerates lockless)",
+                    "vanished" if raw is None
+                    else f"now owned by device {owner}")
+                return
+            await self.adapter.put(
+                LOCK_KEY, make_lock_payload(self.device_id, LOCK_TTL_S))
+        except Exception as e:
+            logger.warning(
+                "Sync lock renewal failed (retrying after the next "
+                "interval): %s", e)
+        self._last = time.monotonic()
+
+
 def update_remote_wall(config: TiroConfig, device_id: str,
                        last_wall_ms: int) -> None:
     """UPDATE-only wall-clock tracker for a REMOTE device's registry row.
@@ -1192,7 +1254,7 @@ async def _put_device_doc(config: TiroConfig, adapter, device_id: str,
 
 
 async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
-                report: CycleReport) -> None:
+                report: CycleReport, *, renewer=None) -> None:
     """Derive + push local changes (spec §6.4). The upload order is FROZEN
     crash-safety ordering: objects FIRST -> journal segment -> device doc ->
     LOCAL state (last_seq then shadow) LAST. A crash anywhere leaves either
@@ -1234,6 +1296,8 @@ async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
         return
     seg_blob, obj_blobs = encode_segment(all_ops, codec)
     for h in sorted(obj_blobs):  # 1. objects FIRST
+        if renewer is not None:  # D-S6-4: long uploads renew the lock
+            await renewer.tick()
         await adapter.put(object_key(h), obj_blobs[h])
         report.pushed_objects += 1
     # Backend-aware seq allocation (review B1): a crash after the segment
@@ -1272,13 +1336,13 @@ async def _push(config: TiroConfig, adapter, codec, clock, clock_state: dict,
 
 
 async def _maybe_compact(config: TiroConfig, adapter, codec,
-                         report: CycleReport) -> None:
+                         report: CycleReport, *, renewer=None) -> None:
     """Best-effort snapshot + GC (spec §6.5): ANY failure defers the whole
     compaction to a later cycle with a warning — including build_snapshot's
     SnapshotError on an unreadable entry (the S3 obligation 'defer the cycle
     or exclude consciously': we DEFER). Never fails the cycle."""
     try:
-        await _compact(config, adapter, codec, report)
+        await _compact(config, adapter, codec, report, renewer=renewer)
     except Exception as e:
         logger.warning("Sync compaction skipped: %s", e)
         report.warnings.append(f"compaction skipped: {e}")
@@ -1319,9 +1383,12 @@ async def _derive_local_snapshot(config: TiroConfig, device_id: str,
 
 
 async def _upload_snapshot(adapter, codec, snapshot_id: str, doc_text: str,
-                           addresses, bodies_by_address: dict) -> int:
+                           addresses, bodies_by_address: dict, *,
+                           renewer=None) -> int:
     """Upload a derived snapshot plan — objects FIRST, then the doc (the
-    frozen crash-safety ordering). Returns the objects-uploaded count."""
+    frozen crash-safety ordering). Returns the objects-uploaded count.
+    `renewer=None` = no mid-upload lock renewal (pure callers/tests
+    unchanged — D-S6-4)."""
     from tiro.sync.snapshot import (
         SnapshotError,
         encode_object,
@@ -1332,6 +1399,8 @@ async def _upload_snapshot(adapter, codec, snapshot_id: str, doc_text: str,
 
     uploaded = 0
     for address in sorted(addresses):
+        if renewer is not None:  # D-S6-4: long uploads renew the lock
+            await renewer.tick()
         h, blob = encode_object(bodies_by_address[address], codec)
         if h != address:  # pragma: no cover - encode_object is deterministic
             raise SnapshotError(f"object hash drift for {address!r}")
@@ -1343,7 +1412,8 @@ async def _upload_snapshot(adapter, codec, snapshot_id: str, doc_text: str,
 
 
 async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
-                                 device_id: str, covers: dict):
+                                 device_id: str, covers: dict, *,
+                                 renewer=None):
     """Build a snapshot of the CURRENT full local state and upload it —
     derive then upload (see the two halves above). Returns
     (snapshot_id, objects_uploaded, manifest). Raises SnapshotError when a
@@ -1355,13 +1425,15 @@ async def _upload_local_snapshot(config: TiroConfig, adapter, codec,
     snapshot_id, doc_text, addresses, bodies_by_address, manifest = (
         await _derive_local_snapshot(config, device_id, covers))
     uploaded = await _upload_snapshot(adapter, codec, snapshot_id, doc_text,
-                                      addresses, bodies_by_address)
+                                      addresses, bodies_by_address,
+                                      renewer=renewer)
     return snapshot_id, uploaded, manifest
 
 
 async def _compact(config: TiroConfig, adapter, codec,
-                   report: CycleReport) -> None:
+                   report: CycleReport, *, renewer=None) -> None:
     from tiro.sync.snapshot import (
+        QUARANTINE_ERRORS,
         decode_snapshot,
         parse_device_doc,
         parse_journal_key,
@@ -1381,8 +1453,23 @@ async def _compact(config: TiroConfig, adapter, codec,
     covers: dict[str, int] = {}
     created_at: str | None = None
     if snap_ids:
-        latest = decode_snapshot(
-            await adapter.get(snapshot_key(snap_ids[-1])), codec)
+        # D-S6-7 (S5 flag): a corrupt/undecryptable LATEST snapshot would
+        # otherwise raise into _maybe_compact's catch-all as a generic
+        # "compaction skipped: ..." every cycle FOREVER, with nothing
+        # telling the user the snapshot is broken or that repair rebuilds
+        # it. Surface it distinctly, naming the snapshot and the remedy;
+        # handled here (warning + return) so the cycle contract is
+        # unchanged — compaction is blocked, the cycle never fails.
+        try:
+            latest = decode_snapshot(
+                await adapter.get(snapshot_key(snap_ids[-1])), codec)
+        except QUARANTINE_ERRORS as e:
+            msg = (f"latest snapshot {snap_ids[-1]} is corrupt ({e}) — "
+                   "compaction blocked; run 'tiro sync repair' on a "
+                   "healthy device to rebuild it")
+            logger.warning("Sync compaction: %s", msg)
+            report.warnings.append(msg)
+            return
         covers = latest.covers
         created_at = latest.created_at
 
@@ -1414,7 +1501,7 @@ async def _compact(config: TiroConfig, adapter, codec,
     covers_new = {device_id: (state["self"] or {}).get("last_seq") or 0,
                   **state["watermarks"]}
     snapshot_id, _uploaded, _manifest = await _upload_local_snapshot(
-        config, adapter, codec, device_id, covers_new)
+        config, adapter, codec, device_id, covers_new, renewer=renewer)
 
     # 5. Journal/snapshot GC — plan_gc is pure, the engine executes it and
     # SURFACES its warnings to status (S3 obligation #6).
@@ -1544,6 +1631,12 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                 device_id, _ = get_or_create_device(config)
                 clock = HLCClock(device_id)
                 clock_state: dict = {}
+                # D-S6-4: renew the advisory lock during long uploads.
+                # held=False (lockless got_lock=None) makes every tick a
+                # no-op — the protocol tolerates lockless, and there is
+                # no lock to keep alive.
+                renewer = _LockRenewer(adapter, device_id,
+                                       held=got_lock is True)
                 # Spec §6.3: the S1 reconcile pass runs FIRST — before the
                 # PULL, not just before the push diff (S5.9 gate fix,
                 # scenario 4). Pull-side merge decisions compare remote ops
@@ -1594,7 +1687,7 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                                  skip_epoch_check=just_bootstrapped)
                 if ok:
                     await _push(config, adapter, codec, clock, clock_state,
-                                report)
+                                report, renewer=renewer)
                     # M2: NEVER compact/GC in lockless mode. Per-device
                     # journals make push/pull lock-free-safe, but object GC
                     # computes liveness from a LIST snapshot — a concurrent
@@ -1603,7 +1696,8 @@ async def sync_cycle(config: TiroConfig, adapter=None, *,
                     # best-effort anyway; skipping it under lock uncertainty
                     # (got_lock is None) costs nothing.
                     if got_lock is True:
-                        await _maybe_compact(config, adapter, codec, report)
+                        await _maybe_compact(config, adapter, codec, report,
+                                             renewer=renewer)
             finally:
                 if got_lock:
                     try:
@@ -1940,6 +2034,9 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
                     device_id, _name = get_or_create_device(config)
                     clock = HLCClock(device_id)
                     clock_state: dict = {}
+                    # D-S6-4: bootstrap holds the backend lock (got is
+                    # True here), so its push renews too.
+                    renewer = _LockRenewer(adapter, device_id, held=True)
                     # Bootstrap trusts the backend's state wholesale:
                     # the journal tail may legitimately mass-delete
                     # relative to the snapshot. skip_epoch_check: our
@@ -1951,7 +2048,7 @@ async def bootstrap(config: TiroConfig, adapter) -> CycleReport:
                                      skip_epoch_check=True)
                     if ok:
                         await _push(config, adapter, codec, clock,
-                                    clock_state, report)
+                                    clock_state, report, renewer=renewer)
                 finally:
                     try:
                         await adapter.unlock()
@@ -2039,6 +2136,11 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
         else:
             try:
                 device_id, name = get_or_create_device(config)
+                # D-S6-4: repair holds the backend lock — the re-seed
+                # upload (the LONGEST upload in the protocol) renews it.
+                # Constructed HERE so the renewal timer starts at
+                # (roughly) lock-acquire time, not after a long derive.
+                renewer = _LockRenewer(adapter, device_id, held=True)
                 # Derivation FIRST (M2), reconcile before it (spec
                 # §6.3 parity with _push) so the epoch seed captures
                 # external edits. covers={} deliberately: the
@@ -2056,7 +2158,7 @@ async def repair(config: TiroConfig, adapter) -> CycleReport:
                         await adapter.delete(key)
                 uploaded = await _upload_snapshot(
                     adapter, codec, snapshot_id, doc_text, addresses,
-                    bodies_by_address)
+                    bodies_by_address, renewer=renewer)
                 report.pushed_objects += uploaded
                 update_self_state(config, last_seq=0, watermarks={})
                 await _put_device_doc(config, adapter, device_id,

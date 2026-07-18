@@ -1026,6 +1026,15 @@ def cmd_sync(args):
               f"{last.get('finished_at') or '?'} — "
               f"applied {last.get('applied', 0)}, "
               f"pushed {last.get('pushed_ops', 0)}")
+        # Non-skew last-cycle warnings (S6.6, D-S6-7): a blocked compaction
+        # (corrupt latest snapshot) etc. must be visible from status, not
+        # only from --now's live report. "clock skew:" lines are skipped —
+        # they ride load_sync_status's deduped warnings below (mirroring
+        # doctor's S6.3-fix clock_skew/cycle_warnings split).
+        for warning in last.get("warnings") or []:
+            if isinstance(warning, str) and warning.startswith("clock skew:"):
+                continue
+            print(f"  warning: {warning}")
     else:
         print("Last cycle: never")
     for row in state["devices"]:

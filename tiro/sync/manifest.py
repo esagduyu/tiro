@@ -135,7 +135,10 @@ def _fields_hash(fields: dict) -> str:
 
 def _read_text(path: Path) -> str | None:
     # Explicit utf-8: sync hashes must be byte-stable across devices and
-    # platforms — never locale-dependent.
+    # platforms — never locale-dependent. read_text's universal-newline
+    # translation is DELIBERATE (D-S6-5): file-space hashes live in
+    # newline-TRANSLATED space, so a CRLF file syncs (and converges
+    # remotely) as LF instead of phantom-conflicting at every upgrade.
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
